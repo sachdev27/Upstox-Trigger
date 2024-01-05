@@ -34,8 +34,11 @@ def update_env_file(file_path, key, new_value):
 
 
 def login_and_authorize(api_instance,api_version, client_id, client_secret, redirect_uri, auth_code):
-    api_response = api_instance.token(api_version, code=auth_code, client_id=client_id,
-                                      client_secret=client_secret, redirect_uri=redirect_uri, grant_type="authorization_code")
+    try:
+        api_response = api_instance.token(api_version, code=auth_code, client_id=client_id,
+                                        client_secret=client_secret, redirect_uri=redirect_uri, grant_type="authorization_code")
+    except Exception as e:
+        logging.error(e)
     return api_response.access_token
 
 
@@ -62,4 +65,3 @@ def is_token_expired():
     if token_expired(ACCESS_TOKEN):
         tkn = set_token(api_instance=api_instance)
         configuration.access_token = tkn
-
