@@ -66,7 +66,7 @@ After succesfull login, you will be redirected and the flask app will replace th
 
 - Now You can run the Main or the Websocket_Market File to get the Live Market data
 
-- These file check token first and if it got expired, then replace the token with the new one.
+- These file check token first and if it got expired, then automatically replace the token with the new one.
 
 ### Run Main Python File:
 
