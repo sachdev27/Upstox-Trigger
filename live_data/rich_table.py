@@ -19,6 +19,9 @@ def options_table_from_csv(option_type, instrument_name, ltp_range, csv_filename
     table.add_column("Instrument Token", style="bold")
     table.add_column("Trading Symbol", style="bold")
     table.add_column("Price", style="bold")
+    table.add_column("Delta")
+    table.add_column("Gamma")
+    table.add_column("Theta")
 
     top_options = PriorityQueue(maxsize=6)
 
@@ -35,7 +38,7 @@ def options_table_from_csv(option_type, instrument_name, ltp_range, csv_filename
 
                         # Condition for CE and PE based on strike price
                         if (option_type == 'CE' and strike_price <= ltp_range) or (option_type == 'PE' and strike_price-100 <= ltp_range):
-                            top_options.put((-ltp_float if option_type == 'CE' else ltp_float, row['Instrument Token'], row['Instrument']))
+                            top_options.put((-ltp_float if option_type == 'CE' else ltp_float, row['Instrument Token'], row['Instrument'],row['Delta'],row['Gamma'],row['Theta']))
                             if top_options.full():
                                 top_options.get()
                 except (ValueError, IndexError):
@@ -43,8 +46,8 @@ def options_table_from_csv(option_type, instrument_name, ltp_range, csv_filename
 
     # Retrieve items from the queue and add them to the table
     while not top_options.empty():
-        price, token, symbol = top_options.get()
-        table.add_row(token, symbol, f"{-price if option_type == 'CE' else price:.2f}")  # Correct the sign for CE
+        price, token, symbol,delta,gamma,theta = top_options.get()
+        table.add_row(token, symbol, f"{-price if option_type == 'CE' else price:.2f}",delta,gamma,theta)  # Correct the sign for CE
 
     return table
 

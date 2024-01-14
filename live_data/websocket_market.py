@@ -96,8 +96,8 @@ async def fetch_market_data():
             # Convert the decoded data to a dictionary
             data_dict = MessageToDict(decoded_data)
             # print(data_dict)
-            make_rich_table(data_dict=data_dict)
             options_csv.make_options_data(data_dict=data_dict)
+            make_rich_table(data_dict=data_dict)
 
 # Run the asynchronous market data fetching function
 asyncio.run(fetch_market_data())

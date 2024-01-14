@@ -56,6 +56,9 @@ def make_options_data(data_dict, csv_filename='options_data.csv'):
             # Check for option data
             if 'marketFF' in instrument_data['ff'] and 'optionGreeks' in instrument_data['ff']['marketFF']:
                 ltp = instrument_data['ff']['marketFF']['ltpc']['ltp']
+                delta = instrument_data['ff']['marketFF']['optionGreeks']['delta']
+                gamma = instrument_data['ff']['marketFF']['optionGreeks']['gamma']
+                theta = instrument_data['ff']['marketFF']['optionGreeks']['theta']
                 tradingsymbol = trading_symbols[instrument_key]
                 option_type = 'CE' if 'CE' in tradingsymbol else 'PE'
                 new_row = {
@@ -63,29 +66,25 @@ def make_options_data(data_dict, csv_filename='options_data.csv'):
                     'Instrument': tradingsymbol,
                     'LTP': ltp,
                     'Instrument Token': instrument_key,
-                    'Quantity': 1,
-                    'Transaction Type': 'BUY',
-                    'Order Type': 'MARKET',
                     'Option Type': option_type,
-                    'Product': 'I',
                     'Price': ltp,
-                    'Trigger Price': 0,
-                    'Is AMO': False
+                    'Delta': f"{delta:.2f}",
+                    'Gamma': f"{gamma:.2f}",
+                    'Theta': f"{theta:.2f}",
                 }
-
                 # Update existing data or add new
                 existing_data[instrument_key] = new_row
 
         # Write updated data back to the CSV file
         with open(csv_filename, 'w', newline='') as csvfile:
-            fieldnames = ['Timestamp', 'Instrument', 'LTP', 'Instrument Token', 'Quantity', 'Transaction Type', 'Order Type', 'Option Type', 'Product', 'Price', 'Trigger Price', 'Is AMO']
+            fieldnames = ['Timestamp', 'Instrument', 'LTP', 'Instrument Token', 'Option Type', 'Price','Delta','Gamma','Theta']
             csv_writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             csv_writer.writeheader()
             for row in existing_data.values():
                 csv_writer.writerow(row)
 
     except KeyError as e:
-        # print(f"KeyError: {e}")
+        print(f"KeyError: {e}")
         return None
 
 
