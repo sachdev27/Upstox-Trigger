@@ -4,7 +4,6 @@ import json,os,time
 import ssl
 import upstox_client
 import websockets
-from chart import CandlestickChart
 from google.protobuf.json_format import MessageToDict
 from live_data.rich_table import make_rich_table
 
@@ -16,7 +15,6 @@ load_dotenv()
 do_login()
 # ---------------
 token = os.environ["ACCESS_TOKEN"]
-# candlestick_chart = CandlestickChart()
 from live_data.options_data import options_csv
 
 
@@ -100,32 +98,6 @@ async def fetch_market_data():
             # print(data_dict)
             make_rich_table(data_dict=data_dict)
             options_csv.make_options_data(data_dict=data_dict)
-
-            # ltp_bank = data_dict['feeds']['NSE_INDEX|Nifty Bank']['ff']['indexFF']['ltpc']['ltp']
-            # ohlc_bank = data_dict['feeds']['NSE_INDEX|Nifty Bank']['ff']['indexFF']['marketOHLC']['ohlc']
-
-            # ltp_n50 = data_dict['feeds']["NSE_INDEX|Nifty 50"]['ff']['indexFF']['ltpc']['ltp']
-            # ohlc_n50 = data_dict['feeds']["NSE_INDEX|Nifty 50"]['ff']['indexFF']['marketOHLC']['ohlc']
-
-            # # Determine the interval
-            # interval_bank = data_dict['feeds']['NSE_INDEX|Nifty Bank']['ff']['indexFF']['marketOHLC']['ohlc'][0]['interval']
-            # interval_n50 = data_dict['feeds']["NSE_INDEX|Nifty 50"]['ff']['indexFF']['marketOHLC']['ohlc'][0]['interval']
-
-            # # Update the candlestick chart based on the interval
-            # if interval_bank == '1d':
-            #     # Handle 1d interval (single candle for the previous day)
-            #     candlestick_chart.update_chart(ltp_bank, ohlc_bank[0], ltp_n50, ohlc_n50[0])
-            # elif interval_bank == 'I1':
-            #     # Handle I1 interval (two candles for the current and preceding 1-minute intervals)
-            #     candlestick_chart.update_chart(ltp_bank, ohlc_bank[1], ltp_n50, ohlc_n50[1])
-            # elif interval_bank == 'I30':
-            #     # Handle I30 interval (two candles for the current and preceding 30-minute intervals)
-            #     candlestick_chart.update_chart(ltp_bank, ohlc_bank[1], ltp_n50, ohlc_n50[1])
-
-            # Print the dictionary representation
-
-
-
 
 # Run the asynchronous market data fetching function
 asyncio.run(fetch_market_data())
