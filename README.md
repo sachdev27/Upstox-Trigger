@@ -55,14 +55,14 @@ Replace the Client Token(API_KEY) and redirect_uri Accordingly
 ```python
 python redirect_uri.py
 ```
+In order to get the Auth Code,
+Replace the Link with your client_id and paste this link in your browser and login
+
+(https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=<CLIENT_ID>&redirect_uri=http://localhost:8210/callback/)
 
 After succesfull login, you will be redirected and the flask app will replace the auth code for you in the .env file
 
-In order to get the Auth Code
 
-Replace the Link with your client_id
-
-(https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=<CLIENT_ID>&redirect_uri=http://localhost:8210/callback/)
 
 - Now You can run the Main or the Websocket_Market File to get the Live Market data
 
