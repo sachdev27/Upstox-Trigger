@@ -47,7 +47,7 @@ ACCESS_TOKEN=""
 
 ### Login
 
-Replace the Client Token and redirect_uri Accordingly
+Replace the Client Token(API_KEY) and redirect_uri Accordingly
 - For REDIRECT_URI we are going to use a flask app which is present in flask-redirect_uri folder and it sets the AUTH_CODE in it
 - Run the Flask app in the folder by (the flask app is set to port 8210)
 - Remember, In order th redirect_uri to work - you have to set the same redirect_uri in both the place (Upstox and in the Flask App)
