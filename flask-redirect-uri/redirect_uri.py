@@ -16,7 +16,7 @@ def update_env_file(file_path, key, new_value):
 def hello_name():
    return 'Hello World'
 
-@app.route('/callback')
+@app.route('/callback/')
 def redirect_uri():
     code = request.args.get('code')
     update_env_file(".env","AUTH_CODE",code)
