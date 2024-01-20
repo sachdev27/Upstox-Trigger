@@ -14,40 +14,45 @@ options_data = "options_data.csv"
 # https://api-v2.upstox.com/historical-candle/intraday/NSE_INDEX%7CNifty%2050/1minute
 
 
-def options_table_from_csv(option_type, instrument_name, ltp_range, csv_filename='options_data.csv'):
+def options_table_from_csv( option_type, instrument_name,ltp):
     table = Table(title=f"Top 5 {option_type} Options for {instrument_name}")
-    table.add_column("Instrument Token", style="bold")
+    table.add_column("Token", style="bold")
     table.add_column("Trading Symbol", style="bold")
+    table.add_column("Strike", style="bold")
     table.add_column("Price", style="bold")
-    table.add_column("Delta")
-    table.add_column("Gamma")
-    table.add_column("Theta")
+    table.add_column("Delta", style="bold")
+    table.add_column("Gamma", style="bold")
+    table.add_column("Theta", style="bold")
 
-    top_options = PriorityQueue(maxsize=6)
-
-    with open(csv_filename, 'r') as csvfile:
+    with open(options_data, 'r') as csvfile:
         reader = csv.DictReader(csvfile)
+
+        options = []
+
         for row in reader:
             if row['Instrument'].startswith(instrument_name) and row['Option Type'] == option_type:
-                try:
-                    ltp_float = float(row['LTP'])
-                    # Extract strike price from the trading symbol
-                    parts = row['Instrument'].split(option_type)
-                    if len(parts) > 1:
-                        strike_price = float(parts[0][-5:])  # Assumes last 5 characters represent strike price
+                options.append(row)
 
-                        # Condition for CE and PE based on strike price
-                        if (option_type == 'CE' and strike_price <= ltp_range) or (option_type == 'PE' and strike_price-100 <= ltp_range):
-                            top_options.put((-ltp_float if option_type == 'CE' else ltp_float, row['Instrument Token'], row['Instrument'],row['Delta'],row['Gamma'],row['Theta']))
-                            if top_options.full():
-                                top_options.get()
-                except (ValueError, IndexError):
-                    pass  # Ignore rows with invalid data
 
-    # Retrieve items from the queue and add them to the table
-    while not top_options.empty():
-        price, token, symbol,delta,gamma,theta = top_options.get()
-        table.add_row(token, symbol, f"{-price if option_type == 'CE' else price:.2f}",delta,gamma,theta)  # Correct the sign for CE
+        # print(options)
+        # Filtering and adding rows to the table
+        options.sort(key=lambda x: float(x['Price']), reverse=(option_type == 'PE'))
+        count = 0
+        for row in options:
+            if row['Instrument'].startswith(instrument_name) and row['Option Type'] == option_type:
+                table.add_row(
+                    row['Instrument Token'],
+                    row['Instrument'],
+                    row['Strike'],
+                    row['Price'],
+                    row['Delta'],
+                    row['Gamma'],
+                    row['Theta']
+                )
+                count += 1
+                if count >= 5:  # Limit to top 5
+                    break
+
 
     return table
 
@@ -128,10 +133,6 @@ def make_rich_table(data_dict):
                     'Low': f"{low[1]:.2f}",
                     'Close': f"{close[1]:.2f}"
                 })
-
-
-                # Print the updated table in the same location
-                console.print(table, end="")
 
 
             # Panel for Time

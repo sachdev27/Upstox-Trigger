@@ -6,6 +6,7 @@ import upstox_client
 import websockets
 from google.protobuf.json_format import MessageToDict
 from live_data.rich_table import make_rich_table
+from live_data.options_data import make_instrument_key
 
 from login.login import do_login
 
@@ -59,6 +60,15 @@ async def fetch_market_data():
 
         await asyncio.sleep(1)  # Wait for 1 second
 
+# ----------------------COLLECT INSTRUMENT----------------------
+        make_instrument_key.worker()
+# ----------------------Clear Options Data INSTRUMENT----------------------
+        try:
+            os.remove('options_data.csv')
+        except:
+            print("Options File Doesn't Exist")
+
+# ----------------------------------------------------------------------
         ## Indices
         indices_instrument = ["NSE_INDEX|Nifty Bank", "NSE_INDEX|Nifty 50"]
 
@@ -70,6 +80,8 @@ async def fetch_market_data():
 
         All_instruments = indices_instrument + oi_keys
 
+# ------------------ALL INSTRUMENT----------------------
+
         # Data to be sent over the WebSocket
         data = {
             "guid": "someguid",
@@ -80,13 +92,12 @@ async def fetch_market_data():
             }
         }
 
-
-
-
-
         # Convert data to binary and send over WebSocket
         binary_data = json.dumps(data).encode('utf-8')
         await websocket.send(binary_data)
+
+
+# ------------------LIVE SOCKET----------------------
 
         # Continuously receive and decode data from WebSocket
         while True:

@@ -1,7 +1,8 @@
 import tempfile,json
 import csv,time
 from datetime import datetime
-from live_data import instrument
+from live_data.options_data.make_instrument_key import update_option_instrument_key
+
 
 import os
 csv_options_file = 'options_data.csv'
@@ -10,33 +11,10 @@ json_filename='trading_symbol.json'
 
 # https://api-v2.upstox.com/historical-candle/intraday/NSE_INDEX%7CNifty%2050/1minute
 
-# def make_configuration():
-#     configuration = upstox_client.Configuration()
-#     configuration.access_token = ACCESS_TOKEN
-#     return configuration
-
-
-
-def update_option_instrument_key(data_dict):
-    ltp_bank = data_dict['feeds']['NSE_INDEX|Nifty Bank']['ff']['indexFF']['ltpc']['ltp']
-    ltp_nifty = data_dict['feeds']["NSE_INDEX|Nifty 50"]['ff']['indexFF']['ltpc']['ltp']
-    bank_options = instrument.categorize_options("BANKNIFTY", ltp_bank)
-    nifty_options = instrument.categorize_options("NIFTY", ltp_nifty)
-
-    bank_options = bank_options[0] + bank_options[1]
-    nifty_options = nifty_options[0] + nifty_options[1]
-    all_options = bank_options + nifty_options
-
-    # Prepare instrument keys for fetching real-time LTP data
-    instrument_keys = ','.join([option['instrument_key'] for option in all_options])
-    with open ("instrument_key.txt",'w') as k:
-        k.write(instrument_keys)
-
 
 
 def make_options_data(data_dict, csv_filename='options_data.csv'):
     try:
-        update_option_instrument_key(data_dict=data_dict)
         # Load data from JSON file
         with open(json_filename, 'r') as json_file:
             trading_symbols = json.load(json_file)
@@ -64,6 +42,7 @@ def make_options_data(data_dict, csv_filename='options_data.csv'):
                 new_row = {
                     'Timestamp': timestamp,
                     'Instrument': tradingsymbol,
+                    'Strike': tradingsymbol.split(option_type)[0][-5:],
                     'LTP': ltp,
                     'Instrument Token': instrument_key,
                     'Option Type': option_type,
@@ -77,7 +56,7 @@ def make_options_data(data_dict, csv_filename='options_data.csv'):
 
         # Write updated data back to the CSV file
         with open(csv_filename, 'w', newline='') as csvfile:
-            fieldnames = ['Timestamp', 'Instrument', 'LTP', 'Instrument Token', 'Option Type', 'Price','Delta','Gamma','Theta']
+            fieldnames = ['Timestamp', 'Instrument','Strike', 'LTP', 'Instrument Token','Option Type', 'Price','Delta','Gamma','Theta']
             csv_writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             csv_writer.writeheader()
             for row in existing_data.values():
