@@ -38,41 +38,58 @@ class MarketDataService:
         to_date: str | None = None,
     ) -> list[dict]:
         """
-        Fetch historical OHLCV candle data.
-
-        Args:
-            instrument_key: e.g. "NSE_EQ|INE848E01016" or "NSE_INDEX|Nifty 50"
-            interval: "1minute", "30minute", "day", "week", "month"
-            from_date: "YYYY-MM-DD" (optional)
-            to_date: "YYYY-MM-DD" (optional, defaults to today)
-
-        Returns:
-            List of candle dicts: [{datetime, open, high, low, close, volume, oi}, ...]
+        Fetch historical OHLCV candle data and merge with today's intraday data.
+        Automatically resamples 1minute data if a custom timeframe (e.g. 15minute, 5minute) forms.
         """
-        api = upstox_client.HistoryApi(
-            upstox_client.ApiClient(self.config)
-        )
+        api = upstox_client.HistoryApi(upstox_client.ApiClient(self.config))
+        
+        # Upstox APIs strict interval modes:
+        fetch_interval = interval
+        needs_resample = False
+        resample_rule = None
+        
+        if interval.endswith("minute") and interval not in ["1minute", "30minute"]:
+            fetch_interval = "1minute"
+            needs_resample = True
+            mins = interval.replace("minute", "Min")
+            resample_rule = mins
+
         try:
+            candles_dict = {}
+            
+            # 1. Fetch Historical Data (from_date -> to_date)
             if from_date and to_date:
-                response = api.get_historical_candle_data1(
-                    instrument_key, interval, to_date, from_date,
-                    self.api_version
-                )
-            elif to_date:
-                response = api.get_historical_candle_data(
-                    instrument_key, interval, to_date, self.api_version
-                )
-            else:
-                response = api.get_intra_day_candle_data(
-                    instrument_key, interval, self.api_version
-                )
+                try:
+                    res1 = api.get_historical_candle_data1(
+                        instrument_key, fetch_interval, to_date, from_date, self.api_version
+                    )
+                    data1 = res1.to_dict()
+                    for c in data1.get("data", {}).get("candles", []):
+                        candles_dict[c[0]] = c
+                except Exception as e:
+                    logger.warning(f"Historical fetch failed, proceeding to intraday: {e}")
 
-            data = response.to_dict()
-            candles_raw = data.get("data", {}).get("candles", [])
+            # 2. Fetch Intraday Data (Today) 
+            # (Historical API often cuts off at yesterday close)
+            try:
+                res2 = api.get_intra_day_candle_data(
+                    instrument_key, fetch_interval, self.api_version
+                )
+                data2 = res2.to_dict()
+                for c in data2.get("data", {}).get("candles", []):
+                    candles_dict[c[0]] = c
+            except Exception as e:
+                logger.warning(f"Intraday fetch failed: {e}")
 
-            candles = []
-            for c in reversed(candles_raw):  # oldest first
-                candles.append({
+            if not candles_dict:
+                return []
+
+            # Sort chronologically
+            sorted_raw = sorted(candles_dict.values(), key=lambda x: x[0])
+            
+            transformed = []
+            for c in sorted_raw:
+                transformed.append({
                     "datetime": c[0],
                     "open": c[1],
                     "high": c[2],
@@ -81,10 +98,45 @@ class MarketDataService:
                     "volume": c[5] if len(c) > 5 else 0,
                     "oi": c[6] if len(c) > 6 else 0,
                 })
-            return candles
+                
+            if not needs_resample:
+                return transformed
+                
+            # --- Dynamic Pandas Resampling ---
+            import pandas as pd
+            df = pd.DataFrame(transformed)
+            df['datetime_dt'] = pd.to_datetime(df['datetime'])
+            df.set_index('datetime_dt', inplace=True)
+            
+            # Resample logic
+            resampled = df.resample(resample_rule).agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum',
+                'oi': 'last',
+                'datetime': 'first' # retain original timezone localized string
+            })
+            resampled = resampled.dropna(subset=['open'])
+            
+            final_candles = []
+            for idx, row in resampled.iterrows():
+                # Reformat datetime back to Upstox ISO format string or just use Pandas ISO format limit
+                final_candles.append({
+                    "datetime": idx.strftime('%Y-%m-%dT%H:%M:%S+05:30'),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": int(row["volume"]),
+                    "oi": int(row["oi"]),
+                })
+                
+            return final_candles
 
         except Exception as e:
-            logger.error(f"Failed to fetch candles for {instrument_key}: {e}")
+            logger.error(f"Failed to fetch/merge candles for {instrument_key}: {e}")
             return []
 
     def get_intraday_candles(
@@ -190,74 +242,14 @@ class MarketDataService:
             logger.error(f"Failed to fetch profile: {e}")
             return None
 
-    # ── Instrument Data ─────────────────────────────────────────
-
-    @staticmethod
-    def download_instrument_list(
-        output_path: str | None = None,
-    ) -> Path:
-        """
-        Download the latest NSE instrument list from Upstox.
-        Returns path to the CSV file.
-        """
-        url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz"
-        data_dir = BASE_DIR / "data"
-        data_dir.mkdir(exist_ok=True)
-
-        output = Path(output_path) if output_path else data_dir / "instruments.csv"
-        temp_gz = data_dir / "instruments_temp.gz"
-
-        try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-
-            with open(temp_gz, "wb") as f:
-                f.write(response.content)
-
-            with gzip.open(temp_gz, "rb") as gz:
-                with open(output, "wb") as out:
-                    shutil.copyfileobj(gz, out)
-
-            temp_gz.unlink(missing_ok=True)
-            logger.info(f"Instrument list downloaded: {output}")
-            return output
-
-        except Exception as e:
-            logger.error(f"Failed to download instruments: {e}")
-            return output
-
-    @staticmethod
-    def find_instrument(
-        name: str,
-        exchange: str = "NSE_EQ",
-        instrument_type: str = "EQUITY",
-        csv_path: str | None = None,
-    ) -> dict | None:
-        """Find an instrument by name in the instrument list CSV."""
-        path = Path(csv_path) if csv_path else BASE_DIR / "data" / "instruments.csv"
-        if not path.exists():
-            logger.error(f"Instrument file not found: {path}")
-            return None
-
-        with open(path, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if (
-                    row.get("exchange") == exchange
-                    and row.get("instrument_type") == instrument_type
-                    and row.get("name") == name
-                ):
-                    return dict(row)
-        return None
-
     # ── SDK-Native Instrument Search ─────────────────────────────
 
     def search_instrument_sdk(
-        self, query: str, page_size: int = 10
+        self, query: str, page_size: int = 20
     ) -> list[dict]:
         """
         Search instruments using the SDK's InstrumentsApi.
-        No need to download CSV — the SDK queries the API directly.
+        No need to download the full exchange CSV.
 
         Args:
             query: Search term, e.g. "Reliance" or "NIFTY"
@@ -267,9 +259,19 @@ class MarketDataService:
             upstox_client.ApiClient(self.config)
         )
         try:
-            response = api.search_instrument(self.api_version, query)
+            response = api.search_instrument(query)
             data = response.to_dict()
-            instruments = data.get("data", {}).get("instruments", [])
+            
+            if isinstance(data, list):
+                instruments = data
+            else:
+                # Upstox returns {"status": "success", "data": [ {...}, {...} ]}
+                instruments = data.get("data", [])
+                
+                # Failsafe if it actually returned {"data": {"instruments": [...]}}
+                if isinstance(instruments, dict):
+                    instruments = instruments.get("instruments", [])
+                    
             return instruments[:page_size]
         except Exception as e:
             logger.error(f"Instrument search failed for '{query}': {e}")

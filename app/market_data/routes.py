@@ -82,10 +82,39 @@ async def download_instruments():
     return {"status": "success", "path": str(path)}
 
 
+@router.get("/instruments/featured")
+async def get_featured_instruments():
+    """Return Nifty 50 instruments from local CSV for the UI default Watchlist."""
+    import csv
+    from app.config import BASE_DIR
+    
+    csv_path = BASE_DIR / "ind_nifty50list.csv"
+    instruments = []
+    
+    # Add major indices manually
+    instruments.append({"name": "Nifty 50", "instrument_key": "NSE_INDEX|Nifty 50", "segment": "NSE_INDEX"})
+    instruments.append({"name": "Nifty Bank", "instrument_key": "NSE_INDEX|Nifty Bank", "segment": "NSE_INDEX"})
+
+    if csv_path.exists():
+        with open(csv_path, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                symbol = row.get("Symbol")
+                isin = row.get("ISIN Code")
+                if symbol and isin:
+                    instruments.append({
+                        "name": symbol,
+                        "instrument_key": f"NSE_EQ|{isin}",
+                        "segment": "NSE_EQ"
+                    })
+    
+    return {"status": "success", "count": len(instruments), "instruments": instruments}
+
+
 @router.get("/instruments/search")
 async def search_instruments(
     query: str = Query(..., description="Search term, e.g. 'Reliance' or 'NIFTY'"),
-    page_size: int = Query(10),
+    page_size: int = Query(20),
 ):
     """Search instruments using the SDK (no CSV download needed)."""
     svc = _get_market_service()
@@ -147,4 +176,46 @@ async def get_brokerage(
     return {"data": svc.get_brokerage(
         instrument_token, quantity, product, transaction_type, price
     )}
+
+
+@router.get("/strategy-overlay")
+async def get_strategy_overlay(
+    instrument_key: str = Query(...),
+    timeframe: str = Query("1minute"),
+    atr_period: int = Query(10),
+    multiplier: float = Query(3.0)
+):
+    """
+    Compute SuperTrend indicator arrays for the frontend chart.
+    Returns a sequence of {time, upper, lower, trend} mapped to the candles.
+    """
+    svc = _get_market_service()
+    candles = svc.get_historical_candles(instrument_key, timeframe)
+    
+    if not candles:
+        return {"status": "error", "message": "No candle data available.", "overlay": []}
+    
+    import pandas as pd
+    from app.strategies.indicators import supertrend
+    
+    df = pd.DataFrame(candles)
+    # The candles from service are already dicts with datetime, open, high, low, close.
+    # We must ensure they are in chronological order for calculation.
+    # Service get_historical_candles usually returns oldest first.
+    
+    st_df = supertrend(df, period=atr_period, multiplier=multiplier, use_rma=True)
+    
+    overlay = []
+    for i in range(len(df)):
+        c = df.iloc[i]
+        s = st_df.iloc[i]
+        overlay.append({
+            "datetime": c["datetime"],
+            "trend": int(s["trend"]),           # 1 (Bullish) or -1 (Bearish)
+            "supertrend": float(s["supertrend"]),
+            "upper": float(s["upper_band"]),
+            "lower": float(s["lower_band"])
+        })
+        
+    return {"status": "success", "instrument_key": instrument_key, "overlay": overlay}
 

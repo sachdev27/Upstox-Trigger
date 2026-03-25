@@ -8,6 +8,7 @@ const WS_URL = "ws://localhost:8210/ws";
 let ws = null;
 let currentInstrumentKey = "NSE_INDEX|Nifty 50";
 let currentInstrumentName = "Nifty 50";
+let currentInterval = "15minute";
 let chart = null;
 let candleSeries = null;
 let supertrendUpper = null;
@@ -26,7 +27,98 @@ document.addEventListener("DOMContentLoaded", () => {
     
     // Default tab
     switchBottomTab('positions');
+    
+    // Instrument Search
+    const searchInp = document.getElementById("instrument-search");
+    let searchTimeout;
+    searchInp.addEventListener("input", (e) => {
+        clearTimeout(searchTimeout);
+        const query = e.target.value.trim();
+        if (query.length < 2) {
+            // Revert back if empty
+            if (query.length === 0) restoreDefaultWatchlist();
+            return;
+        }
+        searchTimeout = setTimeout(() => fetchInstrumentSearch(query), 400);
+    });
+    
+    // Load top instruments on boot
+    restoreDefaultWatchlist();
 });
+
+function setChartTimeframe(interval) {
+    currentInterval = interval;
+    showToast(`Loading ${interval} timeframe...`);
+    fetchHistoricalCandles(currentInstrumentKey);
+    // Refresh strategy overlay if any
+    const tfElem = document.getElementById("param-timeframe");
+    tfElem.value = interval.replace('minute', 'm').replace('hour', 'H').replace('day', '1D');
+    
+    if (supertrendUpper && supertrendLower) {
+        // clear old overlay before strategy loads
+        supertrendUpper.setData([]);
+        supertrendLower.setData([]);
+    }
+}
+
+async function restoreDefaultWatchlist() {
+    const list = document.getElementById("watchlist");
+    list.innerHTML = `<div style="padding:12px;text-align:center;color:var(--text-muted);font-size:0.8rem">Loading Nifty 50...</div>`;
+    
+    try {
+        const res = await fetch(`${API_BASE}/market/instruments/featured`);
+        const data = await res.json();
+        
+        if (data.instruments && data.instruments.length > 0) {
+            list.innerHTML = "";
+            data.instruments.forEach(inst => {
+                const item = document.createElement("div");
+                item.className = `watchlist-item ${currentInstrumentKey === inst.instrument_key ? 'active' : ''}`;
+                item.onclick = () => selectInstrument(inst.instrument_key, inst.name);
+                
+                item.innerHTML = `
+                    <div>
+                        <div class="instrument-name">${inst.name}</div>
+                        <div class="instrument-type">${inst.segment}</div>
+                    </div>
+                `;
+                list.appendChild(item);
+            });
+        }
+    } catch (e) {
+        list.innerHTML = `<div style="padding:12px;text-align:center;color:var(--text-danger);font-size:0.8rem">Failed to load watchlist</div>`;
+    }
+}
+
+async function fetchInstrumentSearch(query) {
+    try {
+        const res = await fetch(`${API_BASE}/market/instruments/search?query=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        
+        const list = document.getElementById("watchlist");
+        list.innerHTML = "";
+        
+        if (data.instruments && data.instruments.length > 0) {
+            data.instruments.forEach(inst => {
+                const item = document.createElement("div");
+                item.className = `watchlist-item ${currentInstrumentKey === inst.instrument_key ? 'active' : ''}`;
+                item.onclick = () => selectInstrument(inst.instrument_key, inst.name);
+                
+                item.innerHTML = `
+                    <div>
+                        <div class="instrument-name">${inst.name}</div>
+                        <div class="instrument-type">${inst.segment}</div>
+                    </div>
+                `;
+                list.appendChild(item);
+            });
+        } else {
+            list.innerHTML = `<div style="padding: 12px; font-size: 0.8rem; color: var(--text-muted); text-align: center;">No results</div>`;
+        }
+    } catch (e) {
+        console.error("Search failed:", e);
+    }
+}
 
 function updateClock() {
     const now = new Date();
@@ -126,11 +218,13 @@ function initChart() {
     supertrendUpper = chart.addLineSeries({
         color: '#ff4757',
         lineWidth: 2,
+        lineType: LightweightCharts.LineType.Step,
     });
     
     supertrendLower = chart.addLineSeries({
         color: '#00d084',
         lineWidth: 2,
+        lineType: LightweightCharts.LineType.Step,
     });
     
     // Resize observer
@@ -157,13 +251,20 @@ async function selectInstrument(instrumentKey, name) {
 
 async function fetchHistoricalCandles(instrumentKey) {
     try {
-        const res = await fetch(`${API_BASE}/market/candles?instrument_key=${encodeURIComponent(instrumentKey)}&interval=15minute`);
+        const toDateObj = new Date();
+        const fromDateObj = new Date();
+        fromDateObj.setDate(toDateObj.getDate() - 20);
+        
+        const toDateStr = toDateObj.toISOString().split('T')[0];
+        const fromDateStr = fromDateObj.toISOString().split('T')[0];
+        
+        const res = await fetch(`${API_BASE}/market/candles?instrument_key=${encodeURIComponent(instrumentKey)}&interval=${currentInterval}&from_date=${fromDateStr}&to_date=${toDateStr}`);
         if (res.ok) {
             const data = await res.json();
             if (data.candles && data.candles.length > 0) {
                 const formatted = data.candles.map(c => {
-                    // Convert ISO string to unix timestamp in seconds
-                    const ds = new Date(c.datetime).getTime() / 1000;
+                    // Convert ISO string to unix timestamp in seconds, then shift by +19800 (5.5h) for IST visualization
+                    const ds = (new Date(c.datetime).getTime() / 1000) + 19800;
                     return {
                         time: ds,
                         open: c.open,
@@ -209,7 +310,9 @@ function switchBottomTab(tabId) {
     document.querySelectorAll('.bottom-tab').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.bottom-content').forEach(el => el.classList.remove('active'));
     
-    event.currentTarget.classList.add('active');
+    const btn = document.querySelector(`.bottom-tab[onclick="switchBottomTab('${tabId}')"]`);
+    if (btn) btn.classList.add('active');
+    
     document.getElementById(`tab-${tabId}`).classList.add('active');
     
     if (tabId === 'trades') refreshTrades();
@@ -353,12 +456,16 @@ async function saveRiskConfig() {
 }
 
 async function loadStrategy() {
+    const timeframe = document.getElementById("param-timeframe").value;
+    const atrPeriod = document.getElementById("param-atr-period").value;
+    const atrMult = document.getElementById("param-atr-mult").value;
+
     try {
         const params = new URLSearchParams({
             strategy_class: "SuperTrendPro",
             name: "SuperTrend Pro v6.3",
             instruments: currentInstrumentKey,
-            timeframe: document.getElementById("param-timeframe").value,
+            timeframe: timeframe,
             paper_trading: true // Fixed to paper trading for safety right now
         });
         
@@ -367,9 +474,66 @@ async function loadStrategy() {
             showToast(`Applied strategy to ${currentInstrumentName}`, "success");
             addLog(`Loaded SuperTrend Pro on ${currentInstrumentName}`, "success");
             refreshStatus();
+            
+            // Now fetch the visual overlay to plot on the chart!
+            fetchStrategyOverlay(currentInstrumentKey, currentInterval, atrPeriod, atrMult);
         }
     } catch (e) {
         showToast("Failed to apply strategy", "error");
+    }
+}
+
+async function fetchStrategyOverlay(instrumentKey, timeframe, atrPeriod, multiplier) {
+    try {
+        const params = new URLSearchParams({
+            instrument_key: instrumentKey,
+            timeframe: timeframe,
+            atr_period: atrPeriod,
+            multiplier: multiplier
+        });
+        const res = await fetch(`${API_BASE}/market/strategy-overlay?${params.toString()}`);
+        if (res.ok) {
+            const data = await res.json();
+            if (data.overlay && data.overlay.length > 0) {
+                const upperData = [];
+                const lowerData = [];
+                const markers = [];
+                let lastTrend = null;
+                
+                data.overlay.forEach(pt => {
+                    // Shift by +19800 (5.5h) for IST visualization
+                    const ds = (new Date(pt.datetime).getTime() / 1000) + 19800;
+                    upperData.push({ time: ds, value: pt.upper });
+                    lowerData.push({ time: ds, value: pt.lower });
+                    
+                    if (lastTrend !== null && pt.trend !== lastTrend) {
+                        if (pt.trend === 1) {
+                            markers.push({
+                                time: ds, position: 'belowBar', color: '#4caf50',
+                                shape: 'arrowUp', text: 'BUY'
+                            });
+                        } else if (pt.trend === -1) {
+                            markers.push({
+                                time: ds, position: 'aboveBar', color: '#ff5252',
+                                shape: 'arrowDown', text: 'SELL'
+                            });
+                        }
+                    }
+                    lastTrend = pt.trend;
+                });
+                
+                upperData.sort((a,b) => a.time - b.time);
+                lowerData.sort((a,b) => a.time - b.time);
+                
+                if (supertrendUpper) supertrendUpper.setData(upperData);
+                if (supertrendLower) supertrendLower.setData(lowerData);
+                if (candleSeries) candleSeries.setMarkers(markers);
+                
+                showToast("Indicator Plot Updated", "info");
+            }
+        }
+    } catch (e) {
+        console.error("Failed to fetch overlay", e);
     }
 }
 

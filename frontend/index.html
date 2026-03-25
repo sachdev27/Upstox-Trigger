@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="/static/styles.css">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>⚡</text></svg>">
     <!-- Lightweight Charts for the main UI -->
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 
@@ -45,25 +45,8 @@
                 <input type="text" id="instrument-search" class="search-input" placeholder="Search (e.g. NIFTY)...">
             </div>
             <div class="watchlist" id="watchlist">
-                <!-- Hardcoded for now until search runs -->
-                <div class="watchlist-item active" onclick="selectInstrument('NSE_INDEX|Nifty 50', 'Nifty 50')">
-                    <div>
-                        <div class="instrument-name">Nifty 50</div>
-                        <div class="instrument-type">NSE_INDEX</div>
-                    </div>
-                </div>
-                <div class="watchlist-item" onclick="selectInstrument('NSE_INDEX|Nifty Bank', 'Nifty Bank')">
-                    <div>
-                        <div class="instrument-name">Nifty Bank</div>
-                        <div class="instrument-type">NSE_INDEX</div>
-                    </div>
-                </div>
-                <div class="watchlist-item" onclick="selectInstrument('NSE_EQ|INE002A01018', 'Reliance')">
-                    <div>
-                        <div class="instrument-name">Reliance</div>
-                        <div class="instrument-type">NSE_EQ</div>
-                    </div>
-                </div>
+                <!-- Dynamically populated via API -->
+                <div style="padding:12px;text-align:center;color:var(--text-muted);font-size:0.8rem">Loading stocks...</div>
             </div>
         </aside>
 
@@ -71,7 +54,15 @@
         <main class="panel-center">
             
             <!-- Chart Container -->
-            <div id="tvchart" class="chart-container">
+            <div style="display: flex; gap: 4px; padding: 4px; background: var(--bg-dark); border-bottom: 1px solid var(--border-color);">
+                <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('1minute')">1m</button>
+                <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('5minute')">5m</button>
+                <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('15minute')">15m</button>
+                <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('30minute')">30m</button>
+                <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('1hour')">1H</button>
+                <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('day')">1D</button>
+            </div>
+            <div id="tvchart" class="chart-container" style="height: calc(100% - 28px);">
                 <!-- Lightweight Charts injected here via JS -->
             </div>
 
