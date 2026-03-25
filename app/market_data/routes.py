@@ -257,13 +257,43 @@ async def get_option_chain(
     try:
         api = upstox_client.OptionsApi(upstox_client.ApiClient(svc.config))
         
-        # 1. Resolve Expiry Date if not provided by pulling nearest contract
+        # Nifty Fallback: sometimes search returns slightly different strings 
+        # but the Option Chain underlying key is very strict.
+        if "nifty 50" in instrument_key.lower():
+            instrument_key = "NSE_INDEX|Nifty 50"
+        elif "bank nifty" in instrument_key.lower() or "nifty bank" in instrument_key.lower():
+            instrument_key = "NSE_INDEX|Nifty Bank"
+        elif "fin nifty" in instrument_key.lower() or "nifty fin" in instrument_key.lower():
+            instrument_key = "NSE_INDEX|Nifty Fin Service"
+            
+        # 1. Resolve nearest expiry if not provided by pulling nearest contract
         if not expiry_date:
             contracts_res = api.get_option_contracts(instrument_key)
             contracts_data = contracts_res.to_dict().get("data", [])
             if not contracts_data:
-                return {"status": "error", "message": "No option contracts found for this instrument.", "chain": []}
-            expiry_date = contracts_data[0].get("expiry")
+                return {"status": "error", "message": f"No option contracts found for {instrument_key}.", "chain": []}
+            
+            # Sort chronologically to pick the nearest expiry
+            from datetime import datetime
+            
+            # Parse and sort
+            valid_contracts = []
+            for c in contracts_data:
+                exp = c.get("expiry")
+                if isinstance(exp, str):
+                    try:
+                        exp = datetime.strptime(exp, "%Y-%m-%d")
+                    except: continue
+                if exp:
+                    valid_contracts.append((exp, c))
+            
+            valid_contracts.sort(key=lambda x: x[0])
+            
+            if not valid_contracts:
+                return {"status": "error", "message": "No valid expiries found.", "chain": []}
+                
+            nearest_expiry_dt = valid_contracts[0][0]
+            expiry_date = nearest_expiry_dt.strftime("%Y-%m-%d")
             
         if not expiry_date:
             return {"status": "error", "message": "Could not determine expiry date.", "chain": []}
@@ -274,9 +304,15 @@ async def get_option_chain(
         
         # 3. Flatten the heavily nested SDK objects into a clean 2D Dict Matrix
         matrix = []
+        spot_price = 0.0
+        
         for strike in chain_data:
             sp = strike.get("strike_price")
             pcr = strike.get("pcr")
+            
+            # Save spot price if not already set
+            if not spot_price:
+                spot_price = float(strike.get("underlying_spot_price") or 0.0)
             
             ce = strike.get("call_options", {})
             pe = strike.get("put_options", {})
@@ -288,20 +324,29 @@ async def get_option_chain(
                 if not opt_data: return {}
                 g = opt_data.get("option_greeks", {}) or {}
                 m = opt_data.get("market_data", {}) or {}
+                
+                # Handle both ltp and last_price (Upstox SDK inconsistency)
+                ltp = m.get("ltp") or m.get("last_price") or 0.0
+                
                 return {
                     "instrument_key": opt_data.get("instrument_key"),
-                    "ltp": m.get("ltp", 0.0),
-                    "volume": m.get("volume", 0),
-                    "oi": m.get("oi", 0.0),
-                    "iv": g.get("iv", 0.0),
-                    "delta": g.get("delta", 0.0),
-                    "theta": g.get("theta", 0.0),
-                    "gamma": g.get("gamma", 0.0),
-                    "vega": g.get("vega", 0.0),
+                    "ltp": float(ltp),
+                    "volume": int(m.get("volume") or 0),
+                    "oi": float(m.get("oi") or 0.0),
+                    "iv": float(g.get("iv") or 0.0),
+                    "delta": float(g.get("delta") or 0.0),
+                    "theta": float(g.get("theta") or 0.0),
+                    "gamma": float(g.get("gamma") or 0.0),
+                    "vega": float(g.get("vega") or 0.0),
                 }
 
+            # Detect if strike price is in paise (extremely large values)
+            strike_price = float(sp)
+            if strike_price > 1000000:
+                strike_price = strike_price / 100.0
+
             matrix.append({
-                "strike_price": sp,
+                "strike_price": strike_price,
                 "pcr": pcr,
                 "ce": _extract_greeks(ce),
                 "pe": _extract_greeks(pe)
@@ -314,6 +359,7 @@ async def get_option_chain(
             "status": "success",
             "instrument_key": instrument_key,
             "expiry": expiry_date,
+            "spot_price": spot_price,
             "chain": matrix
         }
         

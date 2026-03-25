@@ -2,8 +2,8 @@
  * Upstox Trading Automation — Terminal JS UI
  */
 
-const API_BASE = "http://localhost:8210";
-const WS_URL = "ws://localhost:8210/ws";
+const API_BASE = "http://localhost:8000";
+const WS_URL = "ws://localhost:8000/ws";
 
 let ws = null;
 let currentInstrumentKey = "NSE_INDEX|Nifty 50";
@@ -11,8 +11,7 @@ let currentInstrumentName = "Nifty 50";
 let currentInterval = "15minute";
 let chart = null;
 let candleSeries = null;
-let supertrendUpper = null;
-let supertrendLower = null;
+let supertrendSeries = null;
 
 // ── Initialization ──────────────────────────────────────────────
 
@@ -270,7 +269,13 @@ function switchMainView(viewType) {
         btnOptions.className = "btn btn-primary";
         tvchart.style.display = "none";
         ocGrid.style.display = "block";
-        fetchOptionChain(); // load the data immediately if they swap
+        
+        // Default to NIFTY if nothing selected
+        if (!currentInstrumentKey) {
+            selectInstrument('NSE_INDEX|Nifty 50', 'Nifty 50');
+        } else {
+            fetchOptionChain(); 
+        }
     }
 }
 
@@ -287,6 +292,7 @@ async function fetchOptionChain(expiry = "") {
         const data = await res.json();
         
         if (data.status === "success" && data.chain) {
+            console.log("Option Chain Data:", data);
             
             // Populate Expiry drop-down if it's the first pull
             const select = document.getElementById("oc-expiry-select");
@@ -296,29 +302,65 @@ async function fetchOptionChain(expiry = "") {
             
             tbody.innerHTML = "";
             
-            data.chain.forEach(row => {
+            // Find ATM strike (closest to spot_price)
+            let closestDiff = Infinity;
+            let atmIndex = -1;
+            data.chain.forEach((row, idx) => {
+                const diff = Math.abs(row.strike_price - data.spot_price);
+                if (diff < closestDiff) {
+                    closestDiff = diff;
+                    atmIndex = idx;
+                }
+            });
+
+            data.chain.forEach((row, idx) => {
                 const ce = row.ce || {};
                 const pe = row.pe || {};
+                const isATM = idx === atmIndex;
+                
+                // ITM Shading: Calls are ITM if strike < spot. Puts are ITM if strike > spot.
+                const ceITM = row.strike_price < data.spot_price;
+                const peITM = row.strike_price > data.spot_price;
                 
                 const tr = document.createElement("tr");
                 tr.style.borderBottom = "1px solid var(--border-color)";
+                if (isATM) {
+                    tr.style.border = "1px solid #00d084";
+                    tr.id = "atm-row";
+                }
+                
                 tr.innerHTML = `
-                    <td style="color:var(--text-muted); padding: 4px;">${(ce.delta || 0).toFixed(2)}</td>
-                    <td style="color:var(--text-muted); padding: 4px;">${(ce.theta || 0).toFixed(2)}</td>
-                    <td style="padding: 4px;">${(ce.iv || 0).toFixed(2)}%</td>
-                    <td style="padding: 4px;">${ce.volume || 0}</td>
-                    <td style="font-weight:bold;color:#00d084;background:rgba(0,208,132,0.05); padding: 4px;">${(ce.ltp || 0).toFixed(2)}</td>
+                    <td style="color:var(--text-muted); font-size:0.7rem; padding: 4px;">${(ce.delta || 0).toFixed(2)}</td>
+                    <td style="color:var(--text-muted); font-size:0.7rem; padding: 4px;">${(ce.theta || 0).toFixed(2)}</td>
+                    <td style="padding: 4px; color:var(--text-muted);">${(ce.iv || 0).toFixed(1)}%</td>
+                    <td style="padding: 4px; width: 60px;">
+                        <div style="font-size:0.65rem; color: #8b8b9e;">${(ce.volume || 0).toLocaleString()}</div>
+                        <div style="height:2px; background:#00d084; width:${Math.min(100, (ce.volume || 0)/1000)}%; opacity:0.5;"></div>
+                    </td>
+                    <td style="font-weight:bold;color:#10b981; background:${ceITM ? 'rgba(16,185,129,0.08)' : 'transparent'}; padding: 4px;">${(ce.ltp || 0).toFixed(2)}</td>
                     
-                    <td style="font-weight:bold;background:var(--bg-dark);color:var(--text-color); padding: 4px;">${row.strike_price}</td>
+                    <td style="font-weight:bold; background:var(--bg-dark); color:var(--text-color); padding: 4px; border-left:1px solid var(--border-color); border-right:1px solid var(--border-color);">
+                        ${row.strike_price.toFixed(0)}
+                    </td>
                     
-                    <td style="font-weight:bold;color:#ff4757;background:rgba(255,71,87,0.05); padding: 4px;">${(pe.ltp || 0).toFixed(2)}</td>
-                    <td style="padding: 4px;">${pe.volume || 0}</td>
-                    <td style="padding: 4px;">${(pe.iv || 0).toFixed(2)}%</td>
-                    <td style="color:var(--text-muted); padding: 4px;">${(pe.theta || 0).toFixed(2)}</td>
-                    <td style="color:var(--text-muted); padding: 4px;">${(pe.delta || 0).toFixed(2)}</td>
+                    <td style="font-weight:bold;color:#ef4444; background:${peITM ? 'rgba(239,68,68,0.08)' : 'transparent'}; padding: 4px;">${(pe.ltp || 0).toFixed(2)}</td>
+                    <td style="padding: 4px; width: 60px;">
+                        <div style="font-size:0.65rem; color: #8b8b9e;">${(pe.volume || 0).toLocaleString()}</div>
+                        <div style="height:2px; background:#ef4444; width:${Math.min(100, (pe.volume || 0)/1000)}%; opacity:0.5;"></div>
+                    </td>
+                    <td style="padding: 4px; color:var(--text-muted);">${(pe.iv || 0).toFixed(1)}%</td>
+                    <td style="color:var(--text-muted); font-size:0.7rem; padding: 4px;">${(pe.theta || 0).toFixed(2)}</td>
+                    <td style="color:var(--text-muted); font-size:0.7rem; padding: 4px;">${(pe.delta || 0).toFixed(2)}</td>
                 `;
                 tbody.appendChild(tr);
             });
+
+            // Auto-scroll to ATM row
+            setTimeout(() => {
+                const atm = document.getElementById("atm-row");
+                if (atm) atm.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }, 100);
+
             
             if (data.chain.length === 0) {
                  tbody.innerHTML = `<tr><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-muted);">No option contracts found. Check if the market is open or if the asset has derivatives.</td></tr>`;
@@ -338,8 +380,18 @@ async function selectInstrument(instrumentKey, name, element) {
     currentInstrumentKey = instrumentKey;
     currentInstrumentName = name;
     
+    // Update UI Labels
+    const label = document.getElementById("current-instrument");
+    if (label) {
+        label.innerHTML = `${name} <span class="badge" style="background: rgba(0, 208, 132, 0.1); color: #00d084; font-size: 0.65rem;">Live</span>`;
+    }
+    
     // Automatically perform sequential load of candles and strategy matrix
-    setChartTimeframe(currentInterval);
+    if (document.getElementById("tvchart").style.display !== "none") {
+        setChartTimeframe(currentInterval);
+    } else {
+        fetchOptionChain();
+    }
 }
 
 async function fetchHistoricalCandles(instrumentKey) {
