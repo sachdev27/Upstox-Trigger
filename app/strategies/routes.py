@@ -46,6 +46,29 @@ async def list_strategies():
     }
 
 
+@router.get("/schema")
+async def get_strategies_schema():
+    """Extract dynamic parameter types and defaults for all loaded strategy classes."""
+    schemas = []
+    for sid, s in _strategies.items():
+        params_schema = []
+        for key, val in s["params"].items():
+            ptype = "boolean" if isinstance(val, bool) else ("number" if isinstance(val, (int, float)) else "string")
+            params_schema.append({
+                "name": key,
+                "type": ptype,
+                "default": val
+            })
+            
+        schemas.append({
+            "id": sid,
+            "name": s["name"],
+            "class": s["class"],
+            "params": params_schema
+        })
+    return {"strategies": schemas}
+
+
 @router.get("/{strategy_id}")
 async def get_strategy(strategy_id: str):
     """Get strategy details including parameters."""

@@ -44,15 +44,15 @@ document.addEventListener("DOMContentLoaded", () => {
     
     // Load top instruments on boot
     restoreDefaultWatchlist();
+    
+    // Fetch generic python strategy parameters dynamically
+    fetchStrategySchemas();
 });
 
 function setChartTimeframe(interval) {
     currentInterval = interval;
     showToast(`Loading ${interval} timeframe...`);
     
-    // Refresh strategy overlay if any
-    const tfElem = document.getElementById("param-timeframe");
-    tfElem.value = interval.replace('minute', 'm').replace('hour', 'H').replace('day', '1D');
     
     if (supertrendSeries) {
         // clear old overlay before strategy loads
@@ -64,12 +64,13 @@ function setChartTimeframe(interval) {
     }
     
     // Automatically apply the strategy for the new timeframe
-    const atrPeriod = document.getElementById("param-atr-period").value;
-    const atrMult = document.getElementById("param-atr-mult").value;
-    
     // Fetch candles FIRST, then firmly await overlay binding
     fetchHistoricalCandles(currentInstrumentKey).then(() => {
-        fetchStrategyOverlay(currentInstrumentKey, interval, atrPeriod, atrMult);
+        const selector = document.getElementById("strategy-selector");
+        if (selector) {
+            const cls = selector.options[selector.selectedIndex].dataset.class;
+            fetchStrategyOverlay(currentInstrumentKey, interval, cls, getDynamicParams());
+        }
     });
 }
 
@@ -114,7 +115,7 @@ async function fetchInstrumentSearch(query) {
             data.instruments.forEach(inst => {
                 const item = document.createElement("div");
                 item.className = `watchlist-item ${currentInstrumentKey === inst.instrument_key ? 'active' : ''}`;
-                item.onclick = () => selectInstrument(inst.instrument_key, inst.name);
+                item.onclick = (e) => selectInstrument(inst.instrument_key, inst.name, e.currentTarget);
                 
                 item.innerHTML = `
                     <div>
@@ -251,16 +252,94 @@ function initChart() {
     fetchHistoricalCandles(currentInstrumentKey);
 }
 
-async function selectInstrument(instrumentKey, name) {
-    document.querySelectorAll('.watchlist-item').forEach(el => el.classList.remove('active'));
-    event.currentTarget.classList.add('active');
+// ── View Management & Option Chain ────────────────────────────
+
+function switchMainView(viewType) {
+    const btnChart = document.getElementById("btn-view-chart");
+    const btnOptions = document.getElementById("btn-view-options");
+    const tvchart = document.getElementById("tvchart");
+    const ocGrid = document.getElementById("option-chain-container");
+
+    if (viewType === 'chart') {
+        btnChart.className = "btn btn-primary";
+        btnOptions.className = "btn btn-outline";
+        tvchart.style.display = "block";
+        ocGrid.style.display = "none";
+    } else {
+        btnChart.className = "btn btn-outline";
+        btnOptions.className = "btn btn-primary";
+        tvchart.style.display = "none";
+        ocGrid.style.display = "block";
+        fetchOptionChain(); // load the data immediately if they swap
+    }
+}
+
+async function fetchOptionChain(expiry = "") {
+    if (!currentInstrumentKey) return;
+    
+    document.getElementById("oc-instrument-name").innerText = currentInstrumentName;
+    const tbody = document.getElementById("oc-tbody");
+    tbody.innerHTML = `<tr><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-muted);">Fetching live Option Chain from Upstox API...</td></tr>`;
+
+    try {
+        const url = `${API_BASE}/market/option-chain?instrument_key=${encodeURIComponent(currentInstrumentKey)}${expiry ? '&expiry_date='+encodeURIComponent(expiry) : ''}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        
+        if (data.status === "success" && data.chain) {
+            
+            // Populate Expiry drop-down if it's the first pull
+            const select = document.getElementById("oc-expiry-select");
+            if (!expiry && select.options.length <= 1) {
+                 select.innerHTML = `<option value="${data.expiry}">${data.expiry}</option>`;
+            }
+            
+            tbody.innerHTML = "";
+            
+            data.chain.forEach(row => {
+                const ce = row.ce || {};
+                const pe = row.pe || {};
+                
+                const tr = document.createElement("tr");
+                tr.style.borderBottom = "1px solid var(--border-color)";
+                tr.innerHTML = `
+                    <td style="color:var(--text-muted); padding: 4px;">${(ce.delta || 0).toFixed(2)}</td>
+                    <td style="color:var(--text-muted); padding: 4px;">${(ce.theta || 0).toFixed(2)}</td>
+                    <td style="padding: 4px;">${(ce.iv || 0).toFixed(2)}%</td>
+                    <td style="padding: 4px;">${ce.volume || 0}</td>
+                    <td style="font-weight:bold;color:#00d084;background:rgba(0,208,132,0.05); padding: 4px;">${(ce.ltp || 0).toFixed(2)}</td>
+                    
+                    <td style="font-weight:bold;background:var(--bg-dark);color:var(--text-color); padding: 4px;">${row.strike_price}</td>
+                    
+                    <td style="font-weight:bold;color:#ff4757;background:rgba(255,71,87,0.05); padding: 4px;">${(pe.ltp || 0).toFixed(2)}</td>
+                    <td style="padding: 4px;">${pe.volume || 0}</td>
+                    <td style="padding: 4px;">${(pe.iv || 0).toFixed(2)}%</td>
+                    <td style="color:var(--text-muted); padding: 4px;">${(pe.theta || 0).toFixed(2)}</td>
+                    <td style="color:var(--text-muted); padding: 4px;">${(pe.delta || 0).toFixed(2)}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+            
+            if (data.chain.length === 0) {
+                 tbody.innerHTML = `<tr><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-muted);">No option contracts found. Check if the market is open or if the asset has derivatives.</td></tr>`;
+            }
+        } else {
+             tbody.innerHTML = `<tr><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-danger);">${data.message || 'Failed to fetch chain'}</td></tr>`;
+        }
+    } catch(e) {
+        tbody.innerHTML = `<tr><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-danger);">Network error fetching Options Chain</td></tr>`;
+    }
+}
+
+
+async function selectInstrument(instrumentKey, name, element) {
+    if (currentInstrumentKey === instrumentKey) return;
     
     currentInstrumentKey = instrumentKey;
     currentInstrumentName = name;
     
-    showToast(`Loaded ${name}`);
-    await fetchHistoricalCandles(instrumentKey);
-    loadStrategy();
+    // Automatically perform sequential load of candles and strategy matrix
+    setChartTimeframe(currentInterval);
 }
 
 async function fetchHistoricalCandles(instrumentKey) {
@@ -464,28 +543,113 @@ async function saveRiskConfig() {
     }
 }
 
-async function loadStrategy() {
-    const timeframe = document.getElementById("param-timeframe").value;
-    const atrPeriod = document.getElementById("param-atr-period").value;
-    const atrMult = document.getElementById("param-atr-mult").value;
+let dynamicSchemas = {};
 
+async function fetchStrategySchemas() {
     try {
+        const res = await fetch(`${API_BASE}/strategies/schema`);
+        if (!res.ok) return;
+        const data = await res.json();
+        
+        const selector = document.getElementById("strategy-selector");
+        selector.innerHTML = "";
+        
+        data.strategies.forEach(s => {
+            dynamicSchemas[s.id] = s;
+            const opt = document.createElement("option");
+            opt.value = s.id;
+            opt.dataset.class = s.class;
+            opt.innerText = s.name;
+            selector.appendChild(opt);
+        });
+        
+        renderDynamicStrategyForm();
+    } catch(e) {
+        console.error("Failed to load strategy schemas", e);
+    }
+}
+
+function renderDynamicStrategyForm() {
+    const selector = document.getElementById("strategy-selector");
+    if (!selector) return;
+    const sid = selector.value;
+    const schema = dynamicSchemas[sid];
+    if (!schema) return;
+    
+    const container = document.getElementById("dynamic-strategy-container");
+    container.innerHTML = "";
+    
+    schema.params.forEach(p => {
+        if (p.type === 'boolean') {
+            container.innerHTML += `
+                <div class="form-group" style="margin-top: 8px;">
+                    <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--text-secondary);">
+                        <input type="checkbox" class="dyn-param" data-name="${p.name}" ${p.default ? 'checked' : ''}> ${p.name.replace(/_/g, ' ')}
+                    </label>
+                </div>`;
+        } else if (p.type === 'number') {
+            container.innerHTML += `
+                <div class="form-group" style="margin-top: 8px;">
+                    <label class="form-label">${p.name.replace(/_/g, ' ')}</label>
+                    <input type="number" class="form-input dyn-param" data-name="${p.name}" value="${p.default}" ${p.name.includes('mult') || p.name.includes('pct') ? 'step="0.1"' : ''}>
+                </div>`;
+        } else {
+            container.innerHTML += `
+                <div class="form-group" style="margin-top: 8px;">
+                    <label class="form-label">${p.name.replace(/_/g, ' ')}</label>
+                    <input type="text" class="form-input dyn-param" data-name="${p.name}" value="${p.default}">
+                </div>`;
+        }
+    });
+}
+
+function getDynamicParams() {
+    const params = {};
+    document.querySelectorAll('.dyn-param').forEach(el => {
+        let val;
+        if (el.type === 'checkbox') val = el.checked;
+        else if (el.type === 'number') val = Number(el.value);
+        else val = el.value;
+        params[el.dataset.name] = val;
+    });
+    return params;
+}
+
+async function loadStrategy() {
+    if (!currentInstrumentKey) {
+        showToast("Please select an instrument first", "warning");
+        return;
+    }
+    
+    const selector = document.getElementById("strategy-selector");
+    const strategyId = selector.value;
+    const strategyClass = selector.options[selector.selectedIndex].dataset.class;
+    const strategyName = selector.options[selector.selectedIndex].innerText;
+    
+    try {
+        const payloadParams = getDynamicParams();
+        
         const params = new URLSearchParams({
-            strategy_class: "SuperTrendPro",
-            name: "SuperTrend Pro v6.3",
+            strategy_class: strategyClass,
+            name: strategyName,
             instruments: currentInstrumentKey,
-            timeframe: timeframe,
+            timeframe: currentInterval,
             paper_trading: true // Fixed to paper trading for safety right now
         });
         
-        const res = await fetch(`${API_BASE}/engine/load-strategy?${params.toString()}`, { method: "POST" });
+        const res = await fetch(`${API_BASE}/engine/load-strategy?${params.toString()}`, { 
+            method: "POST",
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payloadParams)
+        });
         if (res.ok) {
             showToast(`Applied strategy to ${currentInstrumentName}`, "success");
             addLog(`Loaded SuperTrend Pro on ${currentInstrumentName}`, "success");
             refreshStatus();
             
             // Now fetch the visual overlay to plot on the chart!
-            fetchStrategyOverlay(currentInstrumentKey, currentInterval, atrPeriod, atrMult);
+            const dynParams = getDynamicParams();
+            fetchStrategyOverlay(currentInstrumentKey, currentInterval, strategyClass, dynParams);
         }
     } catch (e) {
         showToast("Failed to apply strategy", "error");
@@ -498,7 +662,7 @@ function parseUpstoxDate(isoString) {
     return (new Date(isoString).getTime() / 1000) + 19800;
 }
 
-async function fetchStrategyOverlay(instrumentKey, timeframe, atrPeriod, multiplier) {
+async function fetchStrategyOverlay(instrumentKey, timeframe, strategyClass, customParams) {
     try {
         const toDateObj = new Date();
         const fromDateObj = new Date();
@@ -517,8 +681,8 @@ async function fetchStrategyOverlay(instrumentKey, timeframe, atrPeriod, multipl
             timeframe: timeframe,
             from_date: fromDateStr,
             to_date: toDateStr,
-            atr_period: atrPeriod,
-            multiplier: multiplier
+            strategy_class: strategyClass,
+            params: JSON.stringify(customParams)
         });
         const res = await fetch(`${API_BASE}/market/strategy-overlay?${params.toString()}`);
         if (res.ok) {
@@ -741,5 +905,51 @@ async function refreshSignals() {
         }).join('');
     } catch (e) {
         console.error("Signals refresh failed", e);
+    }
+}
+
+// ── Settings Modal ────────────────────────────────────────────
+
+async function openSettings() {
+    try {
+        const res = await fetch(`${API_BASE}/settings/`);
+        const data = await res.json();
+        
+        document.getElementById('setting-api-key').value = data.API_KEY || '';
+        document.getElementById('setting-api-secret').value = data.API_SECRET || '';
+        document.getElementById('setting-redirect-uri').value = data.REDIRECT_URI || '';
+        
+        document.getElementById('settings-modal').showModal();
+    } catch (e) {
+        showToast("Failed to load settings", "error");
+    }
+}
+
+async function saveSettings() {
+    const key = document.getElementById('setting-api-key').value;
+    const secret = document.getElementById('setting-api-secret').value;
+    const uri = document.getElementById('setting-redirect-uri').value;
+    
+    const payload = {};
+    if (key && !key.includes('...')) payload.API_KEY = key;
+    if (secret && !secret.includes('***')) payload.API_SECRET = secret;
+    if (uri) payload.REDIRECT_URI = uri;
+    
+    try {
+        const res = await fetch(`${API_BASE}/settings/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        
+        if (data.status === 'success') {
+            showToast("Settings saved to .env securely", "success");
+            document.getElementById('settings-modal').close();
+        } else {
+            showToast("Failed to save settings", "error");
+        }
+    } catch (e) {
+        showToast("Error saving settings", "error");
     }
 }

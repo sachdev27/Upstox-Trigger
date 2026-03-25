@@ -48,11 +48,13 @@ class MarketDataService:
             "1m": ("1minute", False, None),
             "1minute": ("1minute", False, None),
             "5m": ("1minute", True, "5Min"),
+            "5minute": ("1minute", True, "5Min"),
             "15m": ("1minute", True, "15Min"),
             "15minute": ("1minute", True, "15Min"),
             "30m": ("1minute", True, "30Min"), # Resampling from 1m to ensure accurate boundaries
             "30minute": ("30minute", False, None),
             "1H": ("1minute", True, "60Min"),
+            "1hour": ("1minute", True, "60Min"),
             "4H": ("1minute", True, "240Min"),
             "1D": ("day", False, None),
             "day": ("day", False, None),

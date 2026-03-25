@@ -184,13 +184,14 @@ async def get_strategy_overlay(
     timeframe: str = Query("1minute"),
     from_date: str | None = Query(None),
     to_date: str | None = Query(None),
-    atr_period: int = Query(10),
-    multiplier: float = Query(3.0)
+    strategy_class: str = Query("SuperTrendPro"),
+    params: str = Query("{}")
 ):
     """
-    Compute SuperTrend indicator arrays for the frontend chart.
-    Returns a sequence of {time, upper, lower, trend} mapped to the candles.
+    Compute algorithmic indicator arrays for the frontend chart.
+    Accepts arbitrary JSON parameter payloads to adapt to dynamic Web UI forms.
     """
+    import json
     svc = _get_market_service()
     candles = svc.get_historical_candles(instrument_key, timeframe, from_date, to_date)
     
@@ -202,31 +203,128 @@ async def get_strategy_overlay(
     from app.strategies.supertrend_pro import SuperTrendPro
     from app.strategies.base import StrategyConfig
     
+    try:
+        parsed_params = json.loads(params)
+    except Exception:
+        parsed_params = {}
+        
     df = pd.DataFrame(candles)
     for col in ["open", "high", "low", "close", "volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
             
     # Calculate dashboard matrix
-    config = StrategyConfig(name="SuperTrend Pro v6.3", instruments=[instrument_key], timeframe=timeframe)
-    strategy = SuperTrendPro(config)
-    strategy.params["atr_period"] = atr_period
-    strategy.params["atr_multiplier"] = multiplier
-    metrics = strategy.get_dashboard_state(df)
+    config = StrategyConfig(name="Dynamic Execution", instruments=[instrument_key], timeframe=timeframe)
     
-    st_df = supertrend(df, period=atr_period, multiplier=multiplier, use_rma=True)
-    
-    overlay = []
-    for i in range(len(df)):
-        c = df.iloc[i]
-        s = st_df.iloc[i]
-        overlay.append({
-            "datetime": c["datetime"],
-            "trend": int(s["trend"]),
-            "supertrend": None if pd.isna(s["supertrend"]) else float(s["supertrend"]),
-            "upper": None if pd.isna(s["upper_band"]) else float(s["upper_band"]),
-            "lower": None if pd.isna(s["lower_band"]) else float(s["lower_band"])
-        })
+    if strategy_class == "SuperTrendPro":
+        strategy = SuperTrendPro(config)
+        strategy.params.update(parsed_params)
+        metrics = strategy.get_dashboard_state(df)
         
-    return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
+        # Native SuperTrend Extraction
+        p_atr = strategy.params.get("atr_period", 10)
+        p_mult = strategy.params.get("atr_multiplier", 3.0)
+        st_df = supertrend(df, period=p_atr, multiplier=p_mult, use_rma=True)
+        
+        overlay = []
+        for i in range(len(df)):
+            c = df.iloc[i]
+            s = st_df.iloc[i]
+            overlay.append({
+                "datetime": c["datetime"],
+                "trend": int(s["trend"]),
+                "supertrend": None if pd.isna(s["supertrend"]) else float(s["supertrend"]),
+                "upper": None if pd.isna(s["upper_band"]) else float(s["upper_band"]),
+                "lower": None if pd.isna(s["lower_band"]) else float(s["lower_band"])
+            })
+            
+        return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
+    else:
+        return {"status": "error", "message": f"Strategy class {strategy_class} native graphics overlay not yet supported.", "overlay": []}
+
+
+@router.get("/option-chain")
+async def get_option_chain(
+    instrument_key: str = Query(...),
+    expiry_date: str | None = Query(None)
+):
+    """Fetch live option chain (Calls, Puts, Greeks) for an instrument."""
+    svc = _get_market_service()
+    
+    import upstox_client
+    from upstox_client.rest import ApiException
+    
+    try:
+        api = upstox_client.OptionsApi(upstox_client.ApiClient(svc.config))
+        
+        # 1. Resolve Expiry Date if not provided by pulling nearest contract
+        if not expiry_date:
+            contracts_res = api.get_option_contracts(instrument_key)
+            contracts_data = contracts_res.to_dict().get("data", [])
+            if not contracts_data:
+                return {"status": "error", "message": "No option contracts found for this instrument.", "chain": []}
+            expiry_date = contracts_data[0].get("expiry")
+            
+        if not expiry_date:
+            return {"status": "error", "message": "Could not determine expiry date.", "chain": []}
+            
+        # 2. Fetch Option Chain directly via the SDK
+        chain_res = api.get_put_call_option_chain(instrument_key, expiry_date)
+        chain_data = chain_res.to_dict().get("data", [])
+        
+        # 3. Flatten the heavily nested SDK objects into a clean 2D Dict Matrix
+        matrix = []
+        for strike in chain_data:
+            sp = strike.get("strike_price")
+            pcr = strike.get("pcr")
+            
+            ce = strike.get("call_options", {})
+            pe = strike.get("put_options", {})
+            
+            if not ce and not pe:
+                continue
+                
+            def _extract_greeks(opt_data):
+                if not opt_data: return {}
+                g = opt_data.get("option_greeks", {}) or {}
+                m = opt_data.get("market_data", {}) or {}
+                return {
+                    "instrument_key": opt_data.get("instrument_key"),
+                    "ltp": m.get("ltp", 0.0),
+                    "volume": m.get("volume", 0),
+                    "oi": m.get("oi", 0.0),
+                    "iv": g.get("iv", 0.0),
+                    "delta": g.get("delta", 0.0),
+                    "theta": g.get("theta", 0.0),
+                    "gamma": g.get("gamma", 0.0),
+                    "vega": g.get("vega", 0.0),
+                }
+
+            matrix.append({
+                "strike_price": sp,
+                "pcr": pcr,
+                "ce": _extract_greeks(ce),
+                "pe": _extract_greeks(pe)
+            })
+            
+        # Sort by strike price ascending
+        matrix.sort(key=lambda x: x["strike_price"])
+        
+        return {
+            "status": "success",
+            "instrument_key": instrument_key,
+            "expiry": expiry_date,
+            "chain": matrix
+        }
+        
+    except ApiException as e:
+        import json
+        try:
+            err_body = json.loads(e.body)
+            msg = err_body.get('errors', [{}])[0].get('message', e.body)
+        except:
+            msg = e.body
+        return {"status": "error", "message": f"Upstox API Error {e.status}: {msg}", "chain": []}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "chain": []}
 

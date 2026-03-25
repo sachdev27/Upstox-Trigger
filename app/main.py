@@ -22,6 +22,7 @@ from app.market_data.routes import router as market_router
 from app.orders.routes import router as orders_router
 from app.strategies.routes import router as strategies_router
 from app.engine_routes import router as engine_router
+from app.settings_routes import router as config_router
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,7 @@ app.include_router(market_router)
 app.include_router(orders_router)
 app.include_router(strategies_router)
 app.include_router(engine_router)
+app.include_router(config_router)
 
 # ── Static files (frontend) ────────────────────────────────────
 frontend_dir = BASE_DIR / "frontend"
