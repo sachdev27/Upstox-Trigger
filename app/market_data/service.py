@@ -249,3 +249,130 @@ class MarketDataService:
                 ):
                     return dict(row)
         return None
+
+    # ── SDK-Native Instrument Search ─────────────────────────────
+
+    def search_instrument_sdk(
+        self, query: str, page_size: int = 10
+    ) -> list[dict]:
+        """
+        Search instruments using the SDK's InstrumentsApi.
+        No need to download CSV — the SDK queries the API directly.
+
+        Args:
+            query: Search term, e.g. "Reliance" or "NIFTY"
+            page_size: Number of results to return
+        """
+        api = upstox_client.InstrumentsApi(
+            upstox_client.ApiClient(self.config)
+        )
+        try:
+            response = api.search_instrument(self.api_version, query)
+            data = response.to_dict()
+            instruments = data.get("data", {}).get("instruments", [])
+            return instruments[:page_size]
+        except Exception as e:
+            logger.error(f"Instrument search failed for '{query}': {e}")
+            return []
+
+    # ── Market Status & Holidays ─────────────────────────────────
+
+    def get_market_status(self, exchange: str = "NSE") -> dict | None:
+        """
+        Get real-time market status (open/closed) using the SDK.
+        Replaces manual market hours checking.
+        """
+        api = upstox_client.MarketHolidaysAndTimingsApi(
+            upstox_client.ApiClient(self.config)
+        )
+        try:
+            response = api.get_market_status(exchange)
+            return response.to_dict().get("data", {})
+        except Exception as e:
+            logger.error(f"Market status check failed: {e}")
+            return None
+
+    def get_holidays(self) -> list:
+        """Get list of market holidays."""
+        api = upstox_client.MarketHolidaysAndTimingsApi(
+            upstox_client.ApiClient(self.config)
+        )
+        try:
+            response = api.get_holidays()
+            return response.to_dict().get("data", [])
+        except Exception as e:
+            logger.error(f"Holidays fetch failed: {e}")
+            return []
+
+    def get_exchange_timings(self, date: str) -> list:
+        """Get exchange timings for a specific date (YYYY-MM-DD)."""
+        api = upstox_client.MarketHolidaysAndTimingsApi(
+            upstox_client.ApiClient(self.config)
+        )
+        try:
+            response = api.get_exchange_timings(date)
+            return response.to_dict().get("data", [])
+        except Exception as e:
+            logger.error(f"Exchange timings fetch failed: {e}")
+            return []
+
+    # ── Options ──────────────────────────────────────────────────
+
+    def get_option_chain(
+        self, instrument_key: str, expiry_date: str
+    ) -> dict | None:
+        """Get put/call option chain for an instrument and expiry."""
+        api = upstox_client.OptionsApi(
+            upstox_client.ApiClient(self.config)
+        )
+        try:
+            response = api.get_put_call_option_chain(
+                instrument_key, expiry_date
+            )
+            return response.to_dict().get("data", {})
+        except Exception as e:
+            logger.error(f"Option chain fetch failed: {e}")
+            return None
+
+    def get_option_contracts(
+        self, instrument_key: str, expiry_date: str | None = None
+    ) -> list:
+        """Get available option contracts."""
+        api = upstox_client.OptionsApi(
+            upstox_client.ApiClient(self.config)
+        )
+        try:
+            if expiry_date:
+                response = api.get_option_contracts(
+                    instrument_key, expiry_date
+                )
+            else:
+                response = api.get_option_contracts(instrument_key)
+            return response.to_dict().get("data", [])
+        except Exception as e:
+            logger.error(f"Option contracts fetch failed: {e}")
+            return []
+
+    # ── Charges & Brokerage ──────────────────────────────────────
+
+    def get_brokerage(
+        self,
+        instrument_token: str,
+        quantity: int,
+        product: str,
+        transaction_type: str,
+        price: float,
+    ) -> dict | None:
+        """Calculate brokerage charges for a trade before execution."""
+        api = upstox_client.ChargeApi(
+            upstox_client.ApiClient(self.config)
+        )
+        try:
+            response = api.get_brokerage(
+                instrument_token, quantity, product,
+                transaction_type, price
+            )
+            return response.to_dict().get("data", {})
+        except Exception as e:
+            logger.error(f"Brokerage calc failed: {e}")
+            return None

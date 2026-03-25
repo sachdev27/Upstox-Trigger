@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Upstox Trading Automation Terminal">
+    <title>Upstox Trading Automation</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>⚡</text></svg>">
+    <!-- Lightweight Charts for the main UI -->
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+
+    <!-- ═══ Header ═══════════════════════════════════════ -->
+    <header class="header">
+        <div class="header-left">
+            <div class="header-logo">⚡</div>
+            <div>
+                <div class="header-title">Upstox Trading Terminal</div>
+                <div class="header-subtitle">SuperTrend Pro v6.3 • API v2</div>
+            </div>
+        </div>
+        <div class="header-right">
+            <span class="status-badge offline" id="ws-status">
+                <span class="dot"></span>
+                <span id="ws-status-text">Disconnected</span>
+            </span>
+            <span class="status-badge offline" id="auth-status">
+                <span class="dot"></span>
+                <span id="auth-status-text">Auth Unknown</span>
+            </span>
+            <button class="btn btn-outline" style="width: auto; padding: 4px 10px;" onclick="loginUpstox()">🔐 Login</button>
+            <span id="clock" class="mono" style="color: var(--text-muted); font-size: 0.8rem; margin-left: 10px;"></span>
+        </div>
+    </header>
+
+    <!-- ═══ Terminal Layout ══════════════════════════════ -->
+    <div class="terminal-layout">
+        
+        <!-- ── Left Panel (Instruments) ── -->
+        <aside class="panel-left">
+            <div class="panel-header">Instruments</div>
+            <div class="search-box">
+                <input type="text" id="instrument-search" class="search-input" placeholder="Search (e.g. NIFTY)...">
+            </div>
+            <div class="watchlist" id="watchlist">
+                <!-- Hardcoded for now until search runs -->
+                <div class="watchlist-item active" onclick="selectInstrument('NSE_INDEX|Nifty 50', 'Nifty 50')">
+                    <div>
+                        <div class="instrument-name">Nifty 50</div>
+                        <div class="instrument-type">NSE_INDEX</div>
+                    </div>
+                </div>
+                <div class="watchlist-item" onclick="selectInstrument('NSE_INDEX|Nifty Bank', 'Nifty Bank')">
+                    <div>
+                        <div class="instrument-name">Nifty Bank</div>
+                        <div class="instrument-type">NSE_INDEX</div>
+                    </div>
+                </div>
+                <div class="watchlist-item" onclick="selectInstrument('NSE_EQ|INE002A01018', 'Reliance')">
+                    <div>
+                        <div class="instrument-name">Reliance</div>
+                        <div class="instrument-type">NSE_EQ</div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- ── Center Panel (Chart & Logs) ── -->
+        <main class="panel-center">
+            
+            <!-- Chart Container -->
+            <div id="tvchart" class="chart-container">
+                <!-- Lightweight Charts injected here via JS -->
+            </div>
+
+            <!-- Bottom Tabs/Tables -->
+            <div class="bottom-panel">
+                <div class="bottom-tabs">
+                    <button class="bottom-tab active" onclick="switchBottomTab('positions')">Open Positions</button>
+                    <button class="bottom-tab" onclick="switchBottomTab('trades')">Trade History</button>
+                    <button class="bottom-tab" onclick="switchBottomTab('signals')">Signals</button>
+                    <button class="bottom-tab" onclick="switchBottomTab('activity')">Activity Log</button>
+                </div>
+                
+                <!-- Positions Tab -->
+                <div id="tab-positions" class="bottom-content active">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Instrument</th>
+                                <th>Qty</th>
+                                <th>Side</th>
+                                <th>Avg Price</th>
+                                <th>LTP</th>
+                                <th>P&L</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-body">
+                            <tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">No open positions</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Trades Tab -->
+                <div id="tab-trades" class="bottom-content">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Action</th>
+                                <th>Instrument</th>
+                                <th>Price</th>
+                                <th>SL</th>
+                                <th>TP</th>
+                                <th>Mode</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trades-body">
+                            <tr><td colspan="7" style="text-align:center; padding: 20px;" class="text-muted">No trades today</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Signals Tab -->
+                <div id="tab-signals" class="bottom-content">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Action</th>
+                                <th>Instrument</th>
+                                <th>Price</th>
+                                <th>Score</th>
+                            </tr>
+                        </thead>
+                        <tbody id="signals-body">
+                            <tr><td colspan="5" style="text-align:center; padding: 20px;" class="text-muted">No signals generated</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Activity Log -->
+                <div id="tab-activity" class="bottom-content" style="background: var(--bg-dark); overflow-y: auto;">
+                    <div id="activity-log" style="padding: 8px 0;">
+                        <div class="log-line"><span class="log-time">[System]</span> Terminal initialized.</div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- ── Right Panel (Controls) ── -->
+        <aside class="panel-right">
+            
+            <div class="panel-header">Engine Control</div>
+            <div class="control-section">
+                
+                <div class="auto-mode-card" id="auto-mode-card">
+                    <div>
+                        <div style="font-weight: 600; font-size: 0.95rem;">Auto Mode</div>
+                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">Trades autonomously</div>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="toggle-automode" onchange="toggleAutoMode(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+
+                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                    <button class="btn btn-primary" onclick="initializeEngine()">🚀 Initialize</button>
+                    <button class="btn btn-outline" onclick="runCycle()">🔄 Run 1x</button>
+                </div>
+                <div style="font-size: 0.75rem; text-align: center; color: var(--text-muted);">
+                    Status: <span id="engine-status-text" class="text-warning">Not Initialized</span>
+                </div>
+            </div>
+
+            <div class="panel-header">Capital & Risk</div>
+            <div class="control-section">
+                <div class="form-group">
+                    <label class="form-label">Trading Capital (₹)</label>
+                    <input type="number" id="risk-capital" class="form-input" value="100000">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Risk Per Trade (%)</label>
+                    <input type="number" id="risk-pct" class="form-input" value="1.0" step="0.1">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Max Daily Loss (%)</label>
+                    <input type="number" id="risk-maxloss" class="form-input" value="3.0" step="0.1">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Max Open Trades</label>
+                    <input type="number" id="risk-maxtrades" class="form-input" value="3">
+                </div>
+                <button class="btn btn-outline" style="margin-top: 8px;" onclick="saveRiskConfig()">💾 Save Risk Settings</button>
+                
+                <div style="margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--border-color);">
+                    <div class="stat-row">
+                        <span class="text-muted">Daily P&L:</span>
+                        <span id="disp-pnl" class="mono text-muted">₹0.00</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="text-muted">Max Loss Limit:</span>
+                        <span id="disp-maxloss" class="mono text-danger">-₹3000.00</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel-header">Strategy Settings</div>
+            <div class="control-section">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
+                    <span style="font-weight: 500; font-size: 0.85rem;">SuperTrend Pro</span>
+                    <span class="badge paper">Paper</span>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">Timeframe</label>
+                    <select id="param-timeframe" class="form-input">
+                        <option value="1m">1 Minute</option>
+                        <option value="5m">5 Minutes</option>
+                        <option value="15m" selected>15 Minutes</option>
+                        <option value="30m">30 Minutes</option>
+                        <option value="1H">1 Hour</option>
+                    </select>
+                </div>
+                
+                <div style="display: flex; gap: 8px;">
+                    <div class="form-group" style="flex: 1;">
+                        <label class="form-label">ATR Len</label>
+                        <input type="number" id="param-atr-period" class="form-input" value="10">
+                    </div>
+                    <div class="form-group" style="flex: 1;">
+                        <label class="form-label">Multiplier</label>
+                        <input type="number" id="param-atr-mult" class="form-input" value="3.0" step="0.1">
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-top: 8px;">
+                    <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--text-secondary);">
+                        <input type="checkbox" id="param-dual-st" checked> Dual SuperTrendGate
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--text-secondary);">
+                        <input type="checkbox" id="param-consec" checked> Consecutive Bar Gate
+                    </label>
+                </div>
+                
+                <button class="btn btn-primary" style="margin-top: 12px;" onclick="loadStrategy()">
+                    ✅ Apply to Selected Instrument
+                </button>
+            </div>
+
+        </aside>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

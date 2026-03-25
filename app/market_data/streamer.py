@@ -1,132 +1,145 @@
 """
-WebSocket Market Data Streamer — real-time price feeds.
+Market Data Streamer — uses the SDK's built-in MarketDataStreamerV3.
 
-Refactored from legacy/live_data/websocket_market.py.
-Uses the Upstox SDK's WebSocket API with protobuf decoding.
+This replaces our entire custom WebSocket implementation with the SDK's
+battle-tested streamer that handles protobuf decoding, auto-reconnect,
+and subscription management natively.
+
+SDK docs: https://upstox.com/developer/api-documentation/streamer-function
 """
 
-import asyncio
-import json
 import logging
-import ssl
-from typing import Callable, Any
+from typing import Callable
 
 import upstox_client
-import websockets
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Try importing protobuf — will be generated/available at runtime
-try:
-    from legacy.live_data import marketDataFeed_pb2 as pb
-
-    HAS_PROTOBUF = True
-except ImportError:
-    HAS_PROTOBUF = False
-    logger.warning("Protobuf module not found — streamer will use JSON mode.")
-
 
 class MarketDataStreamer:
     """
-    Async WebSocket streamer for real-time market data.
+    Thin wrapper around the SDK's MarketDataStreamerV3.
 
     Usage:
         streamer = MarketDataStreamer(configuration)
         streamer.on_tick = my_callback
-        await streamer.connect(["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"])
+        streamer.start(["NSE_INDEX|Nifty 50"])
     """
 
     def __init__(self, configuration: upstox_client.Configuration):
         self.config = configuration
         self.settings = get_settings()
+        self._streamer: upstox_client.MarketDataStreamerV3 | None = None
         self.on_tick: Callable[[dict], None] | None = None
-        self._websocket = None
-        self._running = False
+        self.on_open: Callable[[], None] | None = None
+        self.on_close: Callable[[], None] | None = None
+        self.on_error: Callable[[Exception], None] | None = None
 
-    async def connect(
+    def start(
         self,
         instrument_keys: list[str],
         mode: str = "full",
     ):
         """
-        Connect to Upstox WebSocket and start streaming.
+        Start streaming market data for the given instruments.
 
         Args:
-            instrument_keys: List of instrument keys to subscribe
-            mode: "full", "ltpc", or "option_greeks"
+            instrument_keys: e.g. ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]
+            mode: "full", "ltpc", "full_d30", or "option_greeks"
         """
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-
-        # Get WebSocket authorization
-        api = upstox_client.WebsocketApi(
-            upstox_client.ApiClient(self.config)
+        api_client = upstox_client.ApiClient(self.config)
+        self._streamer = upstox_client.MarketDataStreamerV3(
+            api_client, instrument_keys, mode
         )
-        auth_response = api.get_market_data_feed_authorize(
-            self.settings.API_VERSION
-        )
-        ws_url = auth_response.data.authorized_redirect_uri
 
-        logger.info(f"Connecting to WebSocket: {ws_url[:50]}...")
+        # Enable auto-reconnect (retry 5 times, 10 second interval)
+        self._streamer.auto_reconnect(enable=True, interval=10, retryCount=5)
 
-        async with websockets.connect(ws_url, ssl=ssl_context) as ws:
-            self._websocket = ws
-            self._running = True
-            logger.info("WebSocket connected.")
+        # Wire up event handlers
+        self._streamer.on("open", self._handle_open)
+        self._streamer.on("message", self._handle_message)
+        self._streamer.on("close", self._handle_close)
+        self._streamer.on("error", self._handle_error)
+        self._streamer.on("reconnecting", self._handle_reconnecting)
 
-            await asyncio.sleep(1)
+        logger.info(f"Starting market data stream for {len(instrument_keys)} instruments ({mode})...")
+        self._streamer.connect()
 
-            # Subscribe to instruments
-            subscribe_msg = {
-                "guid": "upstox-automation",
-                "method": "sub",
-                "data": {
-                    "mode": mode,
-                    "instrumentKeys": instrument_keys,
-                },
-            }
-            await ws.send(json.dumps(subscribe_msg).encode("utf-8"))
-            logger.info(
-                f"Subscribed to {len(instrument_keys)} instruments in '{mode}' mode."
-            )
+    def subscribe(self, instrument_keys: list[str], mode: str = "full"):
+        """Subscribe to additional instruments on a running connection."""
+        if self._streamer:
+            self._streamer.subscribe(instrument_keys, mode)
+            logger.info(f"Subscribed to {len(instrument_keys)} more instruments.")
 
-            # Receive loop
-            while self._running:
-                try:
-                    message = await ws.recv()
-                    data = self._decode(message)
-                    if data and self.on_tick:
-                        self.on_tick(data)
-                except websockets.ConnectionClosed:
-                    logger.warning("WebSocket connection closed.")
-                    break
-                except Exception as e:
-                    logger.error(f"Streamer error: {e}")
+    def unsubscribe(self, instrument_keys: list[str]):
+        """Unsubscribe from instruments."""
+        if self._streamer:
+            self._streamer.unsubscribe(instrument_keys)
+            logger.info(f"Unsubscribed from {len(instrument_keys)} instruments.")
 
-    async def disconnect(self):
-        """Stop the streamer."""
-        self._running = False
-        if self._websocket:
-            await self._websocket.close()
-            logger.info("WebSocket disconnected.")
+    def change_mode(self, instrument_keys: list[str], mode: str):
+        """Change the data mode for subscribed instruments."""
+        if self._streamer:
+            self._streamer.change_mode(instrument_keys, mode)
 
-    def _decode(self, buffer: bytes) -> dict | None:
-        """Decode protobuf or JSON WebSocket message."""
-        if HAS_PROTOBUF:
-            try:
-                from google.protobuf.json_format import MessageToDict
+    def stop(self):
+        """Disconnect the streamer."""
+        if self._streamer:
+            self._streamer.disconnect()
+            logger.info("Market data streamer disconnected.")
 
-                feed = pb.FeedResponse()
-                feed.ParseFromString(buffer)
-                return MessageToDict(feed)
-            except Exception:
-                pass
+    # ── Event handlers ──────────────────────────────────────────
 
-        # Fallback to JSON
-        try:
-            return json.loads(buffer)
-        except Exception:
-            return None
+    def _handle_open(self):
+        logger.info("✅ Market data WebSocket connected.")
+        if self.on_open:
+            self.on_open()
+
+    def _handle_message(self, message):
+        if self.on_tick:
+            self.on_tick(message)
+
+    def _handle_close(self):
+        logger.info("🔌 Market data WebSocket closed.")
+        if self.on_close:
+            self.on_close()
+
+    def _handle_error(self, error):
+        logger.error(f"❌ Market data streamer error: {error}")
+        if self.on_error:
+            self.on_error(error)
+
+    def _handle_reconnecting(self):
+        logger.info("🔄 Reconnecting to market data stream...")
+
+
+class PortfolioStreamer:
+    """
+    Thin wrapper around the SDK's PortfolioDataStreamer.
+    Receives real-time order and position updates.
+    """
+
+    def __init__(self, configuration: upstox_client.Configuration):
+        self.config = configuration
+        self._streamer: upstox_client.PortfolioDataStreamer | None = None
+        self.on_update: Callable[[dict], None] | None = None
+
+    def start(self):
+        """Start receiving portfolio updates."""
+        api_client = upstox_client.ApiClient(self.config)
+        self._streamer = upstox_client.PortfolioDataStreamer(api_client)
+        self._streamer.on("message", self._handle_message)
+        logger.info("Starting portfolio data stream...")
+        self._streamer.connect()
+
+    def _handle_message(self, message):
+        logger.info(f"📋 Portfolio update: {message}")
+        if self.on_update:
+            self.on_update(message)
+
+    def stop(self):
+        """Stop portfolio stream."""
+        if self._streamer:
+            self._streamer.disconnect()
