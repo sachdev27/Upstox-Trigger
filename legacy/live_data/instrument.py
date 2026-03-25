@@ -61,11 +61,17 @@ def round_to_nearest(number, diff):
 
 def get_nearest_expiry(instrument_name):
     today = datetime.today()
-    # Find the nearest Thursday or Wednesday
-    if instrument_name == "NIFTY":
-        nearest_expiry = today + timedelta(days=(3 - today.weekday() + 7) % 7)
-    elif instrument_name == "BANKNIFTY":
-        nearest_expiry = today + timedelta(days=(2 - today.weekday() + 7) % 7)
+
+    if instrument_name == "BANKNIFTY" :
+        # Calculate days to the nearest Wednesday (weekday 2)
+        days_until_wednesday = (2 - today.weekday() + 7) % 7
+        nearest_expiry = today + timedelta(days=days_until_wednesday)
+
+    if instrument_name == "NIFTY" :
+        # Calculate days to the nearest Thursday (weekday 3)
+        days_until_thursday = (3 - today.weekday() + 7) % 7
+        nearest_expiry = today + timedelta(days=days_until_thursday)
+
     # Format the date as per your requirement
     formatted_expiry = nearest_expiry.strftime('%Y-%m-%d')
 
@@ -99,32 +105,41 @@ def cache_options_data(csv_filename, cache_filename):
         json.dump(options_data, cache_file)
 
 def categorize_options(instrument_name, ticker, csv_filename='instrument_list.csv', cache_filename='options_cache.json'):
-    if not os.path.exists(cache_filename) or os.path.getsize(cache_filename) == 0:
-        cache_options_data(csv_filename, cache_filename)
+    # if not os.path.exists(cache_filename) or os.path.getsize(cache_filename) == 0:
+    cache_options_data(csv_filename, cache_filename)
 
     with open(cache_filename, 'r') as cache_file:
         options_data = json.load(cache_file)
 
     nearest_expiry_date = get_nearest_expiry(instrument_name)
+    # print(nearest_expiry_date)
     ce_options = [row for row in options_data['CE'] if row['tradingsymbol'].startswith(instrument_name) and row["expiry"] == nearest_expiry_date]
     pe_options = [row for row in options_data['PE'] if row['tradingsymbol'].startswith(instrument_name) and row["expiry"] == nearest_expiry_date]
 
+
+    # print(ce_options,pe_options)
     if ce_options and pe_options:
-        # Assuming strikes are sorted
-        diff = abs(float(ce_options[0]["strike"]) - float(ce_options[1]["strike"]))
-        ticker = round_to_nearest(float(ticker), diff)
+        if instrument_name == 'BANKNIFTY':
+            diff = 100
+        elif instrument_name in ['NIFTY', 'FINNIFTY']:
+            diff = 50
 
-        current_ticker_index_ce = next((i for i, option in enumerate(ce_options) if float(option['strike']) == ticker), None)
-        current_ticker_index_pe = next((i for i, option in enumerate(pe_options) if float(option['strike']) == ticker), None)
 
-        if current_ticker_index_ce is not None:
-            top_5_ce_options_down = ce_options[max(0, current_ticker_index_ce-5):current_ticker_index_ce+1]
-            top_5_pe_options_up = pe_options[current_ticker_index_pe:current_ticker_index_pe+6]
+        ticker_rounded = round_to_nearest(ticker, diff)
+        # Filter CE options that are less than or equal to the rounded ticker
+        filtered_ce_options = [opt for opt in ce_options if float(opt['strike']) <= ticker_rounded]
+        # Filter PE options that are greater than or equal to the rounded ticker
+        filtered_pe_options = [opt for opt in pe_options if float(opt['strike']) >= ticker_rounded]
 
-            return top_5_ce_options_down, top_5_pe_options_up
-        else:
-            print(f'Ticker {ticker} not found in options data.')
-            return [], []
+        # Sort options by strike price
+        sorted_ce_options = sorted(filtered_ce_options, key=lambda x: float(x['strike']), reverse=True)
+        sorted_pe_options = sorted(filtered_pe_options, key=lambda x: float(x['strike']))
+
+        # Select top 5 options
+        top_5_ce_options = sorted_ce_options[:5]
+        top_5_pe_options = sorted_pe_options[:5]
+
+        return top_5_ce_options, top_5_pe_options
     else:
         print("No options data found for the given instrument.")
         return [], []

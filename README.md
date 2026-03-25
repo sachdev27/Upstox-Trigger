@@ -1,86 +1,102 @@
-# Upstox Broker Trading Bot
+# 🚀 Upstox Trading Automation
 
-## Overview
+Automated trading platform powered by the **Upstox API v2** with pluggable strategies, real-time market data, and order management.
 
-This repository contains a trading bot that interacts with the Upstox broker API to automate trading activities. The bot is designed to execute trades based on predefined strategies, market conditions, and user preferences.
+## Architecture
 
-## Features
+```
+app/
+├── config.py            # Centralized settings (loads .env)
+├── main.py              # FastAPI entry point
+├── auth/                # OAuth2 login & token management
+├── market_data/         # Historical candles, live WebSocket feeds
+├── strategies/          # Strategy engine (BaseStrategy + implementations)
+│   ├── base.py          # Abstract base class
+│   ├── indicators.py    # ATR, ADX, SuperTrend, BB, ROC, etc.
+│   └── supertrend_pro.py  # SuperTrend Pro v6.3 (ported from Pine Script)
+├── orders/              # Order execution & risk management
+├── scheduler/           # Market-hours task scheduler
+└── database/            # SQLite/PostgreSQL via SQLAlchemy
+```
 
-- **Automated Trading**: Execute trades automatically based on predefined criteria.
-- **Strategy Implementation**: Define and implement trading strategies to optimize trading decisions.
-- **Real-time Market Data**: Utilize real-time market data to make informed trading decisions.
+## Quick Start
 
-## Prerequisites
-
-Before running the bot, ensure you have the following:
-
-- Upstox API Key and Secret: Obtain API credentials from the Upstox Developer Console.
-- Python 3: The bot is written in Python, so ensure you have Python 3 installed.
-- Required Dependencies: Install necessary Python packages by running `pip install -r requirements.txt`.
-
-## Configuration
-
-1. **Clone this repository:**
-
-   ```bash
-   git clone https://github.com/sachdev27/upstox-trigger.git
-
-
-## Usage
-
-- Install dependencies:
+### 1. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-- Create .env file with all client variables:
+### 2. Configure
 
 ```bash
-API_VERSION='2.0'
-API_KEY=""
-API_SECRET=""
-REDIRECT_URI="http://localhost:8210/callback"
-AUTH_CODE=""
-ACCESS_TOKEN=""
+cp .env.example .env
+# Edit .env with your Upstox API credentials
 ```
 
-### Login
+### 3. Run the Server
 
-Replace the Client Token(API_KEY) and redirect_uri Accordingly
-- For REDIRECT_URI we are going to use a flask app which is present in flask-redirect_uri folder and it sets the AUTH_CODE in it
-- Run the Flask app in the folder by (the flask app is set to port 8210)
-- Remember, In order th redirect_uri to work - you have to set the same redirect_uri in both the place (Upstox and in the Flask App)
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+### 4. Authenticate
+
+1. Visit `http://localhost:8000/auth/login` — redirects to Upstox login
+2. After login, the callback saves your access token automatically
+3. Check status: `GET http://localhost:8000/auth/status`
+
+### 5. API Docs
+
+Open `http://localhost:8000/docs` for the interactive Swagger UI.
+
+## Key Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /auth/login` | Start Upstox OAuth login |
+| `GET /auth/status` | Check token validity |
+| `GET /market/ltp?instrument_key=...` | Get last traded price |
+| `GET /market/candles?instrument_key=...` | Get historical candles |
+| `GET /market/positions` | Get current positions |
+| `GET /strategies/` | List all strategies |
+| `PUT /strategies/{id}/params` | Update strategy parameters |
+| `POST /strategies/{id}/toggle` | Enable/disable a strategy |
+| `POST /orders/place` | Place an order |
+| `GET /orders/book` | Get today's order book |
+
+## Built-in Strategies
+
+### SuperTrend Pro v6.3
+
+A sophisticated multi-filter SuperTrend strategy with:
+- **Hard Gates:** Dual SuperTrend agreement, consecutive bar confirmation, HTF trend filter
+- **Soft Scoring:** ADX, volume surge, ATR percentile, ROC, Bollinger Band squeeze
+- **Exit Modes:** ATR SL+TP (A), ATR SL + Profit% (B), ATR SL + Trailing (C)
+- **Auto TF Adaptation:** Thresholds adjust to your timeframe automatically
+
+### Adding New Strategies
 
 ```python
-python redirect_uri.py
-```
-In order to get the Auth Code,
-Replace the Link with your client_id and paste this link in your browser and login
+from app.strategies.base import BaseStrategy, StrategyConfig
 
-(https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=<CLIENT_ID>&redirect_uri=http://localhost:8210/callback/)
+class MyStrategy(BaseStrategy):
+    @staticmethod
+    def default_params():
+        return {"period": 14, "threshold": 30}
 
-After succesfull login, you will be redirected and the flask app will replace the auth code for you in the .env file
+    def on_candle(self, df):
+        # Your logic here — return TradeSignal or None
+        ...
 
-
-
-- Now You can run the Main or the Websocket_Market File to get the Live Market data
-
-- These file check token first and if it got expired, then automatically replace the token with the new one.
-
-### Run Main Python File:
-
-```bash
-python websocket_market.py
-python main.py
+    def compute_exit(self, entry_price, side, current_price, df):
+        return {"stop_loss": ..., "take_profit": ..., "trailing_stop": None}
 ```
 
+## Legacy Code
+
+The original experimental scripts are preserved in `legacy/` for reference.
 
 ## Disclaimer
 
-This trading bot is for educational and informational purposes only. Trading involves risk, and past performance is not indicative of future results. Use this bot at your own risk.
-
-
-## Acknowledgments
-
-[Upstox API Documentation](https://upstox.com/developer/api-documentation/open-api)
+⚠️ This is for educational purposes. Trading involves risk. Use at your own risk.

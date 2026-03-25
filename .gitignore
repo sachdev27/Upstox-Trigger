@@ -1,5 +1,40 @@
-env/*
+# Environment
 .env
-.env.bak
-*.pyc
-launch.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Data files
+data/
+*.db
+*.csv
+*.json
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# OS
+Thumbs.db
+
+# Legacy (preserved for reference, not needed in repo)
+# legacy/
+
+# Temp
+*.gz
+tempfile.gz
+
+# Virtual environment
+env/
+venv/
+.venv/

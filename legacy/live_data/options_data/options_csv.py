@@ -37,6 +37,7 @@ def make_options_data(data_dict, csv_filename='options_data.csv'):
                 delta = instrument_data['ff']['marketFF']['optionGreeks']['delta']
                 gamma = instrument_data['ff']['marketFF']['optionGreeks']['gamma']
                 theta = instrument_data['ff']['marketFF']['optionGreeks']['theta']
+                iv = instrument_data['ff']['marketFF']['optionGreeks']['iv']
                 tradingsymbol = trading_symbols[instrument_key]
                 option_type = 'CE' if 'CE' in tradingsymbol else 'PE'
                 new_row = {
@@ -50,13 +51,14 @@ def make_options_data(data_dict, csv_filename='options_data.csv'):
                     'Delta': f"{delta:.2f}",
                     'Gamma': f"{gamma:.2f}",
                     'Theta': f"{theta:.2f}",
+                    'iv': f"{iv*100:.2f}",
                 }
                 # Update existing data or add new
                 existing_data[instrument_key] = new_row
 
         # Write updated data back to the CSV file
         with open(csv_filename, 'w', newline='') as csvfile:
-            fieldnames = ['Timestamp', 'Instrument','Strike', 'LTP', 'Instrument Token','Option Type', 'Price','Delta','Gamma','Theta']
+            fieldnames = ['Timestamp', 'Instrument','Strike', 'LTP', 'Instrument Token','Option Type', 'Price','Delta','Gamma','Theta','iv']
             csv_writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             csv_writer.writeheader()
             for row in existing_data.values():

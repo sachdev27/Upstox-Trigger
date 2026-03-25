@@ -4,7 +4,7 @@ from rich.panel import Panel
 from rich.layout import Layout
 from rich.columns import Columns
 import csv
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import instrument
 from queue import PriorityQueue
 
@@ -23,6 +23,7 @@ def options_table_from_csv( option_type, instrument_name,ltp):
     table.add_column("Delta", style="bold")
     table.add_column("Gamma", style="bold")
     table.add_column("Theta", style="bold")
+    table.add_column("IV", style="bold")
 
     with open(options_data, 'r') as csvfile:
         reader = csv.DictReader(csvfile)
@@ -47,7 +48,8 @@ def options_table_from_csv( option_type, instrument_name,ltp):
                     row['Price'],
                     row['Delta'],
                     row['Gamma'],
-                    row['Theta']
+                    row['Theta'],
+                    row['iv'],
                 )
                 count += 1
                 if count >= 5:  # Limit to top 5
@@ -56,6 +58,14 @@ def options_table_from_csv( option_type, instrument_name,ltp):
 
     return table
 
+
+def get_current_timestamp():
+    # Assuming you want the timezone offset of +05:30
+    tz = timezone(timedelta(hours=5, minutes=30))
+    current_time = datetime.now(tz)
+    # Format with colon in the timezone offset
+    timestamp = current_time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    return timestamp[:-2] + ':' + timestamp[-2:]
 
 def make_rich_table(data_dict):
     console = Console()
@@ -114,9 +124,7 @@ def make_rich_table(data_dict):
 
                 # Update the CSV file for Nifty Bank
                 csv_writer_bank.writerow({
-                    'Timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'Instrument': instrument_bank,
-                    'LTP': f"{ltp[0]:.2f}",
+                    'Timestamp': get_current_timestamp(),
                     'Open': f"{open_price[0]:.2f}",
                     'High': f"{high[0]:.2f}",
                     'Low': f"{low[0]:.2f}",
@@ -125,9 +133,7 @@ def make_rich_table(data_dict):
 
                 # Update the CSV file for Nifty 50
                 csv_writer_n50.writerow({
-                    'Timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'Instrument': instrument_n50,
-                    'LTP': f"{ltp[1]:.2f}",
+                    'Timestamp': get_current_timestamp(),
                     'Open': f"{open_price[1]:.2f}",
                     'High': f"{high[1]:.2f}",
                     'Low': f"{low[1]:.2f}",

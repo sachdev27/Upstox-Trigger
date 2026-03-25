@@ -9,6 +9,7 @@ from live_data.rich_table import make_rich_table
 from live_data.options_data import make_instrument_key
 
 from login.login import do_login
+# from chart import intraday_data
 
 # ------ Load .env File
 from dotenv import load_dotenv
@@ -62,6 +63,9 @@ async def fetch_market_data():
 
 # ----------------------COLLECT INSTRUMENT----------------------
         make_instrument_key.worker()
+# ----------------------Intraday  Data----------------------
+        # intraday_data.worker()
+
 # ----------------------Clear Options Data INSTRUMENT----------------------
         try:
             os.remove('options_data.csv')
