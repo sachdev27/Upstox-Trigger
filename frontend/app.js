@@ -2,8 +2,8 @@
  * Upstox Trading Automation — Terminal JS UI
  */
 
-const API_BASE = "http://localhost:8000";
-const WS_URL = "ws://localhost:8000/ws";
+const API_BASE = "http://localhost:8210";
+const WS_URL = "ws://localhost:8210/ws";
 
 let ws = null;
 let currentInstrumentKey = "NSE_INDEX|Nifty 50";
@@ -156,25 +156,25 @@ async function selectInstrument(instrumentKey, name) {
 }
 
 async function fetchHistoricalCandles(instrumentKey) {
-    // In a real scenario, this would hit the backend /market/candles API.
-    // For this prototype, we'll generate some dummy data if the API isn't ready.
     try {
-        const res = await fetch(`${API_BASE}/market/historical?instrument_key=${encodeURIComponent(instrumentKey)}&interval=15minute&days=2`);
+        const res = await fetch(`${API_BASE}/market/candles?instrument_key=${encodeURIComponent(instrumentKey)}&interval=15minute`);
         if (res.ok) {
             const data = await res.json();
-            if (data.status === "success" && data.data && data.data.candles) {
-                const formatted = data.data.candles.map(c => {
-                    // Upstox API returns [timestamp, open, high, low, close, vol, oi]
-                    // Convert timestamp to unix seconds
-                    const ds = new Date(c[0]).getTime() / 1000;
+            if (data.candles && data.candles.length > 0) {
+                const formatted = data.candles.map(c => {
+                    // Convert ISO string to unix timestamp in seconds
+                    const ds = new Date(c.datetime).getTime() / 1000;
                     return {
                         time: ds,
-                        open: c[1],
-                        high: c[2],
-                        low: c[3],
-                        close: c[4]
+                        open: c.open,
+                        high: c.high,
+                        low: c.low,
+                        close: c.close
                     };
-                }).reverse(); // Sort oldest to newest
+                });
+                
+                // Sort ascending by time (oldest to newest)
+                formatted.sort((a,b) => a.time - b.time);
                 
                 candleSeries.setData(formatted);
                 return;

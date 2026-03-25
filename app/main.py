@@ -161,6 +161,21 @@ async def root():
     }
 
 
+@app.get("/callback/")
+@app.get("/callback")
+async def root_callback(code: str):
+    """
+    Catch the precise Upstox REDIRECT_URI 'http://localhost:8210/callback/'.
+    Forwards the OAuth exchange to our Auth Service.
+    """
+    from app.auth.service import get_auth_service
+    from fastapi.responses import RedirectResponse
+    
+    auth = get_auth_service()
+    token = auth.handle_callback(code)
+    return RedirectResponse(url="/dashboard")
+
+
 @app.get("/health", tags=["Root"])
 async def health():
     """Detailed health check."""
