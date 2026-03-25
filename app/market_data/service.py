@@ -43,16 +43,23 @@ class MarketDataService:
         """
         api = upstox_client.HistoryApi(upstox_client.ApiClient(self.config))
         
-        # Upstox APIs strict interval modes:
-        fetch_interval = interval
-        needs_resample = False
-        resample_rule = None
+        # Map UI timeframes (1m, 5m, 15m, 1H, 1D) to Upstox APIs strict interval modes
+        tf_map = {
+            "1m": ("1minute", False, None),
+            "1minute": ("1minute", False, None),
+            "5m": ("1minute", True, "5Min"),
+            "15m": ("1minute", True, "15Min"),
+            "15minute": ("1minute", True, "15Min"),
+            "30m": ("1minute", True, "30Min"), # Resampling from 1m to ensure accurate boundaries
+            "30minute": ("30minute", False, None),
+            "1H": ("1minute", True, "60Min"),
+            "4H": ("1minute", True, "240Min"),
+            "1D": ("day", False, None),
+            "day": ("day", False, None),
+            "1W": ("week", False, None),
+        }
         
-        if interval.endswith("minute") and interval not in ["1minute", "30minute"]:
-            fetch_interval = "1minute"
-            needs_resample = True
-            mins = interval.replace("minute", "Min")
-            resample_rule = mins
+        fetch_interval, needs_resample, resample_rule = tf_map.get(interval, ("1minute", False, None))
 
         try:
             candles_dict = {}

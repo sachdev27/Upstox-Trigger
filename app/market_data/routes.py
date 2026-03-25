@@ -182,6 +182,8 @@ async def get_brokerage(
 async def get_strategy_overlay(
     instrument_key: str = Query(...),
     timeframe: str = Query("1minute"),
+    from_date: str | None = Query(None),
+    to_date: str | None = Query(None),
     atr_period: int = Query(10),
     multiplier: float = Query(3.0)
 ):
@@ -190,18 +192,27 @@ async def get_strategy_overlay(
     Returns a sequence of {time, upper, lower, trend} mapped to the candles.
     """
     svc = _get_market_service()
-    candles = svc.get_historical_candles(instrument_key, timeframe)
+    candles = svc.get_historical_candles(instrument_key, timeframe, from_date, to_date)
     
     if not candles:
         return {"status": "error", "message": "No candle data available.", "overlay": []}
     
     import pandas as pd
     from app.strategies.indicators import supertrend
+    from app.strategies.supertrend_pro import SuperTrendPro
+    from app.strategies.base import StrategyConfig
     
     df = pd.DataFrame(candles)
-    # The candles from service are already dicts with datetime, open, high, low, close.
-    # We must ensure they are in chronological order for calculation.
-    # Service get_historical_candles usually returns oldest first.
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            
+    # Calculate dashboard matrix
+    config = StrategyConfig(name="SuperTrend Pro v6.3", instruments=[instrument_key], timeframe=timeframe)
+    strategy = SuperTrendPro(config)
+    strategy.params["atr_period"] = atr_period
+    strategy.params["atr_multiplier"] = multiplier
+    metrics = strategy.get_dashboard_state(df)
     
     st_df = supertrend(df, period=atr_period, multiplier=multiplier, use_rma=True)
     
@@ -211,11 +222,11 @@ async def get_strategy_overlay(
         s = st_df.iloc[i]
         overlay.append({
             "datetime": c["datetime"],
-            "trend": int(s["trend"]),           # 1 (Bullish) or -1 (Bearish)
-            "supertrend": float(s["supertrend"]),
-            "upper": float(s["upper_band"]),
-            "lower": float(s["lower_band"])
+            "trend": int(s["trend"]),
+            "supertrend": None if pd.isna(s["supertrend"]) else float(s["supertrend"]),
+            "upper": None if pd.isna(s["upper_band"]) else float(s["upper_band"]),
+            "lower": None if pd.isna(s["lower_band"]) else float(s["lower_band"])
         })
         
-    return {"status": "success", "instrument_key": instrument_key, "overlay": overlay}
+    return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
 

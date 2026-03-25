@@ -49,16 +49,28 @@ document.addEventListener("DOMContentLoaded", () => {
 function setChartTimeframe(interval) {
     currentInterval = interval;
     showToast(`Loading ${interval} timeframe...`);
-    fetchHistoricalCandles(currentInstrumentKey);
+    
     // Refresh strategy overlay if any
     const tfElem = document.getElementById("param-timeframe");
     tfElem.value = interval.replace('minute', 'm').replace('hour', 'H').replace('day', '1D');
     
-    if (supertrendUpper && supertrendLower) {
+    if (supertrendSeries) {
         // clear old overlay before strategy loads
-        supertrendUpper.setData([]);
-        supertrendLower.setData([]);
+        supertrendSeries.setData([]);
+        if (candleSeries) {
+            candleSeries.setMarkers([]);
+            candleSeries.setData([]); // Crucial: clear old candles to prevent marker sync crash
+        }
     }
+    
+    // Automatically apply the strategy for the new timeframe
+    const atrPeriod = document.getElementById("param-atr-period").value;
+    const atrMult = document.getElementById("param-atr-mult").value;
+    
+    // Fetch candles FIRST, then firmly await overlay binding
+    fetchHistoricalCandles(currentInstrumentKey).then(() => {
+        fetchStrategyOverlay(currentInstrumentKey, interval, atrPeriod, atrMult);
+    });
 }
 
 async function restoreDefaultWatchlist() {
@@ -206,25 +218,26 @@ function initChart() {
         },
     });
 
+    // Global right-click to reset view
+    chartContainer.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        chart.timeScale().fitContent();
+        chart.priceScale('right').applyOptions({ autoScale: true });
+    });
+
     candleSeries = chart.addCandlestickSeries({
         upColor: '#00d084',
         downColor: '#ff4757',
-        borderDownColor: '#ff4757',
-        borderUpColor: '#00d084',
-        wickDownColor: '#ff4757',
+        borderVisible: false, // Added
         wickUpColor: '#00d084',
+        wickDownColor: '#ff4757',
     });
 
-    supertrendUpper = chart.addLineSeries({
-        color: '#ff4757',
+    // Single unified LineSeries for SuperTrend with segment coloring
+    supertrendSeries = chart.addLineSeries({
         lineWidth: 2,
         lineType: LightweightCharts.LineType.Step,
-    });
-    
-    supertrendLower = chart.addLineSeries({
-        color: '#00d084',
-        lineWidth: 2,
-        lineType: LightweightCharts.LineType.Step,
+        crosshairMarkerVisible: false, // Added
     });
     
     // Resize observer
@@ -247,13 +260,20 @@ async function selectInstrument(instrumentKey, name) {
     
     showToast(`Loaded ${name}`);
     await fetchHistoricalCandles(instrumentKey);
+    loadStrategy();
 }
 
 async function fetchHistoricalCandles(instrumentKey) {
     try {
         const toDateObj = new Date();
         const fromDateObj = new Date();
-        fromDateObj.setDate(toDateObj.getDate() - 20);
+        
+        // Dynamically cap historical data fetching to prevent Upstox API crashes
+        // Upstox caps 1-min interval (used for 1m-1H) to ~30 days max. We use 28 to safely account for timezone wrapping.
+        const isMinuteScale = currentInterval.includes('m') || currentInterval.includes('H') || currentInterval.includes('minute') || currentInterval === '1hour';
+        const daysBack = isMinuteScale ? 28 : 365;
+        
+        fromDateObj.setDate(toDateObj.getDate() - daysBack);
         
         const toDateStr = toDateObj.toISOString().split('T')[0];
         const fromDateStr = fromDateObj.toISOString().split('T')[0];
@@ -278,6 +298,11 @@ async function fetchHistoricalCandles(instrumentKey) {
                 formatted.sort((a,b) => a.time - b.time);
                 
                 candleSeries.setData(formatted);
+                
+                // Force auto-scale on instrument change so the view doesn't get stuck at the previous instrument's price range
+                chart.priceScale('right').applyOptions({ autoScale: true });
+                chart.timeScale().fitContent();
+                
                 return;
             }
         }
@@ -285,23 +310,7 @@ async function fetchHistoricalCandles(instrumentKey) {
         console.warn("Failed to fetch real historical data, using dummy data");
     }
     
-    // Fallback Dummy Data for UI preview
-    const dummyData = [];
-    let time = Math.floor(Date.now() / 1000) - 86400; // 1 day ago
-    let lastClose = 22000;
-    
-    for (let i = 0; i < 100; i++) {
-        time += 900; // 15 mins
-        const open = lastClose + (Math.random() - 0.5) * 50;
-        const high = open + Math.random() * 50;
-        const low = open - Math.random() * 50;
-        const close = (open + high + low) / 3;
-        lastClose = close;
-        
-        dummyData.push({ time, open, high, low, close });
-    }
-    
-    candleSeries.setData(dummyData);
+// Fallback sequence removed to prevent corrupted UI state. Any valid historical array cleanly populates the viewer.
 }
 
 // ── UI Interactions ───────────────────────────────────────────
@@ -483,38 +492,68 @@ async function loadStrategy() {
     }
 }
 
+// Helper to convert ISO string to unix timestamp in seconds, shifted for IST
+function parseUpstoxDate(isoString) {
+    if (!isoString) return null;
+    return (new Date(isoString).getTime() / 1000) + 19800;
+}
+
 async function fetchStrategyOverlay(instrumentKey, timeframe, atrPeriod, multiplier) {
     try {
+        const toDateObj = new Date();
+        const fromDateObj = new Date();
+        
+        // Sync the overlay math boundary to match the dynamic candlestick query
+        const isMinuteScale = timeframe.includes('m') || timeframe.includes('H') || timeframe.includes('minute') || timeframe === '1hour';
+        const daysBack = isMinuteScale ? 28 : 365;
+        
+        fromDateObj.setDate(toDateObj.getDate() - daysBack);
+        
+        const toDateStr = toDateObj.toISOString().split('T')[0];
+        const fromDateStr = fromDateObj.toISOString().split('T')[0];
+
         const params = new URLSearchParams({
             instrument_key: instrumentKey,
             timeframe: timeframe,
+            from_date: fromDateStr,
+            to_date: toDateStr,
             atr_period: atrPeriod,
             multiplier: multiplier
         });
         const res = await fetch(`${API_BASE}/market/strategy-overlay?${params.toString()}`);
         if (res.ok) {
             const data = await res.json();
-            if (data.overlay && data.overlay.length > 0) {
-                const upperData = [];
-                const lowerData = [];
+            if (data.status === "success" && data.overlay) {
+                
+                // Natively render HUD matrix from overlay payload independently of engine status
+                if (data.latest_metrics) {
+                    renderStrategyHUD({ latest_metrics: data.latest_metrics });
+                }
+                
+                const stData = []; // Changed from upperData/lowerData
                 const markers = [];
                 let lastTrend = null;
                 
                 data.overlay.forEach(pt => {
-                    // Shift by +19800 (5.5h) for IST visualization
-                    const ds = (new Date(pt.datetime).getTime() / 1000) + 19800;
-                    upperData.push({ time: ds, value: pt.upper });
-                    lowerData.push({ time: ds, value: pt.lower });
+                    const ds = parseUpstoxDate(pt.datetime);
+                    if (!ds) return;
+                    
+                    if (pt.supertrend !== null) {
+                        // Inject unique color line segment per point based on trend
+                        const segColor = pt.trend === 1 ? '#00d084' : '#ff4757';
+                        stData.push({ time: ds, value: pt.supertrend, color: segColor });
+                    }
+                    // Removed the logic to break lines when trend changes, as color handles segments
                     
                     if (lastTrend !== null && pt.trend !== lastTrend) {
                         if (pt.trend === 1) {
                             markers.push({
-                                time: ds, position: 'belowBar', color: '#4caf50',
+                                time: ds, position: 'belowBar', color: '#00d084', // Updated color
                                 shape: 'arrowUp', text: 'BUY'
                             });
                         } else if (pt.trend === -1) {
                             markers.push({
-                                time: ds, position: 'aboveBar', color: '#ff5252',
+                                time: ds, position: 'aboveBar', color: '#ff4757', // Updated color
                                 shape: 'arrowDown', text: 'SELL'
                             });
                         }
@@ -522,11 +561,9 @@ async function fetchStrategyOverlay(instrumentKey, timeframe, atrPeriod, multipl
                     lastTrend = pt.trend;
                 });
                 
-                upperData.sort((a,b) => a.time - b.time);
-                lowerData.sort((a,b) => a.time - b.time);
+                stData.sort((a,b) => a.time - b.time); // Sorted single data array
                 
-                if (supertrendUpper) supertrendUpper.setData(upperData);
-                if (supertrendLower) supertrendLower.setData(lowerData);
+                if (supertrendSeries) supertrendSeries.setData(stData); // Updated to single series
                 if (candleSeries) candleSeries.setMarkers(markers);
                 
                 showToast("Indicator Plot Updated", "info");
@@ -586,6 +623,66 @@ function updateUIWithStatus(data) {
         document.getElementById("disp-pnl").innerText = `${dpnl >= 0 ? '+' : '-'}₹${Math.abs(dpnl).toFixed(2)}`;
         document.getElementById("disp-pnl").className = `mono ${color}`;
     }
+    
+    // Strategy HUD sync
+    if (data.active_strategies && data.active_strategies.length > 0) {
+        renderStrategyHUD(data.active_strategies[0]);
+    } else {
+        document.getElementById("strategy-hud-container").innerHTML = `
+            <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
+                Waiting for active strategy...
+            </div>
+        `;
+    }
+}
+
+function renderStrategyHUD(strategy) {
+    const m = strategy.latest_metrics;
+    if (!m) return;
+    
+    // Helper to format rows identical to TradingView
+    const bgHdr = "background: #1e222d; color: white;";
+    const bgRow = "background: #2a2e39; color: white;";
+    const bgCyn = "background: rgba(0, 188, 212, 0.2); color: #00bcd4;";
+    const bgOrn = "background: rgba(255, 152, 0, 0.2); color: #ff9800;";
+    
+    const cGrn = "background: rgba(76, 175, 80, 0.2); color: #4caf50;";
+    const cRed = "background: rgba(244, 67, 54, 0.2); color: #ff5252;";
+    const cGry = "background: rgba(158, 158, 158, 0.2); color: #9e9e9e;";
+    const cYlw = "background: rgba(255, 235, 59, 0.2); color: #ffeb3b;";
+    
+    const passCol = (ok) => ok ? cGrn : cRed;
+    
+    let html = `<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #404040; font-family: monospace; font-size: 0.75rem;">`;
+    
+    const addRow = (label, val, bgLabel, bgVal) => {
+        html += `<div style="padding: 4px 8px; ${bgLabel}">${label}</div>`;
+        html += `<div style="padding: 4px 8px; ${bgVal}">${val}</div>`;
+    };
+    
+    addRow("Metric", "Value", bgHdr, bgHdr);
+    addRow("TF profile", `${m.tf_profile} (${m.tf_mode})`, bgCyn, bgCyn);
+    addRow("Exit mode", m.exit_mode, bgCyn, bgCyn);
+    addRow("ST Trend", m.trend, bgRow, m.trend === "LONG" ? cGrn : cRed);
+    
+    addRow("H1 Dual ST", m.hard_gates.dual_st, bgOrn, m.hard_gates.dual_st === "AGREE" ? cGrn : cRed);
+    let consecOk = parseInt(m.hard_gates.consecutive.split('/')[0]) >= parseInt(m.hard_gates.consecutive.split('/')[1]);
+    addRow("H2 Consec", `${m.hard_gates.consecutive} ${consecOk ? 'PASS' : 'FAIL'}`, bgOrn, passCol(consecOk));
+    
+    addRow("Soft score", m.soft_filters.score, bgRow, cYlw); // could be green/yellow/red, simplifying for now
+    
+    addRow("S1 ADX", `${m.soft_filters.adx.value} ${m.soft_filters.adx.pass ? 'PASS' : 'FAIL'}`, bgRow, passCol(m.soft_filters.adx.pass));
+    addRow("S2 Volume", m.soft_filters.volume.pass ? "SURGE" : "FLAT", bgRow, passCol(m.soft_filters.volume.pass));
+    addRow("S3 ATR%", `${m.soft_filters.atr_pct.value}%`, bgRow, passCol(m.soft_filters.atr_pct.pass));
+    addRow("S4 ROC", `${m.soft_filters.roc.value}%`, bgRow, passCol(m.soft_filters.roc.pass));
+    
+    let bb = m.soft_filters.bb_squeeze;
+    addRow("S5 BB", bb.state, bgRow, bb.pass ? cGrn : (bb.state === 'SQUEEZE' ? cYlw : cRed));
+    
+    addRow("Bars held", m.bars_in_trend, bgRow, bgRow);
+    
+    html += `</div>`;
+    document.getElementById("strategy-hud-container").innerHTML = html;
 }
 
 async function refreshTrades() {

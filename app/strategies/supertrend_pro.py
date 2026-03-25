@@ -160,6 +160,9 @@ class SuperTrendPro(BaseStrategy):
         if len(df) < 100:
             return None  # Not enough data for indicators
 
+        # Snapshot the full strategy evaluation matrix for the UI Dashboard panel
+        self.latest_metrics = self.get_dashboard_state(df, htf_df)
+
         p = self.params
         tf_mins = self._tf_minutes(self.config.timeframe)
         is_auto = p["tf_mode"] == "auto"

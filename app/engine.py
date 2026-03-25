@@ -280,8 +280,9 @@ class AutomationEngine:
                     "instruments": config.instruments,
                     "timeframe": config.timeframe,
                     "paper_trading": config.paper_trading,
+                    "latest_metrics": getattr(strategy, "latest_metrics", None),
                 }
-                for config, _ in self._active_strategies
+                for config, strategy in self._active_strategies
             ],
             "signals_today": len(self._signals_log),
             "trades_today": len(self._trades_today),
