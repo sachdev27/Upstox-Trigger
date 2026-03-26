@@ -76,11 +76,6 @@ async def get_profile():
     return {"data": svc.get_profile()}
 
 
-@router.post("/instruments/download")
-async def download_instruments():
-    """Download latest instrument list from Upstox."""
-    path = MarketDataService.download_instrument_list()
-    return {"status": "success", "path": str(path)}
 
 
 @router.get("/instruments/featured")
