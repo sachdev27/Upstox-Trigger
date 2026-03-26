@@ -99,6 +99,33 @@ async def search_instruments(
     return {"query": query, "count": len(results), "instruments": results}
 
 
+@router.post("/instruments/{instrument_key}/metadata")
+async def update_instrument_metadata(
+    instrument_key: str,
+    lot_size: int = Query(None),
+    minimum_lot: int = Query(None),
+    freeze_quantity: int = Query(None),
+):
+    """Update lot-related metadata for an instrument."""
+    from app.database.connection import get_session, Instrument
+    session = get_session()
+    try:
+        inst = session.query(Instrument).filter_by(instrument_key=instrument_key).first()
+        if not inst:
+            return {"status": "error", "message": f"Instrument {instrument_key} not found in DB."}
+        
+        if lot_size is not None: inst.lot_size = lot_size
+        if minimum_lot is not None: inst.minimum_lot = minimum_lot
+        if freeze_quantity is not None: inst.freeze_quantity = freeze_quantity
+        
+        session.commit()
+        return {"status": "success", "message": f"Updated metadata for {instrument_key}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        session.close()
+
+
 @router.get("/status")
 async def get_market_status(exchange: str = Query("NSE")):
     """Get real-time market status (open/closed)."""

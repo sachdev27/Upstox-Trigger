@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 import upstox_client
 
 from app.config import get_settings
+from app.database.connection import get_session, Instrument
 from app.orders.models import OrderRequest, TradeSignal, OrderType, TransactionType
 
 logger = logging.getLogger(__name__)
@@ -64,14 +65,22 @@ class OrderService:
         quantity = signal.quantity
         if quantity == 0:
             quantity = self._calculate_position_size(
-                signal.price, signal.stop_loss
+                signal.instrument_key, signal.price, signal.stop_loss
             )
+
+        logger.info(
+            f"📋 Signal → Order: {signal.action.value} {signal.instrument_key} | "
+            f"Qty={quantity} | Entry~{signal.price:.2f} | "
+            f"SL={signal.stop_loss:.2f} | TP={signal.take_profit:.2f} | "
+            f"Strategy={signal.strategy_name}"
+        )
 
         order = OrderRequest(
             instrument_token=signal.instrument_key,
             quantity=quantity,
             transaction_type=signal.action,
             order_type=OrderType.MARKET,
+            slice=True,  # V3 Auto-Slicing enabled by default for automation
             tag=f"auto-{signal.strategy_name}",
         )
 
@@ -96,6 +105,26 @@ class OrderService:
                 self.place_order(sl_order)
             except Exception as e:
                 logger.error(f"SL order failed: {e}")
+
+        # Place take-profit if provided
+        if signal.take_profit > 0:
+            tp_side = (
+                TransactionType.SELL
+                if signal.action == TransactionType.BUY
+                else TransactionType.BUY
+            )
+            tp_order = OrderRequest(
+                instrument_token=signal.instrument_key,
+                quantity=quantity,
+                transaction_type=tp_side,
+                order_type=OrderType.LIMIT,
+                price=signal.take_profit,
+                tag=f"tp-{signal.strategy_name}",
+            )
+            try:
+                self.place_order(tp_order)
+            except Exception as e:
+                logger.error(f"TP order failed: {e}")
 
         return result
 
@@ -212,24 +241,64 @@ class OrderService:
             )
 
     def _calculate_position_size(
-        self, entry_price: float, stop_loss: float
+        self, instrument_token: str, entry_price: float, stop_loss: float
     ) -> int:
         """
-        Risk-based position sizing.
-        Ensures that a SL hit costs exactly MAX_RISK_PER_TRADE_PCT of equity.
+        Refined Risk-based position sizing + Lot Size enforcement.
+        
+        Logic:
+        1. Calculate 'Point Risk' (distance from entry to SL).
+        2. Fetch 'Lot Size' for the instrument.
+        3. Risk per Lot = Point Risk * Lot Size.
+        4. Number of Lots = Total Risk Amount / Risk per Lot.
         """
         if stop_loss <= 0 or entry_price <= 0:
             return 1
 
-        risk_per_unit = abs(entry_price - stop_loss)
-        if risk_per_unit == 0:
+        point_risk = abs(entry_price - stop_loss)
+        if point_risk == 0:
             return 1
 
-        # rough equity estimate — in production, fetch from API
-        equity = 100_000  # TODO: fetch from get_funds_and_margin
-        risk_amount = equity * (self.settings.MAX_RISK_PER_TRADE_PCT / 100)
-        qty = int(risk_amount / risk_per_unit)
-        return max(1, qty)
+        # 1. Determine Total Risk Amount (default 1% of equity)
+        equity = 100_000
+        try:
+            funds = self.get_funds_and_margin()
+            equity = float(funds.get("available_margin", 100_000))
+        except Exception as e:
+            logger.warning(f"Funds fetch failed, using default equity {equity}: {e}")
+            
+        total_risk_allowance = equity * (self.settings.MAX_RISK_PER_TRADE_PCT / 100)
+        
+        # 2. Fetch lot metadata from Database
+        lot_size = 1
+        min_lot = 1
+        try:
+            session = get_session()
+            instr = session.query(Instrument).filter_by(instrument_key=instrument_token).first()
+            if instr:
+                lot_size = instr.lot_size
+                min_lot = instr.minimum_lot or lot_size
+            session.close()
+        except Exception as e:
+            logger.warning(f"Instrument DB lookup failed for {instrument_token}, using defaults: {e}")
+
+        # 3. Calculate Lots
+        # Risk per lot = points_lost_on_SL * units_per_lot
+        risk_per_lot = point_risk * lot_size
+        
+        # How many lots can we afford to lose?
+        num_lots = int(total_risk_allowance // risk_per_lot)
+        
+        # 4. Final Quantity (always >= 1 minimum lot)
+        final_qty = max(min_lot, num_lots * lot_size)
+        
+        logger.info(
+            f"Sizing: Risk={total_risk_allowance:.0f} | "
+            f"PointRisk={point_risk:.2f} | LotSize={lot_size} | MinLot={min_lot} | "
+            f"Lots={num_lots} → Qty={final_qty}"
+        )
+        
+        return final_qty
 
     def is_market_hours(self) -> bool:
         """Check if Indian market is currently open (9:15 AM – 3:30 PM IST)."""

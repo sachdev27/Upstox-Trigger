@@ -93,6 +93,8 @@ class Instrument(Base):
     exchange = Column(String, nullable=False)
     segment = Column(String)
     lot_size = Column(Integer, default=1)
+    freeze_quantity = Column(Integer, default=0)
+    minimum_lot = Column(Integer, default=1)
     tick_size = Column(Float, default=0.05)
     instrument_type = Column(String)  # INDEX, EQUITIES, CE, PE, FUT
     expiry = Column(String)

@@ -101,6 +101,7 @@ class SuperTrendPro(BaseStrategy):
 
             # Risk
             "risk_per_trade_pct": 1.0,
+            "qty_override": 0,       # 0 = use risk-based, >0 = fixed quantity
         }
 
     # ── Auto TF Adaptation (Section 0) ──────────────────────────
@@ -302,6 +303,7 @@ class SuperTrendPro(BaseStrategy):
             price=current_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            quantity=p.get("qty_override", 0),
             strategy_name=self.name,
             timeframe=self.config.timeframe,
             confidence_score=soft_score,

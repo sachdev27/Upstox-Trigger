@@ -103,6 +103,8 @@ def seed_instruments():
                         exchange=row['exchange'],
                         segment=row['instrument_type'], # Simplified mapping
                         lot_size=int(row['lot_size']) if row['lot_size'] else 1,
+                        freeze_quantity=int(row['freeze_quantity']) if row.get('freeze_quantity') else 0,
+                        minimum_lot=int(row['minimum_lot']) if row.get('minimum_lot') else 1,
                         tick_size=float(row['tick_size']) if row['tick_size'] else 0.05,
                         instrument_type=row['instrument_type'],
                         expiry=row['expiry'] if row['expiry'] else None,

@@ -192,7 +192,7 @@ async function placeManualOrder(side) {
         return;
     }
 
-    const qty = prompt(`Enter Quantity for ${side} ${currentInstrumentName}:`, "1");
+    const qty = prompt(`Enter Quantity for ${side} ${currentInstrumentName} (Check lot size first!):`, "1");
     if (!qty || isNaN(qty)) return;
 
     try {
@@ -250,6 +250,12 @@ async function refreshPositions() {
                 <td class="mono">₹${formatPrice(p.average_price)}</td>
                 <td class="mono">₹${formatPrice(p.last_price)}</td>
                 <td class="mono ${pnlClass}">₹${formatPrice(p.pnl)}</td>
+                <td>
+                    <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.7rem; color: #ff4757; border-color: rgba(255, 71, 87, 0.3);" 
+                        onclick="closePosition('${p.instrument_token}', ${Math.abs(p.quantity)}, '${p.quantity > 0 ? 'SELL' : 'BUY'}')">
+                        Close
+                    </button>
+                </td>
             `;
             list.appendChild(row);
         });
@@ -257,6 +263,38 @@ async function refreshPositions() {
         console.error("Failed to refresh positions", e);
     }
 }
+
+/**
+ * Square off an open position immediately via Market Order.
+ */
+window.closePosition = async function(instrumentToken, quantity, side) {
+    // Extract a readable symbol name if possible
+    const symbolParts = instrumentToken.split('|');
+    const displaySymbol = symbolParts.length > 1 ? symbolParts[1] : instrumentToken;
+    
+    if (!confirm(`Are you sure you want to close this position (${quantity} units of ${displaySymbol})?`)) return;
+    
+    try {
+        showToast("Closing position...", "info");
+        const res = await api.placeOrder({
+            instrument_token: instrumentToken,
+            quantity: quantity,
+            transaction_type: side,
+            order_type: "MARKET"
+        });
+        
+        if (res.status === "success") {
+            showToast("Position closure order placed!", "success");
+            setTimeout(refreshPositions, 1000);
+            setTimeout(refreshOrderBook, 1500);
+        } else {
+            showToast("Failed to close position: " + (res.message || "Unknown error"), "error");
+        }
+    } catch (e) {
+        console.error("Error closing position:", e);
+        showToast("Error closing position", "error");
+    }
+};
 
 async function refreshOrderBook() {
     try {
@@ -279,14 +317,15 @@ async function refreshOrderBook() {
             else if (stat.includes("reject") || stat.includes("cancel")) statusClass = "text-danger";
             else if (stat.includes("open")) statusClass = "text-warning";
 
-            row.innerHTML = \`
-                <td class="text-muted" style="font-size:0.7rem">\${new Date(o.order_timestamp).toLocaleTimeString()}</td>
-                <td><span class="badge \${o.transaction_type.toLowerCase()}">\${o.transaction_type}</span></td>
-                <td class="mono" style="font-size:0.75rem">\${o.tradingsymbol}</td>
-                <td>\${o.quantity}</td>
-                <td class="mono">₹\${formatPrice(o.average_price || o.price)}</td>
-                <td class="\${statusClass}" style="font-size:0.75rem">\${o.status.toUpperCase()}</td>
-            \`;
+            row.innerHTML = `
+                <td class="text-muted" style="font-size:0.7rem">${new Date(o.order_timestamp).toLocaleTimeString()}</td>
+                <td><span class="badge ${o.transaction_type.toLowerCase()}">${o.transaction_type}</span></td>
+                <td class="mono" style="font-size:0.75rem">${o.tradingsymbol}</td>
+                <td>${o.quantity}</td>
+                <td class="mono">₹${formatPrice(o.average_price || o.price)}</td>
+                <td class="${statusClass}" style="font-size:0.75rem">${o.status.toUpperCase()}</td>
+                <td class="mono" style="font-size:0.65rem; color:var(--text-muted)">${o.tag || '-'}</td>
+            `;
             list.appendChild(row);
         });
     } catch (e) {
@@ -338,12 +377,17 @@ async function refreshSignals() {
         
         signals.reverse().forEach(s => {
             const row = document.createElement("tr");
+            const slDisplay = s.stop_loss ? `₹${formatPrice(s.stop_loss)}` : '-';
+            const qtyDisplay = s.quantity || '-';
+            
             row.innerHTML = `
                 <td class="text-muted" style="font-size:0.7rem">${s.timestamp}</td>
                 <td class="mono" style="font-size:0.75rem">${s.instrument_key}</td>
                 <td><span class="badge ${s.action.toLowerCase()}">${s.action}</span></td>
                 <td class="mono">₹${formatPrice(s.price)}</td>
-                <td>${s.strategy_name}</td>
+                <td class="mono" style="color:#ff4757">sl: ${slDisplay}</td>
+                <td>${qtyDisplay}</td>
+                <td>${s.confidence_score !== undefined ? s.confidence_score : '-'}</td>
             `;
             list.appendChild(row);
         });
@@ -503,6 +547,38 @@ window.saveSandboxSettings = async () => {
         showToast("Sandbox Configuration Saved", "success");
     } catch (e) {
         showToast("Failed to save sandbox settings", "error");
+    }
+};
+
+window.saveInstrumentMetadata = async () => {
+    const key = document.getElementById('setting-instr-key').value;
+    const lotSize = document.getElementById('setting-instr-lotsize').value;
+    const minLot = document.getElementById('setting-instr-minlot').value;
+    
+    if (!key) {
+        showToast("Please enter an instrument key", "warning");
+        return;
+    }
+    
+    try {
+        showToast(`Updating ${key}...`, "info");
+        const url = `${window.location.origin}/market/instruments/${encodeURIComponent(key)}/metadata`;
+        const params = new URLSearchParams();
+        if (lotSize) params.append('lot_size', lotSize);
+        if (minLot) params.append('minimum_lot', minLot);
+        
+        const res = await fetch(`${url}?${params.toString()}`, { method: 'POST' });
+        const data = await res.json();
+        
+        if (data.status === "success") {
+            showToast("Instrument Metadata Updated ✅", "success");
+            logActivity(`System: Updated ${key} lot settings.`);
+        } else {
+            showToast("Failed: " + (data.message || "Unknown error"), "error");
+        }
+    } catch (e) {
+        console.error("Error updating instrument metadata:", e);
+        showToast("Error updating metadata", "error");
     }
 };
 

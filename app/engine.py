@@ -302,10 +302,20 @@ class AutomationEngine:
         # 4. Use Global Paper Trading override if set
         is_paper = self.paper_trading or config.paper_trading
             
+        # Calculate quantity for visibility (even for paper trades)
+        paper_qty = signal.quantity
+        if paper_qty == 0 and self._order_service:
+            try:
+                paper_qty = self._order_service._calculate_position_size(
+                    trade_instrument, signal.price, signal.stop_loss
+                )
+            except Exception:
+                paper_qty = 1
+
         if is_paper:
             logger.info(
                 f"📝 [PAPER] {signal.action.value} {trade_instrument} "
-                f"@ {signal.price:.2f} | SL: {signal.stop_loss:.2f} | "
+                f"Qty={paper_qty} @ {signal.price:.2f} | SL: {signal.stop_loss:.2f} | "
                 f"TP: {signal.take_profit:.2f}"
             )
             self._trades_today.append({
@@ -315,6 +325,7 @@ class AutomationEngine:
                 "instrument": trade_instrument,
                 "underlying": signal.instrument_key,
                 "action": signal.action.value,
+                "quantity": paper_qty,
                 "price": signal.price,
                 "stop_loss": signal.stop_loss,
                 "take_profit": signal.take_profit,
@@ -329,7 +340,7 @@ class AutomationEngine:
                     strategy_name=signal.strategy_name or config.name,
                     instrument_key=trade_instrument,
                     action=signal.action.value,
-                    quantity=0,
+                    quantity=paper_qty,
                     price=signal.price,
                     stop_loss=signal.stop_loss,
                     take_profit=signal.take_profit,
@@ -349,7 +360,10 @@ class AutomationEngine:
                             "strategy": signal.strategy_name or config.name,
                             "instrument": trade_instrument,
                             "action": signal.action.value,
-                            "price": signal.price
+                            "quantity": paper_qty,
+                            "price": signal.price,
+                            "stop_loss": signal.stop_loss,
+                            "take_profit": signal.take_profit,
                         }
                     }))
             except Exception as e:
@@ -369,7 +383,10 @@ class AutomationEngine:
                     "instrument": trade_instrument,
                     "underlying": signal.instrument_key,
                     "action": signal.action.value,
+                    "quantity": signal.quantity or paper_qty,
                     "price": signal.price,
+                    "stop_loss": signal.stop_loss,
+                    "take_profit": signal.take_profit,
                     "order_result": result,
                 })
                 
@@ -382,11 +399,24 @@ class AutomationEngine:
                             "strategy": signal.strategy_name or config.name,
                             "instrument": trade_instrument,
                             "action": signal.action.value,
-                            "price": signal.price
+                            "quantity": signal.quantity or paper_qty,
+                            "price": signal.price,
+                            "stop_loss": signal.stop_loss,
+                            "take_profit": signal.take_profit,
                         }
                     }))
             except Exception as e:
                 logger.error(f"❌ Order execution failed: {e}")
+                # Broadcast failure to UI so user knows
+                if self.broadcast_callback:
+                    asyncio.create_task(self.broadcast_callback({
+                        "type": "error",
+                        "data": {
+                            "message": f"Order execution failed for {trade_instrument}: {e}",
+                            "instrument": trade_instrument,
+                            "action": signal.action.value,
+                        }
+                    }))
 
     # ── Status & Reporting ──────────────────────────────────────
 
