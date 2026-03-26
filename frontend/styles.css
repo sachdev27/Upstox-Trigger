@@ -154,6 +154,69 @@ body {
 .status-badge.offline .dot { background: var(--text-muted); }
 .status-badge.offline { color: var(--text-muted); }
 
+/* Sidebar Collapse Button — REMOVED */
+
+/* ═══ Global Search Overlay ══════════════════════════════ */
+.search-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(8px);
+    display: none;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 100px;
+    z-index: 2000;
+    animation: fadeIn 0.2s ease;
+}
+
+.search-overlay.active {
+    display: flex;
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.search-modal-content {
+    background: var(--bg-panel);
+    width: 600px;
+    max-width: 90vw;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+    backdrop-filter: var(--glass-blur);
+}
+
+.search-results-list {
+    max-height: 400px;
+    overflow-y: auto;
+    margin-top: 8px;
+    border-top: 1px solid var(--border-color);
+    padding-top: 8px;
+}
+
+.search-result-item {
+    padding: 12px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: background 0.2s;
+}
+
+.search-result-item:hover, .search-result-item.selected {
+    background: rgba(92, 111, 255, 0.3); /* Increased from 0.15 */
+    scale: 1.01;
+}
+
+.search-result-item .symbol { font-weight: 600; color: var(--primary); }
+.search-result-item .name { font-size: 0.8rem; color: var(--text-secondary); margin-left: 8px; }
+.search-result-item .exchange { font-size: 0.7rem; color: var(--text-muted); }
+
 /* ═══ Layout ══════════════════════════════════════════════ */
 .terminal-layout {
     display: flex;
@@ -161,25 +224,7 @@ body {
     overflow: hidden;
 }
 
-/* Left Panel: Watchlist */
-.panel-left {
-    width: 280px;
-    flex-shrink: 0;
-    border-right: 1px solid var(--border-color);
-    display: flex;
-    flex-direction: column;
-    background: var(--bg-panel);
-    backdrop-filter: var(--glass-blur);
-    transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s ease, opacity 0.2s ease;
-    overflow: hidden;
-}
-
-.panel-left.collapsed {
-    width: 0;
-    border-right: none;
-    opacity: 0;
-    pointer-events: none;
-}
+/* Left Panel: Watchlist — REMOVED */
 
 /* Center Panel: Chart + Bottom Tabs */
 .panel-center {

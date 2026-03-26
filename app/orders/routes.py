@@ -55,6 +55,35 @@ async def get_trades():
     return {"data": svc.get_trade_history()}
 
 
+
+@router.get("/status/market-hours")
+async def check_market_hours():
+    """Check if market is currently open."""
+    svc = _get_order_service()
+    return {"market_open": svc.is_market_hours()}
+
+
+@router.get("/positions")
+async def get_positions():
+    """Get all open positions."""
+    svc = _get_order_service()
+    return {"data": svc.get_positions()}
+
+
+@router.get("/holdings")
+async def get_holdings():
+    """Get all equity holdings."""
+    svc = _get_order_service()
+    return {"data": svc.get_holdings()}
+
+
+@router.get("/funds")
+async def get_funds():
+    """Get account funds and margin."""
+    svc = _get_order_service()
+    return {"data": svc.get_funds_and_margin()}
+
+
 @router.get("/{order_id}")
 async def get_order(order_id: str):
     """Get details for a specific order."""
@@ -68,10 +97,3 @@ async def cancel_order(order_id: str):
     svc = _get_order_service()
     result = svc.cancel_order(order_id)
     return {"status": "success", "data": result}
-
-
-@router.get("/status/market-hours")
-async def check_market_hours():
-    """Check if market is currently open."""
-    svc = _get_order_service()
-    return {"market_open": svc.is_market_hours()}

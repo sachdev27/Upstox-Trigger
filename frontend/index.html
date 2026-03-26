@@ -15,13 +15,6 @@
     <!-- ═══ Header ═══════════════════════════════════════ -->
     <header class="header">
         <div class="header-left">
-            <button class="btn-sidebar-toggle" onclick="toggleSidebar()" title="Toggle Sidebar">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <line x1="3" y1="12" x2="21" y2="12"></line>
-                    <line x1="3" y1="6" x2="21" y2="6"></line>
-                    <line x1="3" y1="18" x2="21" y2="18"></line>
-                </svg>
-            </button>
             <div class="header-logo">⚡</div>
             <div>
                 <div class="header-title" style="display: flex; align-items: center; gap: 8px;">
@@ -43,23 +36,16 @@
             <button id="btn-view-settings" class="btn btn-outline" style="width: auto; padding: 4px 10px;" onclick="switchMainView('settings')">⚙️ Settings</button>
             <button class="btn btn-outline" style="width: auto; padding: 4px 10px; margin-left: 8px;" onclick="loginUpstox()">🔐 Login</button>
             <span id="clock" class="mono" style="color: var(--text-muted); font-size: 0.8rem; margin-left: 10px;"></span>
+            <div style="margin-left: 15px; border-left: 1px solid var(--border-color); padding-left: 15px; display: flex; gap: 12px; font-size: 0.8rem;">
+                <div><span style="color:var(--text-muted)">Margin:</span> <span id="account-balance" class="mono">₹0.00</span></div>
+                <div><span style="color:var(--text-muted)">PnL:</span> <span id="account-pnl" class="mono">₹0.00</span></div>
+            </div>
         </div>
     </header>
 
     <!-- ═══ Terminal Layout ══════════════════════════════ -->
     <div class="terminal-layout">
         
-        <!-- ── Left Panel (Instruments) ── -->
-        <aside class="panel-left">
-            <div class="panel-header">Instruments</div>
-            <div class="search-box">
-                <input type="text" id="instrument-search" class="search-input" placeholder="Search (e.g. NIFTY)...">
-            </div>
-            <div class="watchlist" id="watchlist">
-                <!-- Dynamically populated via API -->
-                <div style="padding:12px;text-align:center;color:var(--text-muted);font-size:0.8rem">Loading stocks...</div>
-            </div>
-        </aside>
 
         <!-- ── Center Panel (Chart & Logs) ── -->
         <main class="panel-center">
@@ -74,6 +60,10 @@
                     <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('1hour')">1H</button>
                     <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('day')">1D</button>
                     <div id="current-instrument" style="margin-left: 10px; font-weight: 600; font-size: 0.85rem; color: var(--primary); align-self: center;">Select Symbol</div>
+                </div>
+                <div style="display: flex; gap: 8px; margin-right: 12px; align-items: center;">
+                    <button id="btn-buy" class="btn" style="background: rgba(0, 208, 132, 0.1); color: #00d084; border: 1px solid rgba(0, 208, 132, 0.2); padding: 2px 12px; font-weight: 600; font-size: 0.75rem;">BUY</button>
+                    <button id="btn-sell" class="btn" style="background: rgba(255, 71, 87, 0.1); color: #ff4757; border: 1px solid rgba(255, 71, 87, 0.2); padding: 2px 12px; font-weight: 600; font-size: 0.75rem;">SELL</button>
                 </div>
                 <div style="display: flex; gap: 4px; margin-right: 4px;">
                     <button id="btn-view-chart" class="btn btn-primary" style="padding: 2px 8px; font-size: 0.75rem" onclick="switchMainView('chart')">📈 Chart</button>
@@ -109,7 +99,7 @@
                         </tr>
                     </thead>
                     <tbody id="oc-tbody">
-                        <tr><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-muted);">Select an instrument to view its Option Chain</td></tr>
+                        <tr id="oc-placeholder"><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-muted);">Select an instrument to view its Option Chain</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -234,7 +224,7 @@
             </div>
 
             <!-- Bottom Tabs/Tables -->
-            <div class="bottom-panel">
+            <div id="bottom-panel" class="bottom-panel">
                 <div class="bottom-tabs">
                     <button class="bottom-tab active" onclick="switchBottomTab('positions')">Open Positions</button>
                     <button class="bottom-tab" onclick="switchBottomTab('trades')">Trade History</button>
@@ -347,6 +337,24 @@
     <!-- Toast Container -->
     <div class="toast-container" id="toast-container"></div>
 
-    <script src="/static/app.js"></script>
+    <!-- Global Search Modal -->
+    <div id="global-search-modal" class="search-overlay">
+        <div class="search-modal-content">
+            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+                <span style="font-size: 1.2rem;">🔍</span>
+                <input type="text" id="global-search-input" class="form-input" placeholder="Search instruments (Type to start)..." style="font-size: 1.1rem; padding: 12px;" autocomplete="off" spellcheck="false">
+            </div>
+            <div id="global-search-results" class="search-results-list">
+                <!-- Populated via JS -->
+            </div>
+            <div style="margin-top: 12px; font-size: 0.7rem; color: var(--text-muted); display: flex; justify-content: space-between;">
+                <span>ESC to close</span>
+                <span>ENTER to select</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modularized JS -->
+    <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>

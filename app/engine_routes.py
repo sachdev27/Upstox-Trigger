@@ -1,10 +1,13 @@
 """
 Engine API routes — control the automation engine from the dashboard.
+
+Config changes are persisted to the database.
 """
 
 from fastapi import APIRouter
 
 from app.engine import get_engine
+from app.config import get_settings
 
 router = APIRouter(prefix="/engine", tags=["Automation Engine"])
 
@@ -60,15 +63,31 @@ async def toggle_auto_mode(enabled: bool):
 
 @router.post("/config")
 async def update_engine_config(config: dict):
-    """Update engine risk, capital, and trading mode settings."""
+    """Update engine risk, capital, and trading mode settings. Persisted to DB."""
+    settings = get_settings()
     engine = get_engine()
-    if "trading_capital" in config: engine.trading_capital = config["trading_capital"]
-    if "risk_per_trade_pct" in config: engine.risk_per_trade_pct = config["risk_per_trade_pct"]
-    if "max_daily_loss_pct" in config: engine.max_daily_loss_pct = config["max_daily_loss_pct"]
-    if "max_open_trades" in config: engine.max_open_trades = config["max_open_trades"]
-    if "paper_trading" in config: engine.paper_trading = config["paper_trading"]
-    if "trading_side" in config: engine.trading_side = config["trading_side"]
-    
+
+    # Map of config keys → (settings key, category)
+    key_map = {
+        "trading_capital": ("TRADING_CAPITAL", "ENGINE"),
+        "risk_per_trade_pct": ("MAX_RISK_PER_TRADE_PCT", "RISK"),
+        "max_daily_loss_pct": ("MAX_DAILY_LOSS_PCT", "RISK"),
+        "max_open_trades": ("MAX_OPEN_TRADES", "ENGINE"),
+        "paper_trading": ("PAPER_TRADING", "ENGINE"),
+        "trading_side": ("TRADING_SIDE", "ENGINE"),
+        "auto_mode": (None, None),  # In-memory only
+    }
+
+    for key, value in config.items():
+        mapping = key_map.get(key)
+        if mapping and mapping[0]:
+            settings.save_to_db(mapping[0], str(value), category=mapping[1])
+        if key == "auto_mode":
+            engine.auto_mode = value
+
+    # Refresh engine from DB
+    engine.sync_from_settings()
+
     return {"status": "success", "config": engine.get_status()}
 
 

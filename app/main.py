@@ -40,25 +40,30 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting Upstox Trading Automation...")
     init_db()
     logger.info("✅ Database initialized.")
-    
+
+    # Auto-seed from .env on first startup (if config_settings table is empty)
+    from app.database.connection import get_session, ConfigSetting
+    session = get_session()
+    setting_count = session.query(ConfigSetting).count()
+    session.close()
+    if setting_count == 0:
+        logger.info("🌱 First startup detected — seeding settings from .env...")
+        from app.database.seed import seed_settings
+        seed_settings()
+
+    # Load dynamic settings from DB → overrides .env defaults
+    settings.load_from_db()
+    logger.info("⚙️ Dynamic settings loaded from database.")
+
     # Auto-initialize engine services
     from app.engine import get_engine
     engine = get_engine()
     engine.initialize()
 
-    # Load dynamic settings from DB
-    from app.database.connection import get_session
-    db_session = get_session()
-    settings.update_from_db(db_session)
-    db_session.close()
-    logger.info("⚙️ Dynamic settings loaded from database.")
-
     # Start the scheduler
     from app.scheduler.service import SchedulerService
-    from app.engine import get_engine
     
     scheduler = SchedulerService()
-    engine = get_engine()
     engine.broadcast_callback = broadcast_to_clients
 
     async def _scheduled_run_cycle():
@@ -131,7 +136,7 @@ async def lifespan(app: FastAPI):
                     # The frontend's Lighthouse Charts will handle merging this into the current bar
                     
                     # Add IST offset for chart visualization if necessary (matching app.js)
-                    ds = (now.timestamp()) + 19800
+                    ds = now.timestamp()
                     
                     msg = {
                         "type": "market_data",

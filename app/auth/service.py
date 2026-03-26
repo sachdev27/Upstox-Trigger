@@ -1,11 +1,10 @@
 """
 Auth Service — handles Upstox OAuth2 flow, token management, and auto-refresh.
 
-Refactored from legacy/login/login.py and legacy/login/check_token_expiry.py.
+Tokens are persisted to the database (config_settings table), NOT .env.
 """
 
 import logging
-import fileinput
 from pathlib import Path
 
 import jwt
@@ -33,7 +32,6 @@ class AuthService:
         Return a ready-to-use Upstox SDK Configuration object.
         Automatically refreshes the token if expired for Live mode.
         """
-        # Default to False (Live) if not specified, to prevent 401s on market data
         target_sandbox = use_sandbox if use_sandbox is not None else False
 
         if target_sandbox:
@@ -65,15 +63,18 @@ class AuthService:
     def handle_callback(self, auth_code: str) -> str:
         """
         Handle the OAuth callback — exchange auth code for access token.
-        Returns the new access token.
+        Returns the new access token. Persists to DB.
         """
-        self._update_env("AUTH_CODE", auth_code)
+        # Save auth code to DB
+        self.settings.save_to_db("AUTH_CODE", auth_code, category="API", is_secret=True)
         self.settings.AUTH_CODE = auth_code
+
         token = self._exchange_code_for_token(auth_code)
         if token:
-            self._update_env("ACCESS_TOKEN", token)
+            # Save access token to DB
+            self.settings.save_to_db("ACCESS_TOKEN", token, category="API", is_secret=True)
             self.settings.ACCESS_TOKEN = token
-            logger.info("Successfully obtained new access token.")
+            logger.info("Successfully obtained and persisted new access token to DB.")
         return token
 
     # ── Internal ────────────────────────────────────────────────
@@ -98,7 +99,7 @@ class AuthService:
         """Exchange the stored auth code for a new access token."""
         token = self._exchange_code_for_token(self.settings.AUTH_CODE)
         if token:
-            self._update_env("ACCESS_TOKEN", token)
+            self.settings.save_to_db("ACCESS_TOKEN", token, category="API", is_secret=True)
             self.settings.ACCESS_TOKEN = token
         else:
             logger.error(
@@ -128,21 +129,6 @@ class AuthService:
         except Exception as e:
             logger.error(f"Token exchange failed: {e}")
             return None
-
-    @staticmethod
-    def _update_env(key: str, value: str):
-        """Update a key in the .env file."""
-        env_path = BASE_DIR / ".env"
-        if not env_path.exists():
-            logger.warning(f".env file not found at {env_path}")
-            return
-
-        with fileinput.FileInput(str(env_path), inplace=True) as f:
-            for line in f:
-                if line.startswith(f"{key}="):
-                    print(f'{key}="{value}"')
-                else:
-                    print(line, end="")
 
 
 # Module-level singleton

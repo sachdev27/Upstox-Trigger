@@ -1,8 +1,10 @@
 """
-Market Data API routes — quotes, candles, instruments.
+Market Data API routes — quotes, candles, instruments, option chain.
+
+NOTE: Positions, holdings, and funds routes live in orders/routes.py.
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 
 from app.auth.service import get_auth_service
 from app.market_data.service import MarketDataService
@@ -12,7 +14,6 @@ router = APIRouter(prefix="/market", tags=["Market Data"])
 
 def _get_market_service() -> MarketDataService:
     auth = get_auth_service()
-    # Market data always requires Live configuration
     config = auth.get_configuration(use_sandbox=False)
     return MarketDataService(config)
 
@@ -48,25 +49,8 @@ async def get_candles(
     return {"instrument_key": instrument_key, "count": len(candles), "candles": candles}
 
 
-@router.get("/positions")
-async def get_positions():
-    """Get current positions."""
-    svc = _get_market_service()
-    return {"data": svc.get_positions()}
-
-
-@router.get("/holdings")
-async def get_holdings():
-    """Get current holdings."""
-    svc = _get_market_service()
-    return {"data": svc.get_holdings()}
-
-
-@router.get("/funds")
-async def get_funds():
-    """Get funds and margin."""
-    svc = _get_market_service()
-    return {"data": svc.get_funds_and_margin()}
+# ── REMOVED: /market/positions, /market/holdings, /market/funds ────────────
+# These are now ONLY in orders/routes.py to avoid duplicate routes.
 
 
 @router.get("/profile")
@@ -76,8 +60,6 @@ async def get_profile():
     return {"data": svc.get_profile()}
 
 
-
-
 @router.get("/instruments/featured")
 async def get_featured_instruments():
     """Return featured instruments from the database for the UI default Watchlist."""
@@ -85,7 +67,6 @@ async def get_featured_instruments():
     
     session = get_session()
     try:
-        # Fetch indices and a subset of equities
         db_insts = session.query(Instrument).filter(
             (Instrument.instrument_type == 'INDEX') | 
             (Instrument.instrument_type == 'EQUITY')
@@ -140,11 +121,11 @@ async def get_exchange_timings(date: str = Query(..., description="YYYY-MM-DD"))
 
 
 @router.get("/options/chain")
-async def get_option_chain(
+async def get_option_chain_simple(
     instrument_key: str = Query(...),
     expiry_date: str = Query(..., description="YYYY-MM-DD"),
 ):
-    """Get put/call option chain."""
+    """Get put/call option chain (simple view)."""
     svc = _get_market_service()
     return {"data": svc.get_option_chain(instrument_key, expiry_date)}
 
@@ -209,7 +190,6 @@ async def get_strategy_overlay(
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
             
-    # Calculate dashboard matrix
     config = StrategyConfig(name="Dynamic Execution", instruments=[instrument_key], timeframe=timeframe)
     
     if strategy_class == "SuperTrendPro":
@@ -217,7 +197,6 @@ async def get_strategy_overlay(
         strategy.params.update(parsed_params)
         metrics = strategy.get_dashboard_state(df)
         
-        # Native SuperTrend Extraction
         p_atr = strategy.params.get("atr_period", 10)
         p_mult = strategy.params.get("atr_multiplier", 3.0)
         st_df = supertrend(df, period=p_atr, multiplier=p_mult, use_rma=True)
@@ -227,7 +206,7 @@ async def get_strategy_overlay(
             c = df.iloc[i]
             s = st_df.iloc[i]
             overlay.append({
-                "datetime": c["datetime"],
+                "time": c["time"],
                 "trend": int(s["trend"]),
                 "supertrend": None if pd.isna(s["supertrend"]) else float(s["supertrend"]),
                 "upper": None if pd.isna(s["upper_band"]) else float(s["upper_band"]),
@@ -239,8 +218,8 @@ async def get_strategy_overlay(
         return {"status": "error", "message": f"Strategy class {strategy_class} native graphics overlay not yet supported.", "overlay": []}
 
 
-@router.get("/option-chain", tags=["Market Data"])
-async def get_option_chain(
+@router.get("/option-chain")
+async def get_detailed_option_chain(
     instrument_key: str = Query(...),
     expiry_date: str | None = Query(None)
 ):
@@ -255,7 +234,6 @@ async def get_option_chain(
             instrument_key = "NSE_INDEX|Nifty Bank"
             
         svc = _get_market_service()
-        # Use the shared service method
         result = await svc.get_detailed_option_chain(instrument_key, expiry_date)
         return result
         
@@ -263,4 +241,3 @@ async def get_option_chain(
         import logging
         logging.getLogger(__name__).error(f"Option chain route failed: {e}")
         return {"status": "error", "message": str(e), "chain": [], "available_expiries": []}
-

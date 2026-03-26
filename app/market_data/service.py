@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 
 import requests
 import upstox_client
+import pandas as pd
 
 from app.config import get_settings, BASE_DIR
 
@@ -51,8 +52,8 @@ class MarketDataService:
             "5minute": ("1minute", True, "5Min"),
             "15m": ("1minute", True, "15Min"),
             "15minute": ("1minute", True, "15Min"),
-            "30m": ("1minute", True, "30Min"), # Resampling from 1m to ensure accurate boundaries
-            "30minute": ("30minute", False, None),
+            "30m": ("1minute", True, "30Min"),
+            "30minute": ("1minute", True, "30Min"),
             "1H": ("1minute", True, "60Min"),
             "1hour": ("1minute", True, "60Min"),
             "4H": ("1minute", True, "240Min"),
@@ -67,28 +68,35 @@ class MarketDataService:
             candles_dict = {}
             
             # 1. Fetch Historical Data (from_date -> to_date)
-            if from_date and to_date:
-                try:
-                    res1 = api.get_historical_candle_data1(
-                        instrument_key, fetch_interval, to_date, from_date, self.api_version
-                    )
-                    data1 = res1.to_dict()
-                    for c in data1.get("data", {}).get("candles", []):
-                        candles_dict[c[0]] = c
-                except Exception as e:
-                    logger.warning(f"Historical fetch failed, proceeding to intraday: {e}")
+            # Upstox API limit: ~30 days for intraday, but often 20-25 days is safer to avoid UDAPI1148
+            if not from_date:
+                days = 30 if interval == "day" or interval == "1D" else 20
+                from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            if not to_date:
+                to_date = datetime.now().strftime('%Y-%m-%d')
 
-            # 2. Fetch Intraday Data (Today) 
-            # (Historical API often cuts off at yesterday close)
             try:
-                res2 = api.get_intra_day_candle_data(
-                    instrument_key, fetch_interval, self.api_version
+                res1 = api.get_historical_candle_data1(
+                    instrument_key, fetch_interval, to_date, from_date, self.api_version
                 )
-                data2 = res2.to_dict()
-                for c in data2.get("data", {}).get("candles", []):
+                data1 = res1.to_dict()
+                for c in data1.get("data", {}).get("candles", []):
                     candles_dict[c[0]] = c
             except Exception as e:
-                logger.warning(f"Intraday fetch failed: {e}")
+                logger.warning(f"Historical fetch failed for {instrument_key}: {e}")
+
+            # 2. Fetch Intraday Data (Today) 
+            # Only for intraday intervals (day/week don't support get_intra_day_candle_data)
+            if fetch_interval not in ["day", "week"]:
+                try:
+                    res2 = api.get_intra_day_candle_data(
+                        instrument_key, fetch_interval, self.api_version
+                    )
+                    data2 = res2.to_dict()
+                    for c in data2.get("data", {}).get("candles", []):
+                        candles_dict[c[0]] = c
+                except Exception as e:
+                    logger.warning(f"Intraday fetch failed: {e}")
 
             if not candles_dict:
                 return []
@@ -98,23 +106,31 @@ class MarketDataService:
             
             transformed = []
             for c in sorted_raw:
-                transformed.append({
-                    "datetime": c[0],
-                    "open": c[1],
-                    "high": c[2],
-                    "low": c[3],
-                    "close": c[4],
-                    "volume": c[5] if len(c) > 5 else 0,
-                    "oi": c[6] if len(c) > 6 else 0,
-                })
+                try:
+                    # Ensure all OHLC values are valid floats and not None
+                    if any(v is None for v in c[1:5]):
+                        continue
+                    transformed.append({
+                        "time": c[0],
+                        "open": float(c[1]),
+                        "high": float(c[2]),
+                        "low": float(c[3]),
+                        "close": float(c[4]),
+                        "volume": int(c[5]) if len(c) > 5 else 0,
+                    })
+                except (ValueError, TypeError, IndexError):
+                    continue
                 
             if not needs_resample:
+                for c in transformed:
+                    try:
+                        c["time"] = int(pd.to_datetime(c["time"]).timestamp())
+                    except: pass
                 return transformed
                 
             # --- Dynamic Pandas Resampling ---
-            import pandas as pd
             df = pd.DataFrame(transformed)
-            df['datetime_dt'] = pd.to_datetime(df['datetime'])
+            df['datetime_dt'] = pd.to_datetime(df['time'])
             df.set_index('datetime_dt', inplace=True)
             
             # Resample logic
@@ -123,23 +139,19 @@ class MarketDataService:
                 'high': 'max',
                 'low': 'min',
                 'close': 'last',
-                'volume': 'sum',
-                'oi': 'last',
-                'datetime': 'first' # retain original timezone localized string
+                'volume': 'sum'
             })
-            resampled = resampled.dropna(subset=['open'])
+            resampled = resampled.dropna(subset=['open', 'high', 'low', 'close'])
             
             final_candles = []
             for idx, row in resampled.iterrows():
-                # Reformat datetime back to Upstox ISO format string or just use Pandas ISO format limit
                 final_candles.append({
-                    "datetime": idx.strftime('%Y-%m-%dT%H:%M:%S+05:30'),
+                    "time": int(idx.timestamp()),
                     "open": float(row["open"]),
                     "high": float(row["high"]),
                     "low": float(row["low"]),
                     "close": float(row["close"]),
                     "volume": int(row["volume"]),
-                    "oi": int(row["oi"]),
                 })
                 
             return final_candles

@@ -1,10 +1,11 @@
 """
 Centralized configuration — single source of truth for all settings.
-Loads from .env file via pydantic-settings.
+
+Priority: DB (config_settings table) → .env file → defaults
+The .env file is used ONLY for initial seeding on first run.
 """
 
 import logging
-from functools import lru_cache
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from pathlib import Path
@@ -45,10 +46,16 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     # ── Risk Management ─────────────────────────────────────────
-    MAX_RISK_PER_TRADE_PCT: float = 1.0       # % of equity risked per trade
-    MAX_DAILY_LOSS_PCT: float = 3.0           # auto-stop if daily loss exceeds
+    MAX_RISK_PER_TRADE_PCT: float = 1.0
+    MAX_DAILY_LOSS_PCT: float = 3.0
     MAX_CONCURRENT_POSITIONS: int = 5
-    SQUARE_OFF_TIME: str = "15:15"            # IST, for intraday strategies
+    SQUARE_OFF_TIME: str = "15:15"
+
+    # ── Engine Defaults ─────────────────────────────────────────
+    TRADING_CAPITAL: float = 100000.0
+    PAPER_TRADING: bool = True
+    TRADING_SIDE: str = "BOTH"
+    MAX_OPEN_TRADES: int = 3
 
     # ── Notifications ───────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = ""
@@ -60,37 +67,81 @@ class Settings(BaseSettings):
         "extra": "ignore",
     }
 
-    def update_from_db(self, session):
+    def load_from_db(self):
         """
-        Refresh settings from the database ConfigSetting table.
-        This allows hot-swapping settings without a restart.
+        Override in-memory settings with values from the DB.
+        Called on startup and after any settings change.
         """
-        from sqlalchemy import inspect
-        
-        # We use a late import of our model to avoid circularities
-        # and check if the table exists first (for initial setup)
-        inspector = inspect(session.get_bind())
-        if "config_settings" not in inspector.get_table_names():
-            return
+        try:
+            from sqlalchemy import inspect
+            from app.database.connection import get_session, ConfigSetting
 
-        from app.database.connection import ConfigSetting
-        
-        db_settings = session.query(ConfigSetting).all()
-        for s in db_settings:
-            if hasattr(self, s.key):
-                # Type conversion based on default field type
-                attr_type = type(getattr(self, s.key))
-                try:
-                    if attr_type == bool:
-                        val = s.value.lower() in ("true", "1", "yes")
-                    else:
-                        val = attr_type(s.value)
-                    setattr(self, s.key, val)
-                except (ValueError, TypeError):
-                    logger.warning(f"Failed to convert DB setting {s.key}='{s.value}' to {attr_type}")
+            session = get_session()
+            inspector = inspect(session.get_bind())
+            if "config_settings" not in inspector.get_table_names():
+                session.close()
+                return
+
+            db_settings = session.query(ConfigSetting).all()
+            for s in db_settings:
+                if hasattr(self, s.key):
+                    attr_type = type(getattr(self, s.key))
+                    try:
+                        if attr_type == bool:
+                            val = s.value.lower() in ("true", "1", "yes")
+                        else:
+                            val = attr_type(s.value)
+                        setattr(self, s.key, val)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Failed to convert DB setting {s.key}='{s.value}' to {attr_type}")
+            session.close()
+        except Exception as e:
+            logger.warning(f"Could not load settings from DB: {e}")
+
+    def save_to_db(self, key: str, value: str, category: str = "GENERAL", is_secret: bool = False):
+        """
+        Save a single setting to the database.
+        This is the canonical way to persist a configuration change.
+        """
+        try:
+            from app.database.connection import get_session, ConfigSetting
+            from datetime import datetime
+
+            session = get_session()
+            existing = session.query(ConfigSetting).filter_by(key=key).first()
+            if existing:
+                existing.value = str(value)
+                existing.updated_at = datetime.utcnow()
+            else:
+                setting = ConfigSetting(
+                    key=key,
+                    value=str(value),
+                    category=category,
+                    is_secret=is_secret,
+                    description=f"Set via API"
+                )
+                session.add(setting)
+            session.commit()
+            session.close()
+
+            # Update in-memory
+            if hasattr(self, key):
+                attr_type = type(getattr(self, key))
+                if attr_type == bool:
+                    setattr(self, key, str(value).lower() in ("true", "1", "yes"))
+                else:
+                    setattr(self, key, attr_type(value))
+        except Exception as e:
+            logger.error(f"Failed to save setting {key} to DB: {e}")
 
 
-@lru_cache()
+# Module-level singleton (NO @lru_cache — we need mutability)
+_settings: Settings | None = None
+
+
 def get_settings() -> Settings:
-    """Cached settings singleton."""
-    return Settings()
+    """Get or create the Settings singleton. NOT cached — DB can update it."""
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings

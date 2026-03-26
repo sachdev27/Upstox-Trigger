@@ -163,6 +163,44 @@ class OrderService:
             logger.error(f"Trade history fetch failed: {e}")
             return []
 
+    def get_positions(self) -> list:
+        """Get all open positions."""
+        api = upstox_client.PortfolioApi(
+            upstox_client.ApiClient(self.config)
+        )
+        try:
+            response = api.get_positions("3.0")
+            return response.to_dict().get("data", [])
+        except Exception as e:
+            logger.error(f"Positions fetch failed: {e}")
+            return []
+
+    def get_holdings(self) -> list:
+        """Get all equity holdings."""
+        api = upstox_client.PortfolioApi(
+            upstox_client.ApiClient(self.config)
+        )
+        try:
+            response = api.get_holdings("3.0")
+            return response.to_dict().get("data", [])
+        except Exception as e:
+            logger.error(f"Holdings fetch failed: {e}")
+            return []
+
+    def get_funds_and_margin(self) -> dict:
+        """Get account funds and margin details."""
+        api = upstox_client.UserApi(
+            upstox_client.ApiClient(self.config)
+        )
+        try:
+            response = api.get_user_fund_margin("3.0")
+            data = response.to_dict().get("data", {})
+            # Return equity part by default if both exist
+            return data.get("equity", data.get("commodity", {}))
+        except Exception as e:
+            logger.error(f"Funds fetch failed: {e}")
+            return {}
+
     # ── Risk Management ─────────────────────────────────────────
 
     def _check_risk_limits(self):

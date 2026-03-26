@@ -55,24 +55,31 @@ class AutomationEngine:
         self._is_running: bool = False
         self.auto_mode: bool = False
         
-        # Global config
-        self.paper_trading: bool = True
-        self.trading_side: str = "BOTH"  # BOTH, LONG_ONLY, SHORT_ONLY
-        
-        # Risk settings
-        self.trading_capital: float = 100000.0
-        self.risk_per_trade_pct: float = 1.0
-        self.max_daily_loss_pct: float = 3.0
-        self.max_open_trades: int = 3
-        
         # WebSocket broadcast callback (set by main.py)
         self.broadcast_callback = None
+
+        # Load config from DB-backed settings
+        self.sync_from_settings()
+
+    def sync_from_settings(self):
+        """Sync engine runtime config from the DB-backed Settings singleton."""
+        s = self.settings
+        s.load_from_db()
+        self.paper_trading = s.PAPER_TRADING
+        self.trading_side = s.TRADING_SIDE
+        self.trading_capital = s.TRADING_CAPITAL
+        self.risk_per_trade_pct = s.MAX_RISK_PER_TRADE_PCT
+        self.max_daily_loss_pct = s.MAX_DAILY_LOSS_PCT
+        self.max_open_trades = s.MAX_OPEN_TRADES
 
     # ── Initialization ──────────────────────────────────────────
 
     def initialize(self):
         """Initialize all services and load strategies."""
         try:
+            # Refresh config from DB
+            self.sync_from_settings()
+
             # 1. Market Data ALWAYS uses Live configuration (Sandbox doesn't support market data)
             live_config = self._auth.get_configuration(use_sandbox=False)
             self._market_service = MarketDataService(live_config)
@@ -205,9 +212,11 @@ class AutomationEngine:
         if signal:
             signal.instrument_key = instrument_key
             self._signals_log.append({
-                "timestamp": datetime.now(IST).isoformat(),
+                "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
                 "strategy": config.name,
+                "strategy_name": config.name,
                 "instrument": instrument_key,
+                "instrument_key": instrument_key,
                 "action": signal.action.value,
                 "price": signal.price,
                 "confidence": signal.confidence_score,

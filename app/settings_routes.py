@@ -1,14 +1,17 @@
+"""
+Settings API routes — read and write application configuration.
+
+All settings are persisted to the database (config_settings table).
+"""
+
 from fastapi import APIRouter, Body
 from pydantic import BaseModel
-from pathlib import Path
 from app.config import get_settings
 from app.database.connection import get_session, ConfigSetting
 from app.engine import get_engine
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-ENV_PATH = BASE_DIR / ".env"
 
 class SettingsUpdate(BaseModel):
     API_KEY: str | None = None
@@ -21,61 +24,82 @@ class SettingsUpdate(BaseModel):
     SANDBOX_API_KEY: str | None = None
     SANDBOX_API_SECRET: str | None = None
     SANDBOX_ACCESS_TOKEN: str | None = None
+    TRADING_CAPITAL: float | None = None
+    PAPER_TRADING: bool | None = None
+    TRADING_SIDE: str | None = None
+    MAX_OPEN_TRADES: int | None = None
+    SQUARE_OFF_TIME: str | None = None
+    TELEGRAM_BOT_TOKEN: str | None = None
+    TELEGRAM_CHAT_ID: str | None = None
+
+
+# Keys that should be masked in the UI
+_SECRET_KEYS = {"API_KEY", "API_SECRET", "SANDBOX_API_KEY", "SANDBOX_API_SECRET", "SANDBOX_ACCESS_TOKEN", "ACCESS_TOKEN"}
+
+# Category mapping for DB storage
+_CATEGORY_MAP = {
+    "API_KEY": "API", "API_SECRET": "API", "REDIRECT_URI": "API", "ACCESS_TOKEN": "API", "AUTH_CODE": "API",
+    "MAX_RISK_PER_TRADE_PCT": "RISK", "MAX_DAILY_LOSS_PCT": "RISK", "MAX_CONCURRENT_POSITIONS": "RISK", "SQUARE_OFF_TIME": "RISK",
+    "TRADING_CAPITAL": "ENGINE", "PAPER_TRADING": "ENGINE", "TRADING_SIDE": "ENGINE", "MAX_OPEN_TRADES": "ENGINE",
+    "USE_SANDBOX": "ENGINE", "SANDBOX_API_KEY": "API", "SANDBOX_API_SECRET": "API", "SANDBOX_ACCESS_TOKEN": "API",
+    "TELEGRAM_BOT_TOKEN": "NOTIFICATIONS", "TELEGRAM_CHAT_ID": "NOTIFICATIONS",
+}
+
+
+def _mask(value: str, show_chars: int = 6) -> str:
+    """Mask a sensitive value for UI display."""
+    if not value or len(value) <= show_chars:
+        return value
+    return f"{value[:show_chars]}...{value[-4:]}"
+
 
 @router.get("/")
 async def get_current_settings():
-    """Return non-sensitive settings and masked sensitive settings from DB."""
+    """Return all settings, with sensitive values masked."""
     settings = get_settings()
-    
-    # Refresh settings from DB to ensure UI is accurate
-    session = get_session()
-    settings.update_from_db(session)
-    session.close()
-    
-    # Mask the secrets for UI display
-    masked_key = f"{settings.API_KEY[:6]}...{settings.API_KEY[-4:]}" if len(settings.API_KEY) > 10 else settings.API_KEY
-    masked_secret = "********" if settings.API_SECRET else ""
-    
+    # Always refresh from DB before returning
+    settings.load_from_db()
+
     return {
-        "API_KEY": masked_key,
-        "API_SECRET": masked_secret,
+        "API_KEY": _mask(settings.API_KEY) if settings.API_KEY else "",
+        "API_SECRET": "********" if settings.API_SECRET else "",
         "REDIRECT_URI": settings.REDIRECT_URI,
         "MAX_RISK_PER_TRADE_PCT": settings.MAX_RISK_PER_TRADE_PCT,
         "MAX_DAILY_LOSS_PCT": settings.MAX_DAILY_LOSS_PCT,
         "MAX_CONCURRENT_POSITIONS": settings.MAX_CONCURRENT_POSITIONS,
+        "SQUARE_OFF_TIME": settings.SQUARE_OFF_TIME,
         "USE_SANDBOX": settings.USE_SANDBOX,
-        "SANDBOX_API_KEY": f"{settings.SANDBOX_API_KEY[:6]}..." if len(settings.SANDBOX_API_KEY) > 6 else settings.SANDBOX_API_KEY,
+        "SANDBOX_API_KEY": _mask(settings.SANDBOX_API_KEY) if settings.SANDBOX_API_KEY else "",
         "SANDBOX_API_SECRET": "********" if settings.SANDBOX_API_SECRET else "",
-        "SANDBOX_ACCESS_TOKEN": "********" if settings.SANDBOX_ACCESS_TOKEN else ""
+        "SANDBOX_ACCESS_TOKEN": "********" if settings.SANDBOX_ACCESS_TOKEN else "",
+        "TRADING_CAPITAL": settings.TRADING_CAPITAL,
+        "PAPER_TRADING": settings.PAPER_TRADING,
+        "TRADING_SIDE": settings.TRADING_SIDE,
+        "MAX_OPEN_TRADES": settings.MAX_OPEN_TRADES,
+        "TELEGRAM_BOT_TOKEN": "********" if settings.TELEGRAM_BOT_TOKEN else "",
+        "TELEGRAM_CHAT_ID": settings.TELEGRAM_CHAT_ID,
     }
+
 
 @router.post("/")
 async def update_settings(updates: SettingsUpdate = Body(...)):
-    """Update settings in the database."""
-    session = get_session()
-    updated = False
-    
+    """Update settings — persisted to the database."""
+    settings = get_settings()
+    updated_keys = []
+
     for key, value in updates.dict(exclude_none=True).items():
-        if value is not None:
-            # Masked placeholder means do not overwrite
-            if key in ["API_KEY", "API_SECRET", "SANDBOX_API_KEY", "SANDBOX_API_SECRET", "SANDBOX_ACCESS_TOKEN"] and ("*" in str(value) or "..." in str(value)):
-                continue
-                
-            # Update or create in DB
-            setting = session.query(ConfigSetting).filter_by(key=key).first()
-            if setting:
-                setting.value = str(value)
-            else:
-                setting = ConfigSetting(key=key, value=str(value), category="GENERAL")
-                session.add(setting)
-            updated = True
-            
-    if updated:
-        session.commit()
-        # Refresh the singleton
-        get_settings().update_from_db(session)
-        # Re-initialize engine to pick up possible Live/Sandbox environment switch
-        get_engine().initialize()
-    
-    session.close()
-    return {"status": "success", "message": "Settings updated in database successfully"}
+        # Skip masked placeholder values (user didn't change them)
+        if key in _SECRET_KEYS and ("*" in str(value) or "..." in str(value)):
+            continue
+
+        category = _CATEGORY_MAP.get(key, "GENERAL")
+        is_secret = key in _SECRET_KEYS
+        settings.save_to_db(key, str(value), category=category, is_secret=is_secret)
+        updated_keys.append(key)
+
+    # Sync engine with new settings
+    if updated_keys:
+        engine = get_engine()
+        engine.sync_from_settings()
+
+    return {"status": "success", "message": f"Updated {len(updated_keys)} settings", "updated": updated_keys}
