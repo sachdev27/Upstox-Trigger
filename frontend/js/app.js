@@ -50,6 +50,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     await safeLoad(fetchHistoricalCandles);
     await safeLoad(refreshAccountSummary);
     await safeLoad(refreshPositions);
+    await safeLoad(refreshOrderBook);
     await safeLoad(refreshTrades);
     await safeLoad(refreshSignals);
     await safeLoad(checkAuth);
@@ -205,6 +206,7 @@ async function placeManualOrder(side) {
         if (res.status === 'success') {
             showToast(`Order placed: ${side} ${qty} qty`, "success");
             setTimeout(() => {
+                refreshOrderBook();
                 refreshTrades();
                 refreshPositions();
             }, 1000);
@@ -253,6 +255,42 @@ async function refreshPositions() {
         });
     } catch (e) {
         console.error("Failed to refresh positions", e);
+    }
+}
+
+async function refreshOrderBook() {
+    try {
+        const data = await api.getOrderBook();
+        const list = document.getElementById("book-body");
+        if (!list) return;
+        list.innerHTML = "";
+        
+        const book = data.data || [];
+        if (book.length === 0) {
+            list.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--text-muted)">Order book empty</td></tr>`;
+            return;
+        }
+        
+        book.reverse().forEach(o => {
+            const row = document.createElement("tr");
+            let statusClass = "text-muted";
+            const stat = (o.status || "").toLowerCase();
+            if (stat.includes("complete")) statusClass = "text-success";
+            else if (stat.includes("reject") || stat.includes("cancel")) statusClass = "text-danger";
+            else if (stat.includes("open")) statusClass = "text-warning";
+
+            row.innerHTML = \`
+                <td class="text-muted" style="font-size:0.7rem">\${new Date(o.order_timestamp).toLocaleTimeString()}</td>
+                <td><span class="badge \${o.transaction_type.toLowerCase()}">\${o.transaction_type}</span></td>
+                <td class="mono" style="font-size:0.75rem">\${o.tradingsymbol}</td>
+                <td>\${o.quantity}</td>
+                <td class="mono">₹\${formatPrice(o.average_price || o.price)}</td>
+                <td class="\${statusClass}" style="font-size:0.75rem">\${o.status.toUpperCase()}</td>
+            \`;
+            list.appendChild(row);
+        });
+    } catch (e) {
+        console.error("Failed to refresh order book", e);
     }
 }
 

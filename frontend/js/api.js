@@ -41,6 +41,9 @@ export const api = {
     async getTrades() {
         return fetch(`${API_BASE}/orders/trades`).then(r => r.json());
     },
+    async getOrderBook() {
+        return fetch(`${API_BASE}/orders/book`).then(r => r.json());
+    },
     async placeOrder(payload) {
         const params = new URLSearchParams(payload);
         return fetch(`${API_BASE}/orders/place?${params.toString()}`, { method: 'POST' }).then(r => r.json());

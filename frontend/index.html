@@ -230,6 +230,7 @@
             <div id="bottom-panel" class="bottom-panel">
                 <div class="bottom-tabs">
                     <button class="bottom-tab active" onclick="switchBottomTab('positions')">Open Positions</button>
+                    <button class="bottom-tab" onclick="switchBottomTab('book')">Order Book</button>
                     <button class="bottom-tab" onclick="switchBottomTab('trades')">Trade History</button>
                     <button class="bottom-tab" onclick="switchBottomTab('signals')">Signals</button>
                     <button class="bottom-tab" onclick="switchBottomTab('activity')">Activity Log</button>
@@ -250,6 +251,25 @@
                         </thead>
                         <tbody id="positions-body">
                             <tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">No open positions</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Order Book Tab -->
+                <div id="tab-book" class="bottom-content">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Action</th>
+                                <th>Instrument</th>
+                                <th>Qty</th>
+                                <th>Price</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="book-body">
+                            <tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">Order book empty</td></tr>
                         </tbody>
                     </table>
                 </div>
