@@ -59,19 +59,29 @@ async def toggle_auto_mode(enabled: bool):
 
 
 @router.post("/config")
-async def update_risk_config(
-    trading_capital: float = 100000.0,
-    risk_per_trade_pct: float = 1.0,
-    max_daily_loss_pct: float = 3.0,
-    max_open_trades: int = 3,
-):
-    """Update engine risk and capital settings."""
+async def update_engine_config(config: dict):
+    """Update engine risk, capital, and trading mode settings."""
     engine = get_engine()
-    engine.trading_capital = trading_capital
-    engine.risk_per_trade_pct = risk_per_trade_pct
-    engine.max_daily_loss_pct = max_daily_loss_pct
-    engine.max_open_trades = max_open_trades
-    return {"status": "success", "config": engine.get_status()["risk_controls"]}
+    if "trading_capital" in config: engine.trading_capital = config["trading_capital"]
+    if "risk_per_trade_pct" in config: engine.risk_per_trade_pct = config["risk_per_trade_pct"]
+    if "max_daily_loss_pct" in config: engine.max_daily_loss_pct = config["max_daily_loss_pct"]
+    if "max_open_trades" in config: engine.max_open_trades = config["max_open_trades"]
+    if "paper_trading" in config: engine.paper_trading = config["paper_trading"]
+    if "trading_side" in config: engine.trading_side = config["trading_side"]
+    
+    return {"status": "success", "config": engine.get_status()}
+
+
+@router.post("/test-signal")
+async def trigger_test_signal(payload: dict):
+    """Manually trigger a test signal for an instrument."""
+    engine = get_engine()
+    instrument_key = payload.get("instrument_key")
+    if not instrument_key:
+        return {"status": "error", "message": "Missing instrument_key"}
+        
+    res = await engine.trigger_test_signal(instrument_key)
+    return {"status": "success", "result": res}
 
 
 @router.get("/status")

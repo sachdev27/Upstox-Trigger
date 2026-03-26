@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Port to use
-PORT=8000
+PORT=8210
 
 echo "🚀 Preparing Upstox Terminal on port $PORT..."
 

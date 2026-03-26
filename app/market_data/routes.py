@@ -243,134 +243,28 @@ async def get_strategy_overlay(
         return {"status": "error", "message": f"Strategy class {strategy_class} native graphics overlay not yet supported.", "overlay": []}
 
 
-@router.get("/option-chain")
+@router.get("/option-chain", tags=["Market Data"])
 async def get_option_chain(
     instrument_key: str = Query(...),
     expiry_date: str | None = Query(None)
 ):
-    """Fetch live option chain (Calls, Puts, Greeks) for an instrument."""
-    svc = _get_market_service()
-    
-    import upstox_client
-    from upstox_client.rest import ApiException
-    
+    """
+    Get full option chain matrix with LTP and Greeks for a given index/stock and expiry.
+    """
     try:
-        api = upstox_client.OptionsApi(upstox_client.ApiClient(svc.config))
-        
-        # Nifty Fallback: sometimes search returns slightly different strings 
-        # but the Option Chain underlying key is very strict.
+        # Resolve common index aliases
         if "nifty 50" in instrument_key.lower():
             instrument_key = "NSE_INDEX|Nifty 50"
         elif "bank nifty" in instrument_key.lower() or "nifty bank" in instrument_key.lower():
             instrument_key = "NSE_INDEX|Nifty Bank"
-        elif "fin nifty" in instrument_key.lower() or "nifty fin" in instrument_key.lower():
-            instrument_key = "NSE_INDEX|Nifty Fin Service"
             
-        # 1. Resolve nearest expiry if not provided by pulling nearest contract
-        if not expiry_date:
-            contracts_res = api.get_option_contracts(instrument_key)
-            contracts_data = contracts_res.to_dict().get("data", [])
-            if not contracts_data:
-                return {"status": "error", "message": f"No option contracts found for {instrument_key}.", "chain": []}
-            
-            # Sort chronologically to pick the nearest expiry
-            from datetime import datetime
-            
-            # Parse and sort
-            valid_contracts = []
-            for c in contracts_data:
-                exp = c.get("expiry")
-                if isinstance(exp, str):
-                    try:
-                        exp = datetime.strptime(exp, "%Y-%m-%d")
-                    except: continue
-                if exp:
-                    valid_contracts.append((exp, c))
-            
-            valid_contracts.sort(key=lambda x: x[0])
-            
-            if not valid_contracts:
-                return {"status": "error", "message": "No valid expiries found.", "chain": []}
-                
-            nearest_expiry_dt = valid_contracts[0][0]
-            expiry_date = nearest_expiry_dt.strftime("%Y-%m-%d")
-            
-        if not expiry_date:
-            return {"status": "error", "message": "Could not determine expiry date.", "chain": []}
-            
-        # 2. Fetch Option Chain directly via the SDK
-        chain_res = api.get_put_call_option_chain(instrument_key, expiry_date)
-        chain_data = chain_res.to_dict().get("data", [])
+        svc = _get_market_service()
+        # Use the shared service method
+        result = await svc.get_detailed_option_chain(instrument_key, expiry_date)
+        return result
         
-        # 3. Flatten the heavily nested SDK objects into a clean 2D Dict Matrix
-        matrix = []
-        spot_price = 0.0
-        
-        for strike in chain_data:
-            sp = strike.get("strike_price")
-            pcr = strike.get("pcr")
-            
-            # Save spot price if not already set
-            if not spot_price:
-                spot_price = float(strike.get("underlying_spot_price") or 0.0)
-            
-            ce = strike.get("call_options", {})
-            pe = strike.get("put_options", {})
-            
-            if not ce and not pe:
-                continue
-                
-            def _extract_greeks(opt_data):
-                if not opt_data: return {}
-                g = opt_data.get("option_greeks", {}) or {}
-                m = opt_data.get("market_data", {}) or {}
-                
-                # Handle both ltp and last_price (Upstox SDK inconsistency)
-                ltp = m.get("ltp") or m.get("last_price") or 0.0
-                
-                return {
-                    "instrument_key": opt_data.get("instrument_key"),
-                    "ltp": float(ltp),
-                    "volume": int(m.get("volume") or 0),
-                    "oi": float(m.get("oi") or 0.0),
-                    "iv": float(g.get("iv") or 0.0),
-                    "delta": float(g.get("delta") or 0.0),
-                    "theta": float(g.get("theta") or 0.0),
-                    "gamma": float(g.get("gamma") or 0.0),
-                    "vega": float(g.get("vega") or 0.0),
-                }
-
-            # Detect if strike price is in paise (extremely large values)
-            strike_price = float(sp)
-            if strike_price > 1000000:
-                strike_price = strike_price / 100.0
-
-            matrix.append({
-                "strike_price": strike_price,
-                "pcr": pcr,
-                "ce": _extract_greeks(ce),
-                "pe": _extract_greeks(pe)
-            })
-            
-        # Sort by strike price ascending
-        matrix.sort(key=lambda x: x["strike_price"])
-        
-        return {
-            "status": "success",
-            "instrument_key": instrument_key,
-            "expiry": expiry_date,
-            "spot_price": spot_price,
-            "chain": matrix
-        }
-        
-    except ApiException as e:
-        import json
-        try:
-            err_body = json.loads(e.body)
-            msg = err_body.get('errors', [{}])[0].get('message', e.body)
-        except:
-            msg = e.body
-        return {"status": "error", "message": f"Upstox API Error {e.status}: {msg}", "chain": []}
     except Exception as e:
-        return {"status": "error", "message": str(e), "chain": []}
+        import logging
+        logging.getLogger(__name__).error(f"Option chain route failed: {e}")
+        return {"status": "error", "message": str(e), "chain": [], "available_expiries": []}
 

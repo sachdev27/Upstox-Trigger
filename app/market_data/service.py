@@ -387,3 +387,93 @@ class MarketDataService:
         except Exception as e:
             logger.error(f"Brokerage calc failed: {e}")
             return None
+    async def get_detailed_option_chain(
+        self, instrument_key: str, expiry_date: str | None = None
+    ) -> dict:
+        """
+        High-level helper to fetch a full option chain with LTP and Greeks.
+        Can be used by both the API routes and the Automation Engine.
+        """
+        try:
+            # 1. Get available contracts
+            contracts = self.get_option_contracts(instrument_key)
+            if not contracts:
+                return {"status": "error", "message": "No contracts found", "chain": []}
+            
+            # Get unique expiries (sorted)
+            all_expiries = sorted(list(set(c["expiry"] for c in contracts)))
+            if not all_expiries:
+                return {"status": "error", "message": "No expiries found", "chain": []}
+            
+            # Select expiry
+            target_expiry = expiry_date or all_expiries[0]
+            
+            # Filter contracts for this expiry
+            expiry_contracts = [c for c in contracts if c["expiry"] == target_expiry]
+            
+            # 2. Extract spot price from one contract (or fetch separately if needed)
+            # Upstox usually includes underlying_key in the contract
+            spot_price = 0.0
+            if expiry_contracts:
+                spot_price = self.get_ltp(instrument_key) or 0.0
+
+            # 3. Fetch Full Market Quote for all contracts to get LTP and Greeks
+            # We batch the keys for efficiency
+            instr_keys = [c["instrument_key"] for c in expiry_contracts]
+            
+            # Upstox LTP API supports up to 500 instruments in one call
+            # For full quote (Greeks), we might need to batch more carefully
+            quote_data = {}
+            for i in range(0, len(instr_keys), 50):
+                batch = ",".join(instr_keys[i:i+50])
+                res = self.get_full_quote(batch)
+                if res:
+                    quote_data.update(res)
+
+            # 4. Group by strike
+            strikes = {}
+            for c in expiry_contracts:
+                sp = float(str(c["strike_price"]))
+                # Normalize strike (paise check)
+                if sp > 1000000: sp /= 100.0
+                
+                if sp not in strikes:
+                    strikes[sp] = {"strike_price": sp, "ce": None, "pe": None}
+                
+                q = quote_data.get(c["instrument_key"], {})
+                ltp = q.get("last_price", 0.0)
+                g = q.get("greeks", {})
+                m = q.get("market_data", {})
+                
+                data = {
+                    "instrument_key": c["instrument_key"],
+                    "ltp": float(ltp),
+                    "volume": int(m.get("volume") or 0),
+                    "oi": float(m.get("oi") or 0.0),
+                    "iv": float(g.get("iv") or 0.0),
+                    "delta": float(g.get("delta") or 0.0),
+                    "theta": float(g.get("theta") or 0.0),
+                    "gamma": float(g.get("gamma") or 0.0),
+                    "vega": float(g.get("vega") or 0.0),
+                }
+                
+                if c["option_type"].lower() == "ce":
+                    strikes[sp]["ce"] = data
+                else:
+                    strikes[sp]["pe"] = data
+
+            # 5. Sort and return
+            matrix = sorted(strikes.values(), key=lambda x: x["strike_price"])
+            
+            return {
+                "status": "success",
+                "instrument_key": instrument_key,
+                "spot_price": spot_price,
+                "expiry_date": target_expiry,
+                "available_expiries": all_expiries,
+                "chain": matrix
+            }
+            
+        except Exception as e:
+            logger.error(f"Detailed option chain failed: {e}")
+            return {"status": "error", "message": str(e), "chain": []}

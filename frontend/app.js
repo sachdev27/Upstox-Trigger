@@ -2,8 +2,8 @@
  * Upstox Trading Automation — Terminal JS UI
  */
 
-const API_BASE = "http://localhost:8000";
-const WS_URL = "ws://localhost:8000/ws";
+const API_BASE = window.location.origin;
+const WS_URL = (window.location.protocol === "https:" ? "wss://" : "ws://") + window.location.host + "/ws";
 
 let ws = null;
 let currentInstrumentKey = "NSE_INDEX|Nifty 50";
@@ -256,35 +256,113 @@ function initChart() {
 function switchMainView(viewType) {
     const btnChart = document.getElementById("btn-view-chart");
     const btnOptions = document.getElementById("btn-view-options");
+    const btnSettings = document.getElementById("btn-view-settings-center");
     const tvchart = document.getElementById("tvchart");
     const ocGrid = document.getElementById("option-chain-container");
+    const settingsView = document.getElementById("settings-view-container");
+
+    // Reset Buttons
+    [btnChart, btnOptions, btnSettings].forEach(b => { if(b) b.className = "btn btn-outline"; });
+    
+    // Hide all main containers
+    [tvchart, ocGrid, settingsView].forEach(v => { if(v) v.style.display = "none"; });
 
     if (viewType === 'chart') {
-        btnChart.className = "btn btn-primary";
-        btnOptions.className = "btn btn-outline";
+        if(btnChart) btnChart.className = "btn btn-primary";
         tvchart.style.display = "block";
-        ocGrid.style.display = "none";
-    } else {
-        btnChart.className = "btn btn-outline";
-        btnOptions.className = "btn btn-primary";
-        tvchart.style.display = "none";
+    } else if (viewType === 'options') {
+        if(btnOptions) btnOptions.className = "btn btn-primary";
         ocGrid.style.display = "block";
         
-        // Default to NIFTY if nothing selected
         if (!currentInstrumentKey) {
             selectInstrument('NSE_INDEX|Nifty 50', 'Nifty 50');
         } else {
             fetchOptionChain(); 
         }
+    } else if (viewType === 'settings') {
+        if(btnSettings) btnSettings.className = "btn btn-primary";
+        settingsView.style.display = "block";
+        loadAllSettings();
     }
 }
 
-async function fetchOptionChain(expiry = "") {
+function switchSettingsTab(tabName) {
+    document.querySelectorAll('.settings-content').forEach(c => c.classList.remove('active'));
+    document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+    
+    document.getElementById(`set-tab-${tabName}`).classList.add('active');
+    if (event && event.currentTarget) {
+        event.currentTarget.classList.add('active');
+    }
+}
+
+async function loadAllSettings() {
+    try {
+        const res = await fetch(`${API_BASE}/settings/`);
+        const data = await res.json();
+        document.getElementById('setting-api-key').value = data.API_KEY || '';
+        document.getElementById('setting-api-secret').value = '********';
+        document.getElementById('setting-redirect-uri').value = data.REDIRECT_URI || '';
+        
+        // Also load risk params into the inputs
+        fetchRiskConfig();
+    } catch (e) {
+        console.error("Failed to load settings", e);
+    }
+}
+
+async function togglePaperMode(isPaper) {
+    try {
+        await fetch(`${API_BASE}/engine/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paper_trading: isPaper })
+        });
+        showToast(`Paper Trading: ${isPaper ? 'Enabled' : 'Disabled'}`, "info");
+    } catch (e) { console.error(e); }
+}
+
+async function updateTradingSide(side) {
+    try {
+        await fetch(`${API_BASE}/engine/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ trading_side: side })
+        });
+        showToast(`Execution: ${side}`, "info");
+    } catch (e) { console.error(e); }
+}
+
+async function triggerTestSignal() {
+    if (!currentInstrumentKey) {
+        showToast("Select a stock first", "warning");
+        return;
+    }
+    try {
+        showToast("Triggering test signal...", "info");
+        const res = await fetch(`${API_BASE}/engine/test-signal`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instrument_key: currentInstrumentKey })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast("Signal fired! Checking outcome...", "success");
+        } else {
+            showToast(data.message || "Signal failed", "error");
+        }
+    } catch (e) { showToast("API Error", "error"); }
+}
+
+async function fetchOptionChain(forcedExpiry = "") {
     if (!currentInstrumentKey) return;
+    
+    const select = document.getElementById("oc-expiry-select");
+    const expiry = forcedExpiry || select.value;
     
     document.getElementById("oc-instrument-name").innerText = currentInstrumentName;
     const tbody = document.getElementById("oc-tbody");
-    tbody.innerHTML = `<tr><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-muted);">Fetching live Option Chain from Upstox API...</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-muted);">Fetching live Option Chain [${expiry || 'Nearest'}]...</td></tr>`;
 
     try {
         const url = `${API_BASE}/market/option-chain?instrument_key=${encodeURIComponent(currentInstrumentKey)}${expiry ? '&expiry_date='+encodeURIComponent(expiry) : ''}`;
@@ -292,12 +370,12 @@ async function fetchOptionChain(expiry = "") {
         const data = await res.json();
         
         if (data.status === "success" && data.chain) {
-            console.log("Option Chain Data:", data);
-            
-            // Populate Expiry drop-down if it's the first pull
-            const select = document.getElementById("oc-expiry-select");
-            if (!expiry && select.options.length <= 1) {
-                 select.innerHTML = `<option value="${data.expiry}">${data.expiry}</option>`;
+            // Populate Expiry drop-down if available
+            if (data.available_expiries && (select.dataset.instrument !== currentInstrumentKey || select.options.length <= 1)) {
+                 select.innerHTML = data.available_expiries.map(exp => 
+                    `<option value="${exp}" ${exp === data.expiry_date ? 'selected' : ''}>${exp}</option>`
+                 ).join("");
+                 select.dataset.instrument = currentInstrumentKey;
             }
             
             tbody.innerHTML = "";
@@ -406,7 +484,8 @@ async function fetchHistoricalCandles(instrumentKey) {
         
         fromDateObj.setDate(toDateObj.getDate() - daysBack);
         
-        const toDateStr = toDateObj.toISOString().split('T')[0];
+        // Buffer toDate by +1 day (86400000ms) to ensure we always capture the absolute latest intraday bars
+        const toDateStr = new Date(Date.now() + 86400000).toISOString().split('T')[0];
         const fromDateStr = fromDateObj.toISOString().split('T')[0];
         
         const res = await fetch(`${API_BASE}/market/candles?instrument_key=${encodeURIComponent(instrumentKey)}&interval=${currentInterval}&from_date=${fromDateStr}&to_date=${toDateStr}`);
@@ -960,23 +1039,6 @@ async function refreshSignals() {
     }
 }
 
-// ── Settings Modal ────────────────────────────────────────────
-
-async function openSettings() {
-    try {
-        const res = await fetch(`${API_BASE}/settings/`);
-        const data = await res.json();
-        
-        document.getElementById('setting-api-key').value = data.API_KEY || '';
-        document.getElementById('setting-api-secret').value = data.API_SECRET || '';
-        document.getElementById('setting-redirect-uri').value = data.REDIRECT_URI || '';
-        
-        document.getElementById('settings-modal').showModal();
-    } catch (e) {
-        showToast("Failed to load settings", "error");
-    }
-}
-
 async function saveSettings() {
     const key = document.getElementById('setting-api-key').value;
     const secret = document.getElementById('setting-api-secret').value;
@@ -997,7 +1059,6 @@ async function saveSettings() {
         
         if (data.status === 'success') {
             showToast("Settings saved to .env securely", "success");
-            document.getElementById('settings-modal').close();
         } else {
             showToast("Failed to save settings", "error");
         }

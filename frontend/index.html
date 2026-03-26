@@ -30,8 +30,8 @@
                 <span class="dot"></span>
                 <span id="auth-status-text">Auth Unknown</span>
             </span>
-            <button class="btn btn-outline" style="width: auto; padding: 4px 10px; margin-right: 8px;" onclick="openSettings()">⚙️ Settings</button>
-            <button class="btn btn-outline" style="width: auto; padding: 4px 10px;" onclick="loginUpstox()">🔐 Login</button>
+            <button id="btn-view-settings" class="btn btn-outline" style="width: auto; padding: 4px 10px;" onclick="switchMainView('settings')">⚙️ Settings</button>
+            <button class="btn btn-outline" style="width: auto; padding: 4px 10px; margin-left: 8px;" onclick="loginUpstox()">🔐 Login</button>
             <span id="clock" class="mono" style="color: var(--text-muted); font-size: 0.8rem; margin-left: 10px;"></span>
         </div>
     </header>
@@ -67,6 +67,7 @@
                 <div style="display: flex; gap: 4px; margin-right: 4px;">
                     <button id="btn-view-chart" class="btn btn-primary" style="padding: 2px 8px; font-size: 0.75rem" onclick="switchMainView('chart')">📈 Chart</button>
                     <button id="btn-view-options" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="switchMainView('options')">⛓️ Option Chain</button>
+                    <button id="btn-view-settings-center" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="switchMainView('settings')">⚙️ Settings</button>
                 </div>
             </div>
             
@@ -100,6 +101,99 @@
                         <tr><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-muted);">Select an instrument to view its Option Chain</td></tr>
                     </tbody>
                 </table>
+            </div>
+
+            <!-- Settings View Container (Hidden by default) -->
+            <div id="settings-view-container" class="chart-container" style="display: none; height: calc(100% - 28px); overflow-y: auto; background: var(--bg-color);">
+                <div class="settings-tabs">
+                    <button class="settings-tab active" onclick="switchSettingsTab('general')">General</button>
+                    <button class="settings-tab" onclick="switchSettingsTab('strategy')">Strategy Config</button>
+                    <button class="settings-tab" onclick="switchSettingsTab('risk')">Risk & Capital</button>
+                </div>
+                
+                <!-- General Settings -->
+                <div id="set-tab-general" class="settings-content active">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px;">
+                        <div class="settings-card">
+                            <h4>API Credentials</h4>
+                            <div class="form-group">
+                                <label class="form-label">Upstox API Key</label>
+                                <input type="text" id="setting-api-key" class="form-input" placeholder="Loading...">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Upstox API Secret</label>
+                                <input type="password" id="setting-api-secret" class="form-input" placeholder="********">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Redirect URI</label>
+                                <input type="text" id="setting-redirect-uri" class="form-input" placeholder="Loading...">
+                            </div>
+                            <button class="btn btn-primary" onclick="saveSettings()">Save API Configuration</button>
+                        </div>
+                        <div class="settings-card">
+                            <h4>Trading Mode</h4>
+                            <div class="auto-mode-card" style="margin-top: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Paper Trading Mode</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Simulation only, no real money used</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="toggle-papermode" checked onchange="togglePaperMode(this.checked)">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Execution Side</label>
+                                <select id="setting-trading-side" class="form-input" onchange="updateTradingSide(this.value)">
+                                    <option value="BOTH">Both (Long & Short)</option>
+                                    <option value="LONG_ONLY">Long Only (Calls Only)</option>
+                                    <option value="SHORT_ONLY">Short Only (Puts Only)</option>
+                                </select>
+                            </div>
+                            <button class="btn btn-outline" onclick="triggerTestSignal()">🧪 Trigger Manual Test Signal</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Strategy Settings -->
+                <div id="set-tab-strategy" class="settings-content">
+                    <div class="settings-card" style="margin: 20px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                            <h4 style="margin: 0;">Strategy Parameters</h4>
+                            <select id="strategy-selector" class="form-input" style="width: auto;" onchange="renderDynamicStrategyForm()">
+                                <option value="supertrend_pro" data-class="SuperTrendPro">SuperTrend Pro v6.3</option>
+                            </select>
+                        </div>
+                        <div id="dynamic-strategy-container" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                            <!-- Dynamically populated -->
+                        </div>
+                        <button class="btn btn-primary" style="margin-top: 20px;" onclick="loadStrategy()">Apply Strategy Configuration</button>
+                    </div>
+                </div>
+
+                <!-- Risk Settings -->
+                <div id="set-tab-risk" class="settings-content">
+                    <div class="settings-card" style="max-width: 500px; margin: 20px;">
+                        <h4>Risk Management</h4>
+                        <div class="form-group">
+                            <label class="form-label">Trading Capital (₹)</label>
+                            <input type="number" id="risk-capital" class="form-input" value="100000">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Risk Per Trade (%)</label>
+                            <input type="number" id="risk-pct" class="form-input" value="1.0" step="0.1">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Max Daily Loss (%)</label>
+                            <input type="number" id="risk-maxloss" class="form-input" value="3.0" step="0.1">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Max Open Trades</label>
+                            <input type="number" id="risk-maxtrades" class="form-input" value="3">
+                        </div>
+                        <button class="btn btn-primary" onclick="saveRiskConfig()">Save Risk Config</button>
+                    </div>
+                </div>
             </div>
 
             <!-- Bottom Tabs/Tables -->
@@ -203,61 +297,11 @@
                 </div>
             </div>
 
-            <div class="panel-header">Capital & Risk</div>
-            <div class="control-section">
-                <div class="form-group">
-                    <label class="form-label">Trading Capital (₹)</label>
-                    <input type="number" id="risk-capital" class="form-input" value="100000">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Risk Per Trade (%)</label>
-                    <input type="number" id="risk-pct" class="form-input" value="1.0" step="0.1">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Max Daily Loss (%)</label>
-                    <input type="number" id="risk-maxloss" class="form-input" value="3.0" step="0.1">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Max Open Trades</label>
-                    <input type="number" id="risk-maxtrades" class="form-input" value="3">
-                </div>
-                <button class="btn btn-outline" style="margin-top: 8px;" onclick="saveRiskConfig()">💾 Save Risk Settings</button>
-                
-                <div style="margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--border-color);">
-                    <div class="stat-row">
-                        <span class="text-muted">Daily P&L:</span>
-                        <span id="disp-pnl" class="mono text-muted">₹0.00</span>
-                    </div>
-                    <div class="stat-row">
-                        <span class="text-muted">Max Loss Limit:</span>
-                        <span id="disp-maxloss" class="mono text-danger">-₹3000.00</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="panel-header">Live Strategy Score</div>
+            <div class="panel-header">Strategy Feedback</div>
             <div class="control-section" id="strategy-hud-container" style="padding: 0; background: var(--bg-color);">
                 <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
                     Waiting for active strategy...
                 </div>
-            </div>
-
-            <div class="panel-header" style="margin-top: 12px;">Strategy Settings</div>
-            <div class="control-section">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                    <select id="strategy-selector" class="form-input" style="font-weight: 500; font-size: 0.85rem; padding: 4px;" onchange="renderDynamicStrategyForm()">
-                        <option value="supertrend_pro" data-class="SuperTrendPro">SuperTrend Pro v6.3</option>
-                    </select>
-                    <span class="badge paper">Paper</span>
-                </div>
-                
-                <div id="dynamic-strategy-container">
-                    <div style="padding:12px;text-align:center;color:var(--text-muted);font-size:0.8rem">Loading parameters...</div>
-                </div>
-                
-                <button class="btn btn-primary" style="margin-top: 12px; width: 100%;" onclick="loadStrategy()">
-                    ✅ Apply to Selected Instrument
-                </button>
             </div>
 
         </aside>
@@ -265,30 +309,6 @@
 
     <!-- Toast Container -->
     <div class="toast-container" id="toast-container"></div>
-
-    <!-- Settings Modal -->
-    <dialog id="settings-modal" class="modal" style="background: var(--bg-card); color: var(--text-color); border: 1px solid var(--border-color); border-radius: 8px; width: 400px; padding: 20px;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-            <h3 style="margin: 0;">Configuration</h3>
-            <button onclick="document.getElementById('settings-modal').close()" style="background: transparent; border: none; color: var(--text-muted); cursor: pointer; font-size: 1.2rem;">&times;</button>
-        </div>
-        <div class="form-group">
-            <label class="form-label">Upstox API Key</label>
-            <input type="text" id="setting-api-key" class="form-input" placeholder="Loading...">
-        </div>
-        <div class="form-group">
-            <label class="form-label">Upstox API Secret</label>
-            <input type="password" id="setting-api-secret" class="form-input" placeholder="********">
-        </div>
-        <div class="form-group">
-            <label class="form-label">Redirect URI</label>
-            <input type="text" id="setting-redirect-uri" class="form-input" placeholder="Loading...">
-        </div>
-        <div style="margin-top: 20px; display: flex; justify-content: flex-end; gap: 8px;">
-            <button class="btn btn-outline" style="width: auto;" onclick="document.getElementById('settings-modal').close()">Cancel</button>
-            <button class="btn btn-primary" style="width: auto;" onclick="saveSettings()">Save Changes</button>
-        </div>
-    </dialog>
 
     <script src="/static/app.js"></script>
 </body>
