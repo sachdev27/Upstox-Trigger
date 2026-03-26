@@ -19,11 +19,11 @@ def _get_market_service() -> MarketDataService:
 
 
 @router.get("/ltp")
-async def get_ltp(instrument_key: str = Query(...)):
-    """Get last traded price."""
+async def get_ltp(instrument_key: str = Query(...), detailed: bool = Query(False)):
+    """Get last traded price (V3 includes Volume, CP, LTQ)."""
     svc = _get_market_service()
-    ltp = svc.get_ltp(instrument_key)
-    return {"instrument_key": instrument_key, "ltp": ltp}
+    data = svc.get_ltp(instrument_key, detailed=detailed)
+    return {"instrument_key": instrument_key, "data": data}
 
 
 @router.get("/quote")

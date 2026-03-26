@@ -65,22 +65,25 @@ async def check_market_hours():
 
 @router.get("/positions")
 async def get_positions():
-    """Get all open positions."""
-    svc = _get_order_service()
+    """Get all open positions (Always Live)."""
+    auth = get_auth_service()
+    svc = OrderService(auth.get_configuration(use_sandbox=False))
     return {"data": svc.get_positions()}
 
 
 @router.get("/holdings")
 async def get_holdings():
-    """Get all equity holdings."""
-    svc = _get_order_service()
+    """Get all equity holdings (Always Live)."""
+    auth = get_auth_service()
+    svc = OrderService(auth.get_configuration(use_sandbox=False))
     return {"data": svc.get_holdings()}
 
 
 @router.get("/funds")
 async def get_funds():
-    """Get account funds and margin."""
-    svc = _get_order_service()
+    """Get account funds and margin (Always Live)."""
+    auth = get_auth_service()
+    svc = OrderService(auth.get_configuration(use_sandbox=False))
     return {"data": svc.get_funds_and_margin()}
 
 

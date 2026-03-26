@@ -228,8 +228,31 @@ class MarketDataService:
 
     # ── Market Quotes ───────────────────────────────────────────
 
-    def get_ltp(self, instrument_key: str) -> float | None:
-        """Get last traded price for an instrument."""
+    def get_ltp(self, instrument_key: str, detailed: bool = False) -> float | dict | None:
+        """
+        Get last traded price for an instrument.
+        Uses V3 REST API directly if detailed=True to capture Volume/CP.
+        """
+        # 1. Detailed V3 REST Call (Bypasses SDK limitations for V3 fields)
+        if detailed:
+            import requests
+            url = f"https://api.upstox.com/v3/market-quote/ltp?instrument_key={instrument_key.replace('|', '%7C')}"
+            headers = {
+                'Accept': 'application/json',
+                'Authorization': f'Bearer {self.config.access_token}'
+            }
+            try:
+                # Use a short timeout for responsiveness
+                response = requests.get(url, headers=headers, timeout=5)
+                if response.status_code == 200:
+                    data = response.json().get("data", {})
+                    # Response is keyed by instrument_key
+                    for info in data.values():
+                        return info
+            except Exception as e:
+                logger.warning(f"V3 LTP REST fallback failed: {e}")
+
+        # 2. SDK Fallback
         api = upstox_client.MarketQuoteApi(
             upstox_client.ApiClient(self.config)
         )
@@ -238,6 +261,8 @@ class MarketDataService:
             data = response.to_dict().get("data", {})
             # response keyed by instrument_key
             for key, val in data.items():
+                if detailed:
+                    return val
                 return val.get("last_price")
         except Exception as e:
             logger.error(f"LTP fetch failed for {instrument_key}: {e}")

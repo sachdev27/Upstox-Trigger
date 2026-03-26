@@ -191,6 +191,10 @@ class OrderService:
             response = api.get_order_book("3.0")
             return response.to_dict().get("data", [])
         except Exception as e:
+            # Sandbox often doesn't support Order Info APIs (404)
+            if self.config.host == "https://api-sandbox.upstox.com" and "404" in str(e):
+                logger.debug("Sandbox: Order Book API 404 (returning empty list)")
+                return []
             logger.error(f"Order book fetch failed: {e}")
             return []
 
@@ -217,6 +221,10 @@ class OrderService:
             response = api.get_trade_history("3.0")
             return response.to_dict().get("data", [])
         except Exception as e:
+            # Sandbox often doesn't support Trade History APIs (404)
+            if self.config.host == "https://api-sandbox.upstox.com" and "404" in str(e):
+                logger.debug("Sandbox: Trade History API 404 (returning empty list)")
+                return []
             logger.error(f"Trade history fetch failed: {e}")
             return []
 

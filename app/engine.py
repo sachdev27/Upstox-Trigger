@@ -47,6 +47,7 @@ class AutomationEngine:
         self._auth = get_auth_service()
         self._market_service: MarketDataService | None = None
         self._order_service: OrderService | None = None
+        self._account_service: OrderService | None = None  # Always Live for Portfolio/Funds
         self._active_strategies: list[tuple[StrategyConfig, BaseStrategy]] = []
         self._signals_log: list[dict] = []
         self._trades_today: list[dict] = []
@@ -98,6 +99,9 @@ class AutomationEngine:
             # 2. Order Service moves between Live/Sandbox based on global flag
             order_config = self._auth.get_configuration(use_sandbox=self.settings.USE_SANDBOX)
             self._order_service = OrderService(order_config)
+            
+            # 3. Account Lookup service ALWAYS uses Live (Sandbox doesn't support Portfolio/Funds)
+            self._account_service = OrderService(live_config)
             
             self._is_initialized = True
             logger.info(f"✅ Automation engine initialized ({'SANDBOX' if self.settings.USE_SANDBOX else 'LIVE'} mode).")
@@ -307,7 +311,14 @@ class AutomationEngine:
             
         # Calculate quantity for visibility (even for paper trades)
         paper_qty = signal.quantity
-        if paper_qty == 0 and self._order_service:
+        if paper_qty == 0 and self._account_service:
+            try:
+                paper_qty = self._account_service._calculate_position_size(
+                    trade_instrument, signal.price, signal.stop_loss
+                )
+            except Exception:
+                paper_qty = 1
+        elif paper_qty == 0 and self._order_service:
             try:
                 paper_qty = self._order_service._calculate_position_size(
                     trade_instrument, signal.price, signal.stop_loss

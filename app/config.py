@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables / .env file."""
 
     # ── Upstox API ──────────────────────────────────────────────
-    API_VERSION: str = "2.0"
+    API_VERSION: str = "3.0"
     API_KEY: str = ""
     API_SECRET: str = ""
     REDIRECT_URI: str = "http://localhost:8210/callback/"
