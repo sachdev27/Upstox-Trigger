@@ -460,7 +460,7 @@ class MarketDataService:
             logger.error(f"Brokerage calc failed: {e}")
             return None
     async def get_detailed_option_chain(
-        self, instrument_key: str, expiry_date: str | None = None
+        self, instrument_key: str, expiry_date: str | None = None, min_expiry_days: int = 0
     ) -> dict:
         """
         High-level helper to fetch a full option chain with LTP and Greeks.
@@ -481,8 +481,17 @@ class MarketDataService:
             if not all_expiries:
                 return {"status": "error", "message": "No expiries found", "chain": []}
             
-            # Select expiry
-            target_expiry = expiry_date or all_expiries[0]
+            # Select expiry based on minimum gap requirement
+            target_expiry = expiry_date
+            if not target_expiry:
+                if min_expiry_days > 0:
+                    today = datetime.now().date()
+                    threshold_date = today + timedelta(days=min_expiry_days)
+                    # Find first expiry >= threshold
+                    filtered = [e for e in all_expiries if datetime.strptime(e, "%Y-%m-%d").date() >= threshold_date]
+                    target_expiry = filtered[0] if filtered else all_expiries[0]
+                else:
+                    target_expiry = all_expiries[0]
             
             # 2. Get native option chain for the target expiry
             # This contains Greeks and Market Data (LTP, Volume, OI) correctly mapped by Upstox

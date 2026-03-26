@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     PAPER_TRADING: bool = True
     TRADING_SIDE: str = "BOTH"
     MAX_OPEN_TRADES: int = 3
+    MIN_EXPIRY_DAYS: int = 7
 
     # ── Notifications ───────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = ""

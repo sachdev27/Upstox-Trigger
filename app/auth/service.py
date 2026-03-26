@@ -38,6 +38,8 @@ class AuthService:
             logger.debug("Creating Upstox SANDBOX configuration.")
             config = upstox_client.Configuration()
             config.access_token = self.settings.SANDBOX_ACCESS_TOKEN
+            # Sandbox uses a different base URL
+            config.host = "https://api-sandbox.upstox.com"
             return config
 
         # Live Mode logic (with refresh)

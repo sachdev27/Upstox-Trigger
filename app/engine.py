@@ -279,7 +279,10 @@ class AutomationEngine:
             try:
                 logger.info(f"🔍 Resolving ATM option for {signal.instrument_key} @ {signal.price}")
                 # Use the service directly to avoid circular imports with routes.py
-                chain_data = await self._market_service.get_detailed_option_chain(signal.instrument_key)
+                chain_data = await self._market_service.get_detailed_option_chain(
+                    signal.instrument_key,
+                    min_expiry_days=self.settings.MIN_EXPIRY_DAYS
+                )
                 if chain_data["status"] == "success" and chain_data["chain"]:
                     # Chain is sorted by strike. Find closest to price.
                     matrix = chain_data["chain"]

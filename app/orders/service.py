@@ -47,11 +47,39 @@ class OrderService:
             )
             self._trade_count += 1
             result = response.to_dict()
+            order_id = result.get("data", {}).get("order_id")
+            
             logger.info(
                 f"Order placed: {order.transaction_type.value} "
                 f"{order.quantity} x {order.instrument_token} "
                 f"({order.order_type.value}) → {result}"
             )
+
+            # Log to Database for History & Visibility
+            try:
+                from app.database.connection import get_session, TradeLog
+                session = get_session()
+                # Determine strategy name from tag (auto-StrategyName)
+                tag = order.tag or ""
+                strategy_name = tag.split("-")[-1] if "-" in tag else "MANUAL"
+                
+                log = TradeLog(
+                    timestamp=datetime.now(),
+                    strategy_name=strategy_name,
+                    instrument_key=order.instrument_token,
+                    action=order.transaction_type.value,
+                    quantity=order.quantity,
+                    price=order.price or 0.0,
+                    order_id=order_id,
+                    status="filled" if order.order_type == OrderType.MARKET else "pending",
+                    metadata_json={"tag": order.tag, "product": order.product.value}
+                )
+                session.add(log)
+                session.commit()
+                session.close()
+            except Exception as db_err:
+                logger.error(f"Failed to log order to DB: {db_err}")
+
             return result
         except Exception as e:
             logger.error(f"Order placement failed: {e}")
@@ -201,6 +229,10 @@ class OrderService:
             response = api.get_positions("3.0")
             return response.to_dict().get("data", [])
         except Exception as e:
+            # Sandbox often doesn't support Portfolio APIs (404)
+            if self.config.host == "https://api-sandbox.upstox.com" and "404" in str(e):
+                logger.debug("Sandbox: Positions API 404 (returning empty list)")
+                return []
             logger.error(f"Positions fetch failed: {e}")
             return []
 
@@ -227,6 +259,10 @@ class OrderService:
             # Return equity part by default if both exist
             return data.get("equity", data.get("commodity", {}))
         except Exception as e:
+            # Sandbox often doesn't support Funds API (404)
+            if self.config.host == "https://api-sandbox.upstox.com" and "404" in str(e):
+                logger.debug("Sandbox: Funds API 404 (returning mock margin)")
+                return {"available_margin": 1000000.0, "used_margin": 0.0}
             logger.error(f"Funds fetch failed: {e}")
             return {}
 
