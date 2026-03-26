@@ -424,77 +424,57 @@ class MarketDataService:
             # Select expiry
             target_expiry = expiry_date or all_expiries[0]
             
-            # Filter contracts for this expiry (compare as strings)
-            expiry_contracts = [c for c in contracts if _fmt_expiry(c.get("expiry")) == target_expiry]
+            # 2. Get native option chain for the target expiry
+            # This contains Greeks and Market Data (LTP, Volume, OI) correctly mapped by Upstox
+            chain_data = self.get_option_chain(instrument_key, target_expiry) or []
             
-            # 2. Extract spot price from one contract (or fetch separately if needed)
-            # Upstox usually includes underlying_key in the contract
+            # 3. Format into strikes
+            final_chain = []
             spot_price = 0.0
-            if expiry_contracts:
-                spot_price = self.get_ltp(instrument_key) or 0.0
-
-            # 3. Fetch Full Market Quote for all contracts to get LTP and Greeks
-            # We batch the keys for efficiency
-            instr_keys = [c["instrument_key"] for c in expiry_contracts]
             
-            # Upstox LTP API supports up to 500 instruments in one call
-            # For full quote (Greeks), we might need to batch more carefully
-            quote_data = {}
-            for i in range(0, len(instr_keys), 50):
-                batch = ",".join(instr_keys[i:i+50])
-                res = self.get_full_quote(batch)
-                if res:
-                    # RE-MAP: Upstox quote data keys are "{exchange}:{symbol}" (e.g. NSE_FO:NIFTY24DEC25000CE)
-                    # We need to map them by instrument_token (which matches our instrument_key)
-                    for k, val in res.items():
-                        token = val.get("instrument_token")
-                        if token:
-                            quote_data[token] = val
-
-            # 4. Group by strike
-            strikes = {}
-            for c in expiry_contracts:
-                sp = float(str(c["strike_price"]))
-                # Normalize strike (paise check)
-                if sp > 1000000: sp /= 100.0
-                
-                if sp not in strikes:
-                    strikes[sp] = {"strike_price": sp, "ce": None, "pe": None}
-                
-                q = quote_data.get(c["instrument_key"], {})
-                ltp = q.get("last_price", 0.0)
-                g = q.get("greeks", {})
-                m = q.get("market_data", {})
-                
-                data = {
-                    "instrument_key": c["instrument_key"],
-                    "ltp": float(ltp),
-                    "volume": int(m.get("volume") or 0),
-                    "oi": float(m.get("oi") or 0.0),
-                    "iv": float(g.get("iv") or 0.0),
-                    "delta": float(g.get("delta") or 0.0),
-                    "theta": float(g.get("theta") or 0.0),
-                    "gamma": float(g.get("gamma") or 0.0),
-                    "vega": float(g.get("vega") or 0.0),
-                }
-                
-                # Classification based on instrument_type (Upstose SDK field)
-                opt_type = c.get("instrument_type", "").lower()
-                if opt_type == "ce":
-                    strikes[sp]["ce"] = data
-                elif opt_type == "pe":
-                    strikes[sp]["pe"] = data
-
-            # 5. Sort and return
-            matrix = sorted(strikes.values(), key=lambda x: x["strike_price"])
+            # Handle both list or dict responses based on SDK behavior
+            strikes_list = chain_data if isinstance(chain_data, list) else chain_data.get('chain', [])
             
+            for item in strikes_list:
+                strike_price = float(item.get("strike_price") or 0.0)
+                if spot_price == 0.0:
+                    spot_price = float(item.get("underlying_spot_price") or 0.0)
+                
+                # Format CE/PE
+                def _fmt_option(opt):
+                    if not opt: return None
+                    m = opt.get("market_data", {})
+                    # Upstox uses 'option_greeks' for the Greeks sub-object in some SDK versions
+                    g = opt.get("option_greeks") or opt.get("greeks") or {}
+                    
+                    return {
+                        "instrument_key": opt.get("instrument_key"),
+                        "ltp": float(m.get("ltp") or 0.0),
+                        "volume": int(m.get("volume") or 0),
+                        "oi": float(m.get("oi") or 0.0),
+                        "iv": float(g.get("iv") or 0.0),
+                        "delta": float(g.get("delta") or 0.0),
+                        "theta": float(g.get("theta") or 0.0),
+                        "gamma": float(g.get("gamma") or 0.0),
+                        "vega": float(g.get("vega") or 0.0),
+                    }
+
+                final_chain.append({
+                    "strike_price": strike_price,
+                    "ce": _fmt_option(item.get("call_options")),
+                    "pe": _fmt_option(item.get("put_options")),
+                })
+
+            # Sort by strike price
+            final_chain.sort(key=lambda x: x["strike_price"])
+
             return {
                 "status": "success",
                 "instrument_key": instrument_key,
                 "spot_price": spot_price,
                 "expiry_date": target_expiry,
                 "available_expiries": all_expiries,
-                "chain": matrix
+                "chain": final_chain
             }
             
         except Exception as e:

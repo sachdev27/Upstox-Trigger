@@ -33,6 +33,9 @@ export const api = {
         if (expiry) url += `&expiry_date=${expiry}`;
         return fetch(url).then(r => r.json());
     },
+    async getMarketStatus(exchange = "NSE") {
+        return fetch(`${API_BASE}/market/status?exchange=${exchange}`).then(r => r.json());
+    },
 
     // Orders
     async getTrades() {

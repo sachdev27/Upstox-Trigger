@@ -103,7 +103,8 @@ async def search_instruments(
 async def get_market_status(exchange: str = Query("NSE")):
     """Get real-time market status (open/closed)."""
     svc = _get_market_service()
-    return {"data": svc.get_market_status(exchange)}
+    data = svc.get_market_status(exchange)
+    return {"status": "success", "data": data}
 
 
 @router.get("/holidays")

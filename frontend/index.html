@@ -33,8 +33,9 @@
                 <span class="dot"></span>
                 <span id="auth-status-text">Auth Unknown</span>
             </span>
-            <button id="btn-view-settings" class="btn btn-outline" style="width: auto; padding: 4px 10px;" onclick="switchMainView('settings')">⚙️ Settings</button>
             <button class="btn btn-outline" style="width: auto; padding: 4px 10px; margin-left: 8px;" onclick="loginUpstox()">🔐 Login</button>
+            <span id="market-status-badge" class="badge badge-success" style="margin-left: 10px;">Market Open</span>
+            <span id="paper-trading-badge" class="badge" style="margin-left: 8px; background: rgba(255, 152, 0, 0.15); color: #ff9800; border: 1px solid rgba(255, 152, 0, 0.3); display: none;">Paper Trading</span>
             <span id="clock" class="mono" style="color: var(--text-muted); font-size: 0.8rem; margin-left: 10px;"></span>
             <div style="margin-left: 15px; border-left: 1px solid var(--border-color); padding-left: 15px; display: flex; gap: 12px; font-size: 0.8rem;">
                 <div><span style="color:var(--text-muted)">Margin:</span> <span id="account-balance" class="mono">₹0.00</span></div>
@@ -45,11 +46,11 @@
 
     <!-- ═══ Terminal Layout ══════════════════════════════ -->
     <div class="terminal-layout">
-        
+
 
         <!-- ── Center Panel (Chart & Logs) ── -->
         <main class="panel-center">
-            
+
             <!-- Chart Container -->
             <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px; background: var(--bg-dark); border-bottom: 1px solid var(--border-color);">
                 <div style="display: flex; gap: 4px;">
@@ -71,11 +72,11 @@
                     <button id="btn-view-settings-center" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="switchMainView('settings')">⚙️ Settings</button>
                 </div>
             </div>
-            
+
             <div id="tvchart" class="chart-container" style="height: calc(100% - 28px);">
                 <!-- Lightweight Charts injected here via JS -->
             </div>
-            
+
             <!-- Option Chain Container (Hidden by default) -->
             <div id="option-chain-container" class="chart-container" style="display: none; height: calc(100% - 28px); overflow-y: auto; background: var(--bg-color);">
                 <div style="padding: 12px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); background: var(--bg-card);">
@@ -84,24 +85,26 @@
                         <option value="">Nearest Expiry</option>
                     </select>
                 </div>
-                
-                <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem; text-align: center;">
-                    <thead style="position: sticky; top: 0; z-index: 10;">
-                        <tr style="background: var(--bg-dark);">
-                            <th colspan="5" style="padding: 6px; border-right: 2px solid var(--bg-color); color: #00d084;">CALLS (CE)</th>
-                            <th rowspan="2" style="padding: 6px; background: var(--bg-dark); border-right: 2px solid var(--bg-color); border-left: 2px solid var(--bg-color); width: 80px;">STRIKE</th>
-                            <th colspan="5" style="padding: 6px; border-left: 2px solid var(--bg-color); color: #ff4757;">PUTS (PE)</th>
-                        </tr>
-                        <tr style="background: var(--bg-card); color: var(--text-muted); font-size: 0.75rem; border-bottom: 1px solid var(--border-color);">
-                            <th style="padding: 4px;">Delta</th><th style="padding: 4px;">Theta</th><th style="padding: 4px;">IV</th><th style="padding: 4px;">Vol</th><th style="padding: 4px; border-right: 2px solid var(--bg-color);">LTP</th>
-                            <!-- Strike header is rowspan=2 above -->
-                            <th style="padding: 4px; border-left: 2px solid var(--bg-color);">LTP</th><th style="padding: 4px;">Vol</th><th style="padding: 4px;">IV</th><th style="padding: 4px;">Theta</th><th style="padding: 4px;">Delta</th>
-                        </tr>
-                    </thead>
-                    <tbody id="oc-tbody">
-                        <tr id="oc-placeholder"><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-muted);">Select an instrument to view its Option Chain</td></tr>
-                    </tbody>
-                </table>
+
+                <div class="option-chain-wrapper" style="height: calc(100% - 50px); overflow-y: auto;">
+                    <table class="option-chain-table">
+                        <thead style="position: sticky; top: 0; z-index: 100;">
+                            <tr style="background: var(--bg-dark);">
+                                <th colspan="5" style="padding: 6px; border-right: 2px solid var(--bg-color); color: #00d084; position: sticky; top: 0;">CALLS (CE)</th>
+                                <th rowspan="2" style="padding: 6px; background: var(--bg-dark); border-right: 2px solid var(--bg-color); border-left: 2px solid var(--bg-color); width: 80px; position: sticky; top: 0; z-index: 11;">STRIKE</th>
+                                <th colspan="5" style="padding: 6px; border-left: 2px solid var(--bg-color); color: #ff4757; position: sticky; top: 0;">PUTS (PE)</th>
+                            </tr>
+                            <tr style="background: var(--bg-card); color: var(--text-muted); font-size: 0.75rem; border-bottom: 1px solid var(--border-color);">
+                                <th style="padding: 4px; position: sticky; top: 31px;">Delta</th><th style="padding: 4px; position: sticky; top: 31px;">Theta</th><th style="padding: 4px; position: sticky; top: 31px;">IV</th><th style="padding: 4px; position: sticky; top: 31px;">Vol</th><th style="padding: 4px; border-right: 2px solid var(--bg-color); position: sticky; top: 31px;">LTP</th>
+                                <!-- Strike header is rowspan=2 above -->
+                                <th style="padding: 4px; border-left: 2px solid var(--bg-color); position: sticky; top: 31px;">LTP</th><th style="padding: 4px; position: sticky; top: 31px;">Vol</th><th style="padding: 4px; position: sticky; top: 31px;">IV</th><th style="padding: 4px; position: sticky; top: 31px;">Theta</th><th style="padding: 4px; position: sticky; top: 31px;">Delta</th>
+                            </tr>
+                        </thead>
+                        <tbody id="oc-tbody">
+                            <tr id="oc-placeholder"><td colspan="11" style="padding: 40px; text-align: center; color: var(--text-muted);">Select an instrument to view its Option Chain</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <!-- Settings View Container (Hidden by default) -->
@@ -111,7 +114,7 @@
                     <button class="settings-tab" onclick="switchSettingsTab('strategy')">Strategy Config</button>
                     <button class="settings-tab" onclick="switchSettingsTab('risk')">Risk & Capital</button>
                 </div>
-                
+
                 <!-- General Settings -->
                 <div id="set-tab-general" class="settings-content active">
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px;">
@@ -231,7 +234,7 @@
                     <button class="bottom-tab" onclick="switchBottomTab('signals')">Signals</button>
                     <button class="bottom-tab" onclick="switchBottomTab('activity')">Activity Log</button>
                 </div>
-                
+
                 <!-- Positions Tab -->
                 <div id="tab-positions" class="bottom-content active">
                     <table>
@@ -300,10 +303,10 @@
 
         <!-- ── Right Panel (Controls) ── -->
         <aside class="panel-right">
-            
+
             <div class="panel-header">Engine Control</div>
             <div class="control-section">
-                
+
                 <div class="auto-mode-card" id="auto-mode-card">
                     <div>
                         <div style="font-weight: 600; font-size: 0.95rem;">Auto Mode</div>

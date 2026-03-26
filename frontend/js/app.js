@@ -23,29 +23,46 @@ const chart = new ChartManager('tvchart');
 const ws = new EngineWS(handleWsMessage);
 
 document.addEventListener("DOMContentLoaded", async () => {
-    chart.init();
-    ws.connect();
+    console.log("Terminal: Initializing...");
     
-    // Restore sidebar state — REMOVED
+    // Initial data fetch - wrap in individual try/catch to avoid blocking others
+    const safeLoad = async (fn) => { 
+        try { 
+            console.log(`Init: ${fn.name || 'anonymous'} started...`);
+            await fn(); 
+        } catch(e) { 
+            console.error(`Init step failed: ${fn.name || 'anonymous'}`, e); 
+        } 
+    };
     
-    // Initial data fetch
-    await fetchHistoricalCandles();
-    await refreshAccountSummary();
-    await refreshPositions();
-    await refreshTrades();
-    await refreshSignals();
-    await checkAuth();
-    await refreshStatus();
-    await fetchStrategySchemas(); // Ported: load strategy options
+    try { chart.init(); } catch(e) { console.error("Chart Init Failed", e); }
+    try { ws.connect(); } catch(e) { console.error("WS Connect Failed", e); }
+
+    await safeLoad(fetchHistoricalCandles);
+    await safeLoad(refreshAccountSummary);
+    await safeLoad(refreshPositions);
+    await safeLoad(refreshTrades);
+    await safeLoad(refreshSignals);
+    await safeLoad(checkAuth);
+    await safeLoad(refreshStatus);
+    await safeLoad(fetchStrategySchemas);
+    await safeLoad(loadSettings);
+    await safeLoad(refreshMarketStatus);
     
-    // Set up listeners
-    setupEventListeners();
-    setupGlobalSearch();
+    // Set up listeners (ALWAYS run these)
+    try {
+        setupEventListeners();
+        setupGlobalSearch();
+        console.log("Terminal: Setup complete.");
+    } catch(e) {
+        console.error("Setup Listeners Failed", e);
+    }
     
     // Interval updates
     setInterval(updateClock, 1000);
-    setInterval(refreshAccountSummary, 60000); // Every minute
-    setInterval(refreshPositions, 30000); // Every 30 seconds
+    setInterval(refreshAccountSummary, 60000);
+    setInterval(refreshPositions, 30000);
+    setInterval(refreshMarketStatus, 60000);
 });
 
 function setupEventListeners() {
@@ -75,27 +92,32 @@ function setupEventListeners() {
 }
 
 function handleWsMessage(msg) {
-    console.log("WS Message:", msg);
+    if (!msg || !msg.type) return;
+    
     switch (msg.type) {
-        case 'status':
-            updateEngineStatus(msg.data);
+        case 'tick':
+            chart.updateTick(msg.data);
             break;
-        case 'new_signal':
-            addLog(`🎯 Signal: ${msg.data.action} on ${msg.data.instrument}`, 'info');
-            showToast(`New Signal: ${msg.data.action} on ${msg.data.instrument}`);
+        case 'signal':
+            logActivity(`🎯 SIGNAL: ${msg.data.action} ${msg.data.instrument_key} @ ${msg.data.price}`, "signal");
+            showToast(`New Signal: ${msg.data.action} on ${msg.data.trading_symbol || msg.data.instrument_key}`);
             refreshSignals();
             break;
-        case 'trade_executed':
-            addLog(`💰 Trade: ${msg.data.action} @ ${msg.data.price}`, 'success');
-            showToast(`Trade Executed: ${msg.data.action}`, 'success');
+        case 'trade':
+            logActivity(`📦 TRADE: ${msg.data.action} ${msg.data.instrument_key} - ${msg.data.status}`, "trade");
+            showToast(`Trade: ${msg.data.action} ${msg.data.status}`, msg.data.status === 'COMPLETE' ? 'success' : 'info');
             refreshTrades();
             refreshPositions();
+            break;
+        case 'error':
+            logActivity(`❌ ERROR: ${msg.data.message}`, "error");
+            showToast(msg.data.message, "error");
             break;
         case 'market_data':
             if (msg.data && msg.data.instrument_key === currentInstrumentKey) {
                 const c = msg.data.candle;
                 if (c && c.time && c.open != null && c.high != null && c.low != null && c.close != null) {
-                    chart.updateCandle({ ...c, time: c.time + IST_OFFSET });
+                    chart.updateCandle({ ...c, time: c.time + (IST_OFFSET || 0) });
                 }
             }
             break;
@@ -422,26 +444,85 @@ window.saveSandboxSettings = async () => {
 };
 
 window.saveRiskConfig = async () => {
-    const capital = document.getElementById('setting-capital').value;
-    const risk = document.getElementById('setting-risk-pct').value;
-    const maxLoss = document.getElementById('setting-max-loss-pct').value;
-    const maxTrades = document.getElementById('setting-max-trades').value;
-    const side = document.getElementById('setting-trading-side').value;
+    const capital = document.getElementById('risk-capital')?.value;
+    const risk = document.getElementById('risk-pct')?.value;
+    const maxLoss = document.getElementById('risk-maxloss')?.value;
+    const maxTrades = document.getElementById('risk-maxtrades')?.value;
     
     const payload = {
-        trading_capital: parseFloat(capital),
-        risk_per_trade_pct: parseFloat(risk),
-        max_daily_loss_pct: parseFloat(maxLoss),
-        max_open_trades: parseInt(maxTrades),
-        trading_side: side
+        TRADING_CAPITAL: parseFloat(capital) || 100000,
+        MAX_RISK_PER_TRADE_PCT: parseFloat(risk) || 1.0,
+        MAX_DAILY_LOSS_PCT: parseFloat(maxLoss) || 3.0,
+        MAX_OPEN_TRADES: parseInt(maxTrades) || 3
     };
     
     try {
-        await api.setAutoMode(payload); // Using setAutoMode which is actually updateConfig
-        showToast("Risk Configuration Saved", "success");
+        await api.saveSettings(payload);
+        showToast("Risk Configuration Saved ✅", "success");
         refreshStatus();
     } catch (e) {
         showToast("Failed to save risk config", "error");
+    }
+};
+
+// ── Settings persistence: toggles + save → DB ─────────────────────
+window.toggleSandboxMode = async (enabled) => {
+    try {
+        await api.saveSettings({ USE_SANDBOX: enabled });
+        showToast(`Sandbox Mode ${enabled ? 'Enabled' : 'Disabled'}`, 'info');
+    } catch (e) { showToast('Failed to toggle sandbox mode', 'error'); }
+};
+
+window.togglePaperMode = async (enabled) => {
+    try {
+        await api.saveSettings({ PAPER_TRADING: enabled });
+        updatePaperBadge(enabled);
+        showToast(`Paper Trading ${enabled ? 'Enabled' : 'Disabled'}`, 'info');
+        logActivity(`System: Paper Trading ${enabled ? 'ON' : 'OFF'}`);
+    } catch (e) { showToast('Failed to toggle paper trading', 'error'); }
+};
+
+window.updateTradingSide = async (side) => {
+    try {
+        await api.saveSettings({ TRADING_SIDE: side });
+        showToast(`Execution side set to ${side}`, 'info');
+    } catch (e) { showToast('Failed to update trading side', 'error'); }
+};
+
+window.loadSettings = async () => {
+    try {
+        const s = await api.getSettings();
+        // API Credentials
+        const apiKey = document.getElementById('setting-api-key');
+        if (apiKey && s.API_KEY) apiKey.value = s.API_KEY;
+        const redirectUri = document.getElementById('setting-redirect-uri');
+        if (redirectUri && s.REDIRECT_URI) redirectUri.value = s.REDIRECT_URI;
+        
+        // Sandbox
+        const sbKey = document.getElementById('setting-sandbox-key');
+        if (sbKey && s.SANDBOX_API_KEY) sbKey.value = s.SANDBOX_API_KEY;
+        
+        // Toggles
+        const sandboxToggle = document.getElementById('toggle-sandboxmode');
+        if (sandboxToggle) sandboxToggle.checked = !!s.USE_SANDBOX;
+        const paperToggle = document.getElementById('toggle-papermode');
+        if (paperToggle) paperToggle.checked = s.PAPER_TRADING !== false;
+        
+        // Trading side
+        const sideSelect = document.getElementById('setting-trading-side');
+        if (sideSelect && s.TRADING_SIDE) sideSelect.value = s.TRADING_SIDE;
+        
+        // Risk
+        const capital = document.getElementById('risk-capital');
+        if (capital && s.TRADING_CAPITAL) capital.value = s.TRADING_CAPITAL;
+        const riskPct = document.getElementById('risk-pct');
+        if (riskPct && s.MAX_RISK_PER_TRADE_PCT) riskPct.value = s.MAX_RISK_PER_TRADE_PCT;
+        const maxLoss = document.getElementById('risk-maxloss');
+        if (maxLoss && s.MAX_DAILY_LOSS_PCT) maxLoss.value = s.MAX_DAILY_LOSS_PCT;
+        const maxTrades = document.getElementById('risk-maxtrades');
+        if (maxTrades && s.MAX_OPEN_TRADES) maxTrades.value = s.MAX_OPEN_TRADES;
+    } catch(e) {
+        console.error('Failed to load settings', e);
     }
 };
 
@@ -848,6 +929,8 @@ function setupGlobalSearch() {
             }
             return;
         }
+        // Only trigger search on plain alphanumeric keys — NOT when Cmd/Ctrl/Alt are held
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
         if (/^[a-z0-9\/]$/i.test(e.key)) {
             modal.classList.add("active");
             input.value = "";
@@ -914,7 +997,7 @@ function renderGlobalSearchResults(instruments) {
         const item = document.createElement("div");
         item.className = "search-result-item" + (idx === selectedSearchIndex ? " selected" : "");
         item.onclick = () => {
-            selectInstrument(inst.instrument_key, inst.name);
+            selectInstrument(inst.instrument_key, name);
             document.getElementById("global-search-modal").classList.remove("active");
         };
 
@@ -933,4 +1016,24 @@ function renderGlobalSearchResults(instruments) {
         }
         container.appendChild(item);
     });
+}
+async function refreshMarketStatus() {
+    try {
+        const res = await api.getMarketStatus("NSE");
+        const el = document.getElementById("market-status-badge");
+        if (!el) return;
+        
+        // Handle both {status: "success", data: ...} and {data: ...}
+        const data = res.data || res;
+        if (data && data.status) {
+            const s = data.status;
+            el.innerText = s.replace(/_/g, " ");
+            el.className = s.includes("OPEN") ? "badge badge-success" : "badge badge-error";
+        } else {
+            el.innerText = "STATUS UNKNOWN";
+            el.className = "badge";
+        }
+    } catch (e) {
+        console.error("Failed to refresh market status", e);
+    }
 }
