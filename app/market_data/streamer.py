@@ -55,7 +55,7 @@ class MarketDataStreamer:
         )
 
         # Enable auto-reconnect (retry 5 times, 10 second interval)
-        self._streamer.auto_reconnect(enable=True, interval=10, retryCount=5)
+        self._streamer.auto_reconnect(enable=True, interval=10, retry_count=5)
 
         # Wire up event handlers
         self._streamer.on("open", self._handle_open)
@@ -92,7 +92,7 @@ class MarketDataStreamer:
 
     # ── Event handlers ──────────────────────────────────────────
 
-    def _handle_open(self):
+    def _handle_open(self, *args):
         logger.info("✅ Market data WebSocket connected.")
         if self.on_open:
             self.on_open()
@@ -101,7 +101,7 @@ class MarketDataStreamer:
         if self.on_tick:
             self.on_tick(message)
 
-    def _handle_close(self):
+    def _handle_close(self, *args):
         logger.info("🔌 Market data WebSocket closed.")
         if self.on_close:
             self.on_close()
@@ -111,7 +111,7 @@ class MarketDataStreamer:
         if self.on_error:
             self.on_error(error)
 
-    def _handle_reconnecting(self):
+    def _handle_reconnecting(self, *args):
         logger.info("🔄 Reconnecting to market data stream...")
 
 

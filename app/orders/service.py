@@ -42,7 +42,7 @@ class OrderService:
         )
         try:
             response = api.place_order(
-                order.to_api_dict(), self.api_version
+                order.to_api_dict(), "3.0"
             )
             self._trade_count += 1
             result = response.to_dict()
@@ -105,7 +105,7 @@ class OrderService:
             upstox_client.ApiClient(self.config)
         )
         try:
-            response = api.modify_order(modifications, self.api_version)
+            response = api.modify_order(modifications, "3.0")
             return response.to_dict()
         except Exception as e:
             logger.error(f"Order modification failed: {e}")
@@ -117,7 +117,7 @@ class OrderService:
             upstox_client.ApiClient(self.config)
         )
         try:
-            response = api.cancel_order(order_id, self.api_version)
+            response = api.cancel_order(order_id, "3.0")
             return response.to_dict()
         except Exception as e:
             logger.error(f"Order cancellation failed: {e}")
@@ -131,7 +131,7 @@ class OrderService:
             upstox_client.ApiClient(self.config)
         )
         try:
-            response = api.get_order_book(self.api_version)
+            response = api.get_order_book("3.0")
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Order book fetch failed: {e}")
@@ -144,7 +144,7 @@ class OrderService:
         )
         try:
             response = api.get_order_details(
-                self.api_version, order_id=order_id
+                "3.0", order_id=order_id
             )
             return response.to_dict()
         except Exception as e:
@@ -157,7 +157,7 @@ class OrderService:
             upstox_client.ApiClient(self.config)
         )
         try:
-            response = api.get_trade_history(self.api_version)
+            response = api.get_trade_history("3.0")
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Trade history fetch failed: {e}")

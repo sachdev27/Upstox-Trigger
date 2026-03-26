@@ -67,6 +67,8 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     app.state.scheduler = scheduler
 
+    loop = asyncio.get_running_loop()
+
     # --- Live Market Data Streamer ---
     from app.market_data.streamer import MarketDataStreamer
     from app.auth.service import get_auth_service
@@ -88,22 +90,31 @@ async def lifespan(app: FastAPI):
         try:
             for instrument_key, feed in feeds.items():
                 # 1. Extract LTP
-                # Depending on mode, it might be in marketFF.ltpc or market_ohlc
-                ltp = feed.get("ff", {}).get("marketFF", {}).get("ltpc", {}).get("ltp")
+                # V3 uses 'fullFeed'/'marketFF'/'ltpc', V2 might use 'ff'
+                ff = feed.get("fullFeed") or feed.get("ff") or {}
+                market_ff = ff.get("marketFF") or {}
+                ltpc = market_ff.get("ltpc") or {}
+                
+                ltp = ltpc.get("ltp")
                 if not ltp:
-                    # Try OHLC mode
-                    ltp = feed.get("ff", {}).get("marketFF", {}).get("market_ohlc", {}).get("ohlc", [{}])[0].get("close")
+                    # Try OHLC mode (V3 'marketOHLC', V2 'market_ohlc')
+                    ohlc_data = market_ff.get("marketOHLC") or market_ff.get("market_ohlc") or {}
+                    ltp = ohlc_data.get("ohlc", [{}])[0].get("close")
                 
                 if ltp:
                     now = datetime.now(timezone(timedelta(hours=5, minutes=30))) # IST
                     
                     # 2. Persist to DB
+                    # V3 volume is 'vtt' or inside ohlc, OI is in market_ff
+                    volume = market_ff.get("vtt") or market_ff.get("marketOHLC", {}).get("volume") or market_ff.get("market_ohlc", {}).get("volume")
+                    oi = market_ff.get("oi") or market_ff.get("marketOHLC", {}).get("oi") or market_ff.get("market_ohlc", {}).get("oi")
+                    
                     tick = MarketTick(
                         instrument_key=instrument_key,
                         timestamp=now,
                         last_price=ltp,
-                        volume=feed.get("ff", {}).get("marketFF", {}).get("market_ohlc", {}).get("volume"),
-                        oi=feed.get("ff", {}).get("marketFF", {}).get("market_ohlc", {}).get("oi")
+                        volume=int(volume) if volume else 0,
+                        oi=float(oi) if oi else 0.0
                     )
                     session.add(tick)
                     
@@ -142,7 +153,7 @@ async def lifespan(app: FastAPI):
     # To be safe with FastAPI's async loop, we can wrap the callback
     def sync_on_tick(message):
         # Schedule the async broadcast in the main loop
-        asyncio.run_coroutine_threadsafe(_handle_market_tick(message), asyncio.get_event_loop())
+        asyncio.run_coroutine_threadsafe(_handle_market_tick(message), loop)
 
     streamer.on_tick = sync_on_tick
     

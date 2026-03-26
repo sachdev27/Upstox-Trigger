@@ -369,11 +369,11 @@ class AutomationEngine:
         logger.info(f"🧪 [TEST] Triggering manual signal for {instrument_key}")
         
         # Create a fake signal
-        from app.orders.models import SignalAction
+        from app.orders.models import TransactionType
         signal = TradeSignal(
             strategy_name="Manual Test",
             instrument_key=instrument_key,
-            action=SignalAction.BUY,
+            action=TransactionType.BUY,
             price=25000.0,  # Arbitrary for test
             stop_loss=24900.0,
             take_profit=25300.0,
