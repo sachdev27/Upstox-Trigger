@@ -304,10 +304,63 @@ async function loadAllSettings() {
         document.getElementById('setting-api-secret').value = '********';
         document.getElementById('setting-redirect-uri').value = data.REDIRECT_URI || '';
         
-        // Also load risk params into the inputs
+        // Also load risk params & engine state
         fetchRiskConfig();
+        renderDynamicStrategyForm();
     } catch (e) {
         console.error("Failed to load settings", e);
+    }
+}
+
+async function fetchRiskConfig() {
+    try {
+        const res = await fetch(`${API_BASE}/engine/status`);
+        const data = await res.json();
+        
+        // Update General Tab toggles
+        const paperToggle = document.getElementById('toggle-papermode');
+        if (paperToggle) paperToggle.checked = data.paper_trading;
+        
+        const sideSelect = document.getElementById('setting-trading-side');
+        if (sideSelect) sideSelect.value = data.trading_side || 'BOTH';
+        
+        // Update Risk Tab inputs
+        const risk = data.risk_controls || {};
+        const capInput = document.getElementById('risk-capital');
+        const pctInput = document.getElementById('risk-pct');
+        const lossInput = document.getElementById('risk-maxloss');
+        const tradesInput = document.getElementById('risk-maxtrades');
+        
+        if (capInput) capInput.value = risk.trading_capital || 100000;
+        if (pctInput) pctInput.value = risk.risk_per_trade_pct || 1.0;
+        if (lossInput) lossInput.value = risk.max_daily_loss_pct || 3.0;
+        if (tradesInput) tradesInput.value = risk.max_open_trades || 3;
+        
+    } catch (e) {
+        console.error("Failed to fetch risk config", e);
+    }
+}
+
+async function saveRiskConfig() {
+    const payload = {
+        trading_capital: parseFloat(document.getElementById('risk-capital').value),
+        risk_per_trade_pct: parseFloat(document.getElementById('risk-pct').value),
+        max_daily_loss_pct: parseFloat(document.getElementById('risk-maxloss').value),
+        max_open_trades: parseInt(document.getElementById('risk-maxtrades').value)
+    };
+    
+    try {
+        const res = await fetch(`${API_BASE}/engine/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast("Risk parameters updated", "success");
+        }
+    } catch (e) {
+        showToast("Failed to save risk config", "error");
     }
 }
 
@@ -452,12 +505,24 @@ async function fetchOptionChain(forcedExpiry = "") {
 }
 
 
-async function selectInstrument(instrumentKey, name, element) {
+async function selectInstrument(instrumentKey, name) {
     if (currentInstrumentKey === instrumentKey) return;
     
     currentInstrumentKey = instrumentKey;
     currentInstrumentName = name;
     
+    // Update active state in UI
+    document.querySelectorAll('.watchlist-item').forEach(item => {
+        // We find the item by checking if it contains the name or matches some data attribute if we had one
+        // Better: check the name or re-render if needed, but for now let's use name match or just iterate
+        const itemHover = item.querySelector('.instrument-name');
+        if (itemHover && itemHover.innerText === name) {
+            item.classList.add('active');
+        } else {
+            item.classList.remove('active');
+        }
+    });
+
     // Update UI Labels
     const label = document.getElementById("current-instrument");
     if (label) {
@@ -469,6 +534,15 @@ async function selectInstrument(instrumentKey, name, element) {
         setChartTimeframe(currentInterval);
     } else {
         fetchOptionChain();
+    }
+}
+
+function toggleSidebar() {
+    const sidebar = document.querySelector('.panel-left');
+    const mainContent = document.querySelector('.panel-center'); // Matching existing layout class
+    if (sidebar) {
+        sidebar.classList.toggle('collapsed');
+        if (mainContent) mainContent.classList.toggle('expanded');
     }
 }
 
@@ -1064,5 +1138,86 @@ async function saveSettings() {
         }
     } catch (e) {
         showToast("Error saving settings", "error");
+    }
+}
+
+async function renderDynamicStrategyForm() {
+    const selector = document.getElementById('strategy-selector');
+    if (!selector) return;
+    const strategyId = selector.value;
+    const container = document.getElementById('dynamic-strategy-container');
+    if (!container) return;
+    
+    try {
+        const res = await fetch(`${API_BASE}/strategies/schema`);
+        const data = await res.json();
+        const schema = data.strategies.find(s => s.id === strategyId);
+        
+        if (!schema) return;
+        
+        container.innerHTML = schema.params.map(p => {
+            let input = '';
+            if (p.type === 'boolean') {
+                input = `<div style="display:flex; align-items:center; height:100%;"><input type="checkbox" id="param-${p.name}" ${p.default ? 'checked' : ''}></div>`;
+            } else if (p.type === 'number') {
+                input = `<input type="number" id="param-${p.name}" value="${p.default}" class="form-input" step="any">`;
+            } else {
+                input = `<input type="text" id="param-${p.name}" value="${p.default}" class="form-input">`;
+            }
+            
+            return `
+                <div class="form-group">
+                    <label class="form-label">${p.name.replace(/_/g, ' ').toUpperCase()}</label>
+                    ${input}
+                </div>
+            `;
+        }).join('');
+    } catch (e) {
+        console.error("Failed to load strategy schema", e);
+    }
+}
+
+async function loadStrategy() {
+    const selector = document.getElementById('strategy-selector');
+    if (!selector) return;
+    
+    const strategyId = selector.value;
+    const strategyClass = selector.options[selector.selectedIndex].dataset.class;
+    
+    // Collect params from dynamic inputs
+    const params = {};
+    const inputs = document.querySelectorAll('#dynamic-strategy-container input');
+    inputs.forEach(input => {
+        const name = input.id.replace('param-', '');
+        if (input.type === 'checkbox') {
+            params[name] = input.checked;
+        } else if (input.type === 'number') {
+            params[name] = parseFloat(input.value);
+        } else {
+            params[name] = input.value;
+        }
+    });
+
+    try {
+        // 1. Update params in registry
+        await fetch(`${API_BASE}/strategies/${strategyId}/params`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(params)
+        });
+
+        // 2. Load strategy into engine
+        const paperMode = document.getElementById('toggle-papermode').checked;
+        const res = await fetch(`${API_BASE}/engine/load-strategy?strategy_class=${strategyClass}&name=${encodeURIComponent(selector.options[selector.selectedIndex].text)}&instruments=${encodeURIComponent(currentInstrumentKey)}&paper_trading=${paperMode}`, {
+            method: 'POST'
+        });
+        
+        const result = await res.json();
+        if (result.status === 'loaded') {
+            showToast(`Strategy ${result.strategy} applied successfully`, "success");
+            switchMainView('chart');
+        }
+    } catch (e) {
+        showToast("Failed to apply strategy settings", "error");
     }
 }

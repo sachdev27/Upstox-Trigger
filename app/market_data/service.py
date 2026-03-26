@@ -400,16 +400,20 @@ class MarketDataService:
             if not contracts:
                 return {"status": "error", "message": "No contracts found", "chain": []}
             
-            # Get unique expiries (sorted)
-            all_expiries = sorted(list(set(c["expiry"] for c in contracts)))
+            # Get unique expiries (sorted strings)
+            def _fmt_expiry(e):
+                if hasattr(e, "strftime"): return e.strftime("%Y-%m-%d")
+                return str(e)
+                
+            all_expiries = sorted(list(set(_fmt_expiry(c.get("expiry")) for c in contracts if c.get("expiry"))))
             if not all_expiries:
                 return {"status": "error", "message": "No expiries found", "chain": []}
             
             # Select expiry
             target_expiry = expiry_date or all_expiries[0]
             
-            # Filter contracts for this expiry
-            expiry_contracts = [c for c in contracts if c["expiry"] == target_expiry]
+            # Filter contracts for this expiry (compare as strings)
+            expiry_contracts = [c for c in contracts if _fmt_expiry(c.get("expiry")) == target_expiry]
             
             # 2. Extract spot price from one contract (or fetch separately if needed)
             # Upstox usually includes underlying_key in the contract
@@ -428,7 +432,12 @@ class MarketDataService:
                 batch = ",".join(instr_keys[i:i+50])
                 res = self.get_full_quote(batch)
                 if res:
-                    quote_data.update(res)
+                    # RE-MAP: Upstox quote data keys are "{exchange}:{symbol}" (e.g. NSE_FO:NIFTY24DEC25000CE)
+                    # We need to map them by instrument_token (which matches our instrument_key)
+                    for k, val in res.items():
+                        token = val.get("instrument_token")
+                        if token:
+                            quote_data[token] = val
 
             # 4. Group by strike
             strikes = {}
@@ -457,9 +466,11 @@ class MarketDataService:
                     "vega": float(g.get("vega") or 0.0),
                 }
                 
-                if c["option_type"].lower() == "ce":
+                # Classification based on instrument_type (Upstose SDK field)
+                opt_type = c.get("instrument_type", "").lower()
+                if opt_type == "ce":
                     strikes[sp]["ce"] = data
-                else:
+                elif opt_type == "pe":
                     strikes[sp]["pe"] = data
 
             # 5. Sort and return

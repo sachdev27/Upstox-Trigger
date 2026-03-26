@@ -99,6 +99,34 @@ body {
     gap: 16px;
 }
 
+/* Sidebar Toggle Button */
+.btn-sidebar-toggle {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    margin-right: 8px;
+    z-index: 101;
+}
+
+.btn-sidebar-toggle:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--primary);
+    border-color: var(--primary);
+    box-shadow: 0 0 15px rgba(92, 111, 255, 0.25);
+    transform: translateY(-1px);
+}
+
+.btn-sidebar-toggle:active {
+    transform: translateY(0);
+}
+
 /* Status Badges */
 .status-badge {
     display: flex;
@@ -135,13 +163,22 @@ body {
 
 /* Left Panel: Watchlist */
 .panel-left {
-    width: 250px;
+    width: 280px;
     flex-shrink: 0;
     border-right: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
     background: var(--bg-panel);
     backdrop-filter: var(--glass-blur);
+    transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s ease, opacity 0.2s ease;
+    overflow: hidden;
+}
+
+.panel-left.collapsed {
+    width: 0;
+    border-right: none;
+    opacity: 0;
+    pointer-events: none;
 }
 
 /* Center Panel: Chart + Bottom Tabs */
