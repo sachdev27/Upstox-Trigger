@@ -24,8 +24,11 @@
             </button>
             <div class="header-logo">⚡</div>
             <div>
-                <div class="header-title">Upstox Trading Terminal</div>
-                <div class="header-subtitle">SuperTrend Pro v6.3 • API v2</div>
+                <div class="header-title" style="display: flex; align-items: center; gap: 8px;">
+                    Upstox Trading Terminal
+                    <span id="sandbox-badge" class="badge live" style="display: none; background: #ff9800; color: white;">SANDBOX</span>
+                </div>
+                <div class="header-subtitle">SuperTrend Pro v6.3 • API <span id="api-version-text">v2</span></div>
             </div>
         </div>
         <div class="header-right">
@@ -138,11 +141,37 @@
                             <button class="btn btn-primary" onclick="saveSettings()">Save API Configuration</button>
                         </div>
                         <div class="settings-card">
+                            <h4>Sandbox Credentials</h4>
+                            <div class="form-group">
+                                <label class="form-label">Sandbox API Key</label>
+                                <input type="text" id="setting-sandbox-key" class="form-input" placeholder="33882c2b...">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Sandbox API Secret</label>
+                                <input type="password" id="setting-sandbox-secret" class="form-input" placeholder="********">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Sandbox Access Token (30-day)</label>
+                                <input type="password" id="setting-sandbox-token" class="form-input" placeholder="********">
+                            </div>
+                            <button class="btn btn-outline" onclick="saveSandboxSettings()">Save Sandbox Config</button>
+                        </div>
+                        <div class="settings-card">
                             <h4>Trading Mode</h4>
+                            <div class="auto-mode-card" style="margin-top: 10px; border: 1px solid #ff9800; background: rgba(255, 152, 0, 0.05);">
+                                <div>
+                                    <div style="font-weight: 600; color: #ff9800;">Official Sandbox Mode</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Use Upstox Sandbox Environment</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="toggle-sandboxmode" onchange="toggleSandboxMode(this.checked)">
+                                    <span class="toggle-slider" style="background-color: #ff9800;"></span>
+                                </label>
+                            </div>
                             <div class="auto-mode-card" style="margin-top: 10px;">
                                 <div>
-                                    <div style="font-weight: 600;">Paper Trading Mode</div>
-                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Simulation only, no real money used</div>
+                                    <div style="font-weight: 600;">Internal Paper Trading</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Local simulation (No API calls)</div>
                                 </div>
                                 <label class="toggle">
                                     <input type="checkbox" id="toggle-papermode" checked onchange="togglePaperMode(this.checked)">

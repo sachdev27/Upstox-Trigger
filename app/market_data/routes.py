@@ -12,7 +12,8 @@ router = APIRouter(prefix="/market", tags=["Market Data"])
 
 def _get_market_service() -> MarketDataService:
     auth = get_auth_service()
-    config = auth.get_configuration()
+    # Market data always requires Live configuration
+    config = auth.get_configuration(use_sandbox=False)
     return MarketDataService(config)
 
 

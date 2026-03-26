@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     REDIRECT_URI: str = "http://localhost:8210/callback/"
     AUTH_CODE: str = ""
     ACCESS_TOKEN: str = ""
+    
+    # -- Upstox Sandbox ------------------------------------------
+    USE_SANDBOX: bool = False
+    SANDBOX_API_KEY: str = ""
+    SANDBOX_API_SECRET: str = ""
+    SANDBOX_ACCESS_TOKEN: str = ""
 
     # ── Instruments (shortcuts) ─────────────────────────────────
     BANKNIFTY: str = "NSE_INDEX|Nifty Bank"

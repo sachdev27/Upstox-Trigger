@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from pathlib import Path
 from app.config import get_settings
 from app.database.connection import get_session, ConfigSetting
+from app.engine import get_engine
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
@@ -16,6 +17,10 @@ class SettingsUpdate(BaseModel):
     MAX_RISK_PER_TRADE_PCT: float | None = None
     MAX_DAILY_LOSS_PCT: float | None = None
     MAX_CONCURRENT_POSITIONS: int | None = None
+    USE_SANDBOX: bool | None = None
+    SANDBOX_API_KEY: str | None = None
+    SANDBOX_API_SECRET: str | None = None
+    SANDBOX_ACCESS_TOKEN: str | None = None
 
 @router.get("/")
 async def get_current_settings():
@@ -37,7 +42,11 @@ async def get_current_settings():
         "REDIRECT_URI": settings.REDIRECT_URI,
         "MAX_RISK_PER_TRADE_PCT": settings.MAX_RISK_PER_TRADE_PCT,
         "MAX_DAILY_LOSS_PCT": settings.MAX_DAILY_LOSS_PCT,
-        "MAX_CONCURRENT_POSITIONS": settings.MAX_CONCURRENT_POSITIONS
+        "MAX_CONCURRENT_POSITIONS": settings.MAX_CONCURRENT_POSITIONS,
+        "USE_SANDBOX": settings.USE_SANDBOX,
+        "SANDBOX_API_KEY": f"{settings.SANDBOX_API_KEY[:6]}..." if len(settings.SANDBOX_API_KEY) > 6 else settings.SANDBOX_API_KEY,
+        "SANDBOX_API_SECRET": "********" if settings.SANDBOX_API_SECRET else "",
+        "SANDBOX_ACCESS_TOKEN": "********" if settings.SANDBOX_ACCESS_TOKEN else ""
     }
 
 @router.post("/")
@@ -49,7 +58,7 @@ async def update_settings(updates: SettingsUpdate = Body(...)):
     for key, value in updates.dict(exclude_none=True).items():
         if value is not None:
             # Masked placeholder means do not overwrite
-            if key in ["API_KEY", "API_SECRET"] and ("*" in str(value) or "..." in str(value)):
+            if key in ["API_KEY", "API_SECRET", "SANDBOX_API_KEY", "SANDBOX_API_SECRET", "SANDBOX_ACCESS_TOKEN"] and ("*" in str(value) or "..." in str(value)):
                 continue
                 
             # Update or create in DB
@@ -65,6 +74,8 @@ async def update_settings(updates: SettingsUpdate = Body(...)):
         session.commit()
         # Refresh the singleton
         get_settings().update_from_db(session)
+        # Re-initialize engine to pick up possible Live/Sandbox environment switch
+        get_engine().initialize()
     
     session.close()
     return {"status": "success", "message": "Settings updated in database successfully"}

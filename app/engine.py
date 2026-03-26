@@ -70,11 +70,16 @@ class AutomationEngine:
     def initialize(self):
         """Initialize all services and load strategies."""
         try:
-            config = self._auth.get_configuration()
-            self._market_service = MarketDataService(config)
-            self._order_service = OrderService(config)
+            # 1. Market Data ALWAYS uses Live configuration (Sandbox doesn't support market data)
+            live_config = self._auth.get_configuration(use_sandbox=False)
+            self._market_service = MarketDataService(live_config)
+            
+            # 2. Order Service moves between Live/Sandbox based on global flag
+            order_config = self._auth.get_configuration(use_sandbox=self.settings.USE_SANDBOX)
+            self._order_service = OrderService(order_config)
+            
             self._is_initialized = True
-            logger.info("✅ Automation engine initialized.")
+            logger.info(f"✅ Automation engine initialized ({'SANDBOX' if self.settings.USE_SANDBOX else 'LIVE'} mode).")
         except Exception as e:
             logger.error(f"❌ Engine initialization failed: {e}")
             self._is_initialized = False

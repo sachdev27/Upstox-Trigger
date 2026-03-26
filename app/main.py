@@ -69,13 +69,14 @@ async def lifespan(app: FastAPI):
 
     loop = asyncio.get_running_loop()
 
-    # --- Live Market Data Streamer ---
-    from app.market_data.streamer import MarketDataStreamer
+    # --- Live Market Data & Portfolio Streamer ---
+    from app.market_data.streamer import MarketDataStreamer, PortfolioStreamer
     from app.auth.service import get_auth_service
     from app.database.connection import get_session, MarketTick
     
     auth_service = get_auth_service()
-    streamer = MarketDataStreamer(auth_service.get_configuration())
+    # Market streamers MUST use Live configuration (Sandbox doesn't support market data)
+    streamer = MarketDataStreamer(auth_service.get_configuration(use_sandbox=False))
 
     async def _handle_market_tick(data):
         """
@@ -159,12 +160,25 @@ async def lifespan(app: FastAPI):
     
     # Start streaming for some defaults (In a real app, this would be dynamic based on user watchlist)
     default_instruments = [settings.NIFTY, settings.BANKNIFTY]
+    # Start Portfolio Streamer
+    # Portfolio streamers MUST use Live configuration for notifications
+    portfolio_streamer = PortfolioStreamer(auth_service.get_configuration(use_sandbox=False))
+    
+    def sync_portfolio_update(message):
+        # Broadcast portfolio updates to all WS clients
+        asyncio.run_coroutine_threadsafe(
+            broadcast_to_clients({"type": "portfolio_update", "data": message}), 
+            loop
+        )
+        
+    portfolio_streamer.on_update = sync_portfolio_update
+    
     try:
-        streamer.start(default_instruments)
-        app.state.market_streamer = streamer
-        logger.info(f"📡 Market Data Streamer started for {default_instruments}")
+        portfolio_streamer.start(order_update=True, position_update=True, holding_update=True)
+        app.state.portfolio_streamer = portfolio_streamer
+        logger.info("📡 Portfolio Data Streamer started.")
     except Exception as e:
-        logger.error(f"❌ Failed to start market data streamer: {e}")
+        logger.error(f"❌ Failed to start portfolio streamer: {e}")
 
     yield
     
@@ -173,6 +187,8 @@ async def lifespan(app: FastAPI):
     scheduler.stop()
     if hasattr(app.state, "market_streamer"):
         app.state.market_streamer.stop()
+    if hasattr(app.state, "portfolio_streamer"):
+        app.state.portfolio_streamer.stop()
 
 
 app = FastAPI(

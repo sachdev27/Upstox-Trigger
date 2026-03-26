@@ -188,6 +188,18 @@ function handleWsMessage(msg) {
         if (msg.data.instrument_key === currentInstrumentKey && candleSeries) {
             candleSeries.update(msg.data.candle);
         }
+    } else if (msg.type === "portfolio_update") {
+        const update = msg.data;
+        // Portfolio update from Upstox (topic: order or position)
+        if (update.topic === "order") {
+            const order = update.data;
+            addLog(`📋 Order Update: ${order.trading_symbol} is ${order.status}`, "info");
+            showToast(`Order ${order.status}: ${order.trading_symbol}`, order.status === "rejected" ? "error" : "info");
+            refreshTrades();
+        } else if (update.topic === "position") {
+            // Positions changed, refresh P&L and status
+            refreshStatus();
+        }
     }
 }
 
@@ -304,11 +316,73 @@ async function loadAllSettings() {
         document.getElementById('setting-api-secret').value = '********';
         document.getElementById('setting-redirect-uri').value = data.REDIRECT_URI || '';
         
+        // Sandbox fields
+        if (document.getElementById('setting-sandbox-key')) {
+            document.getElementById('setting-sandbox-key').value = data.SANDBOX_API_KEY || '';
+            document.getElementById('setting-sandbox-secret').value = '********';
+            document.getElementById('setting-sandbox-token').value = '********';
+            document.getElementById('toggle-sandboxmode').checked = data.USE_SANDBOX || false;
+            updateSandboxUI(data.USE_SANDBOX);
+        }
+
         // Also load risk params & engine state
         fetchRiskConfig();
         renderDynamicStrategyForm();
     } catch (e) {
         console.error("Failed to load settings", e);
+    }
+}
+
+function updateSandboxUI(isSandbox) {
+    const badge = document.getElementById('sandbox-badge');
+    const versionText = document.getElementById('api-version-text');
+    if (isSandbox) {
+        if (badge) badge.style.display = 'inline-block';
+        if (versionText) versionText.innerText = 'v3 [SBX]';
+    } else {
+        if (badge) badge.style.display = 'none';
+        if (versionText) versionText.innerText = 'v2';
+    }
+}
+
+async function toggleSandboxMode(enabled) {
+    try {
+        const res = await fetch(`${API_BASE}/settings/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ USE_SANDBOX: enabled })
+        });
+        if (res.ok) {
+            showToast(`Sandbox Mode ${enabled ? 'Enabled' : 'Disabled'}`, "info");
+            updateSandboxUI(enabled);
+        }
+    } catch (e) {
+        showToast("Failed to toggle Sandbox mode", "error");
+    }
+}
+
+async function saveSandboxSettings() {
+    const key = document.getElementById('setting-sandbox-key').value;
+    const secret = document.getElementById('setting-sandbox-secret').value;
+    const token = document.getElementById('setting-sandbox-token').value;
+    
+    const payload = {};
+    if (key && !key.includes('...')) payload.SANDBOX_API_KEY = key;
+    if (secret && !secret.includes('***')) payload.SANDBOX_API_SECRET = secret;
+    if (token && !token.includes('***')) payload.SANDBOX_ACCESS_TOKEN = token;
+    
+    try {
+        const res = await fetch(`${API_BASE}/settings/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast("Sandbox configuration saved", "success");
+        }
+    } catch (e) {
+        showToast("Error saving sandbox settings", "error");
     }
 }
 

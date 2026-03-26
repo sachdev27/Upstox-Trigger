@@ -126,16 +126,45 @@ class PortfolioStreamer:
         self._streamer: upstox_client.PortfolioDataStreamer | None = None
         self.on_update: Callable[[dict], None] | None = None
 
-    def start(self):
+    def start(
+        self,
+        order_update: bool = True,
+        position_update: bool = True,
+        holding_update: bool = True,
+        gtt_update: bool = False
+    ):
         """Start receiving portfolio updates."""
         api_client = upstox_client.ApiClient(self.config)
-        self._streamer = upstox_client.PortfolioDataStreamer(api_client)
+        self._streamer = upstox_client.PortfolioDataStreamer(
+            api_client,
+            order_update=order_update,
+            position_update=position_update,
+            holding_update=holding_update,
+            gtt_update=gtt_update
+        )
         self._streamer.on("message", self._handle_message)
-        logger.info("Starting portfolio data stream...")
+        
+        # Add event handlers for connectivity status
+        self._streamer.on("open", self._handle_open)
+        self._streamer.on("close", self._handle_close)
+        self._streamer.on("error", self._handle_error)
+        
+        logger.info(
+            f"Starting portfolio data stream (Orders: {order_update}, "
+            f"Positions: {position_update}, Holdings: {holding_update})..."
+        )
         self._streamer.connect()
 
+    def _handle_open(self, *args):
+        logger.info("✅ Portfolio WebSocket connected.")
+
+    def _handle_close(self, *args):
+        logger.info("🔌 Portfolio WebSocket closed.")
+
+    def _handle_error(self, error):
+        logger.error(f"❌ Portfolio streamer error: {error}")
+
     def _handle_message(self, message):
-        logger.info(f"📋 Portfolio update: {message}")
         if self.on_update:
             self.on_update(message)
 
