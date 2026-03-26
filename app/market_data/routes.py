@@ -1,8 +1,10 @@
 """
-Market Data API routes — quotes, candles, instruments.
+Market Data API routes — quotes, candles, instruments, option chain.
+
+NOTE: Positions, holdings, and funds routes live in orders/routes.py.
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 
 from app.auth.service import get_auth_service
 from app.market_data.service import MarketDataService
@@ -12,7 +14,7 @@ router = APIRouter(prefix="/market", tags=["Market Data"])
 
 def _get_market_service() -> MarketDataService:
     auth = get_auth_service()
-    config = auth.get_configuration()
+    config = auth.get_configuration(use_sandbox=False)
     return MarketDataService(config)
 
 
@@ -47,25 +49,8 @@ async def get_candles(
     return {"instrument_key": instrument_key, "count": len(candles), "candles": candles}
 
 
-@router.get("/positions")
-async def get_positions():
-    """Get current positions."""
-    svc = _get_market_service()
-    return {"data": svc.get_positions()}
-
-
-@router.get("/holdings")
-async def get_holdings():
-    """Get current holdings."""
-    svc = _get_market_service()
-    return {"data": svc.get_holdings()}
-
-
-@router.get("/funds")
-async def get_funds():
-    """Get funds and margin."""
-    svc = _get_market_service()
-    return {"data": svc.get_funds_and_margin()}
+# ── REMOVED: /market/positions, /market/holdings, /market/funds ────────────
+# These are now ONLY in orders/routes.py to avoid duplicate routes.
 
 
 @router.get("/profile")
@@ -75,40 +60,32 @@ async def get_profile():
     return {"data": svc.get_profile()}
 
 
-@router.post("/instruments/download")
-async def download_instruments():
-    """Download latest instrument list from Upstox."""
-    path = MarketDataService.download_instrument_list()
-    return {"status": "success", "path": str(path)}
-
-
 @router.get("/instruments/featured")
 async def get_featured_instruments():
-    """Return Nifty 50 instruments from local CSV for the UI default Watchlist."""
-    import csv
-    from app.config import BASE_DIR
+    """Return featured instruments from the database for the UI default Watchlist."""
+    from app.database.connection import get_session, Instrument
     
-    csv_path = BASE_DIR / "ind_nifty50list.csv"
-    instruments = []
-    
-    # Add major indices manually
-    instruments.append({"name": "Nifty 50", "instrument_key": "NSE_INDEX|Nifty 50", "segment": "NSE_INDEX"})
-    instruments.append({"name": "Nifty Bank", "instrument_key": "NSE_INDEX|Nifty Bank", "segment": "NSE_INDEX"})
-
-    if csv_path.exists():
-        with open(csv_path, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                symbol = row.get("Symbol")
-                isin = row.get("ISIN Code")
-                if symbol and isin:
-                    instruments.append({
-                        "name": symbol,
-                        "instrument_key": f"NSE_EQ|{isin}",
-                        "segment": "NSE_EQ"
-                    })
-    
-    return {"status": "success", "count": len(instruments), "instruments": instruments}
+    session = get_session()
+    try:
+        db_insts = session.query(Instrument).filter(
+            (Instrument.instrument_type == 'INDEX') | 
+            (Instrument.instrument_type == 'EQUITY')
+        ).limit(100).all()
+        
+        instruments = []
+        for inst in db_insts:
+            instruments.append({
+                "name": inst.name,
+                "instrument_key": inst.instrument_key,
+                "segment": inst.exchange,
+                "symbol": inst.symbol
+            })
+            
+        return {"status": "success", "count": len(instruments), "instruments": instruments}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to fetch from DB: {e}"}
+    finally:
+        session.close()
 
 
 @router.get("/instruments/search")
@@ -144,11 +121,11 @@ async def get_exchange_timings(date: str = Query(..., description="YYYY-MM-DD"))
 
 
 @router.get("/options/chain")
-async def get_option_chain(
+async def get_option_chain_simple(
     instrument_key: str = Query(...),
     expiry_date: str = Query(..., description="YYYY-MM-DD"),
 ):
-    """Get put/call option chain."""
+    """Get put/call option chain (simple view)."""
     svc = _get_market_service()
     return {"data": svc.get_option_chain(instrument_key, expiry_date)}
 
@@ -184,13 +161,14 @@ async def get_strategy_overlay(
     timeframe: str = Query("1minute"),
     from_date: str | None = Query(None),
     to_date: str | None = Query(None),
-    atr_period: int = Query(10),
-    multiplier: float = Query(3.0)
+    strategy_class: str = Query("SuperTrendPro"),
+    params: str = Query("{}")
 ):
     """
-    Compute SuperTrend indicator arrays for the frontend chart.
-    Returns a sequence of {time, upper, lower, trend} mapped to the candles.
+    Compute algorithmic indicator arrays for the frontend chart.
+    Accepts arbitrary JSON parameter payloads to adapt to dynamic Web UI forms.
     """
+    import json
     svc = _get_market_service()
     candles = svc.get_historical_candles(instrument_key, timeframe, from_date, to_date)
     
@@ -202,31 +180,64 @@ async def get_strategy_overlay(
     from app.strategies.supertrend_pro import SuperTrendPro
     from app.strategies.base import StrategyConfig
     
+    try:
+        parsed_params = json.loads(params)
+    except Exception:
+        parsed_params = {}
+        
     df = pd.DataFrame(candles)
     for col in ["open", "high", "low", "close", "volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
             
-    # Calculate dashboard matrix
-    config = StrategyConfig(name="SuperTrend Pro v6.3", instruments=[instrument_key], timeframe=timeframe)
-    strategy = SuperTrendPro(config)
-    strategy.params["atr_period"] = atr_period
-    strategy.params["atr_multiplier"] = multiplier
-    metrics = strategy.get_dashboard_state(df)
+    config = StrategyConfig(name="Dynamic Execution", instruments=[instrument_key], timeframe=timeframe)
     
-    st_df = supertrend(df, period=atr_period, multiplier=multiplier, use_rma=True)
-    
-    overlay = []
-    for i in range(len(df)):
-        c = df.iloc[i]
-        s = st_df.iloc[i]
-        overlay.append({
-            "datetime": c["datetime"],
-            "trend": int(s["trend"]),
-            "supertrend": None if pd.isna(s["supertrend"]) else float(s["supertrend"]),
-            "upper": None if pd.isna(s["upper_band"]) else float(s["upper_band"]),
-            "lower": None if pd.isna(s["lower_band"]) else float(s["lower_band"])
-        })
+    if strategy_class == "SuperTrendPro":
+        strategy = SuperTrendPro(config)
+        strategy.params.update(parsed_params)
+        metrics = strategy.get_dashboard_state(df)
         
-    return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
+        p_atr = strategy.params.get("atr_period", 10)
+        p_mult = strategy.params.get("atr_multiplier", 3.0)
+        st_df = supertrend(df, period=p_atr, multiplier=p_mult, use_rma=True)
+        
+        overlay = []
+        for i in range(len(df)):
+            c = df.iloc[i]
+            s = st_df.iloc[i]
+            overlay.append({
+                "time": c["time"],
+                "trend": int(s["trend"]),
+                "supertrend": None if pd.isna(s["supertrend"]) else float(s["supertrend"]),
+                "upper": None if pd.isna(s["upper_band"]) else float(s["upper_band"]),
+                "lower": None if pd.isna(s["lower_band"]) else float(s["lower_band"])
+            })
+            
+        return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
+    else:
+        return {"status": "error", "message": f"Strategy class {strategy_class} native graphics overlay not yet supported.", "overlay": []}
 
+
+@router.get("/option-chain")
+async def get_detailed_option_chain(
+    instrument_key: str = Query(...),
+    expiry_date: str | None = Query(None)
+):
+    """
+    Get full option chain matrix with LTP and Greeks for a given index/stock and expiry.
+    """
+    try:
+        # Resolve common index aliases
+        if "nifty 50" in instrument_key.lower():
+            instrument_key = "NSE_INDEX|Nifty 50"
+        elif "bank nifty" in instrument_key.lower() or "nifty bank" in instrument_key.lower():
+            instrument_key = "NSE_INDEX|Nifty Bank"
+            
+        svc = _get_market_service()
+        result = await svc.get_detailed_option_chain(instrument_key, expiry_date)
+        return result
+        
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Option chain route failed: {e}")
+        return {"status": "error", "message": str(e), "chain": [], "available_expiries": []}

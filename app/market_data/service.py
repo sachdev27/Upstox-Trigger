@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 
 import requests
 import upstox_client
+import pandas as pd
 
 from app.config import get_settings, BASE_DIR
 
@@ -48,11 +49,13 @@ class MarketDataService:
             "1m": ("1minute", False, None),
             "1minute": ("1minute", False, None),
             "5m": ("1minute", True, "5Min"),
+            "5minute": ("1minute", True, "5Min"),
             "15m": ("1minute", True, "15Min"),
             "15minute": ("1minute", True, "15Min"),
-            "30m": ("1minute", True, "30Min"), # Resampling from 1m to ensure accurate boundaries
-            "30minute": ("30minute", False, None),
+            "30m": ("1minute", True, "30Min"),
+            "30minute": ("1minute", True, "30Min"),
             "1H": ("1minute", True, "60Min"),
+            "1hour": ("1minute", True, "60Min"),
             "4H": ("1minute", True, "240Min"),
             "1D": ("day", False, None),
             "day": ("day", False, None),
@@ -65,28 +68,35 @@ class MarketDataService:
             candles_dict = {}
             
             # 1. Fetch Historical Data (from_date -> to_date)
-            if from_date and to_date:
-                try:
-                    res1 = api.get_historical_candle_data1(
-                        instrument_key, fetch_interval, to_date, from_date, self.api_version
-                    )
-                    data1 = res1.to_dict()
-                    for c in data1.get("data", {}).get("candles", []):
-                        candles_dict[c[0]] = c
-                except Exception as e:
-                    logger.warning(f"Historical fetch failed, proceeding to intraday: {e}")
+            # Upstox API limit: ~30 days for intraday, but often 20-25 days is safer to avoid UDAPI1148
+            if not from_date:
+                days = 30 if interval == "day" or interval == "1D" else 20
+                from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            if not to_date:
+                to_date = datetime.now().strftime('%Y-%m-%d')
 
-            # 2. Fetch Intraday Data (Today) 
-            # (Historical API often cuts off at yesterday close)
             try:
-                res2 = api.get_intra_day_candle_data(
-                    instrument_key, fetch_interval, self.api_version
+                res1 = api.get_historical_candle_data1(
+                    instrument_key, fetch_interval, to_date, from_date, self.api_version
                 )
-                data2 = res2.to_dict()
-                for c in data2.get("data", {}).get("candles", []):
+                data1 = res1.to_dict()
+                for c in data1.get("data", {}).get("candles", []):
                     candles_dict[c[0]] = c
             except Exception as e:
-                logger.warning(f"Intraday fetch failed: {e}")
+                logger.warning(f"Historical fetch failed for {instrument_key}: {e}")
+
+            # 2. Fetch Intraday Data (Today) 
+            # Only for intraday intervals (day/week don't support get_intra_day_candle_data)
+            if fetch_interval not in ["day", "week"]:
+                try:
+                    res2 = api.get_intra_day_candle_data(
+                        instrument_key, fetch_interval, self.api_version
+                    )
+                    data2 = res2.to_dict()
+                    for c in data2.get("data", {}).get("candles", []):
+                        candles_dict[c[0]] = c
+                except Exception as e:
+                    logger.warning(f"Intraday fetch failed: {e}")
 
             if not candles_dict:
                 return []
@@ -96,23 +106,31 @@ class MarketDataService:
             
             transformed = []
             for c in sorted_raw:
-                transformed.append({
-                    "datetime": c[0],
-                    "open": c[1],
-                    "high": c[2],
-                    "low": c[3],
-                    "close": c[4],
-                    "volume": c[5] if len(c) > 5 else 0,
-                    "oi": c[6] if len(c) > 6 else 0,
-                })
+                try:
+                    # Ensure all OHLC values are valid floats and not None
+                    if any(v is None for v in c[1:5]):
+                        continue
+                    transformed.append({
+                        "time": c[0],
+                        "open": float(c[1]),
+                        "high": float(c[2]),
+                        "low": float(c[3]),
+                        "close": float(c[4]),
+                        "volume": int(c[5]) if len(c) > 5 else 0,
+                    })
+                except (ValueError, TypeError, IndexError):
+                    continue
                 
             if not needs_resample:
+                for c in transformed:
+                    try:
+                        c["time"] = int(pd.to_datetime(c["time"]).timestamp())
+                    except: pass
                 return transformed
                 
             # --- Dynamic Pandas Resampling ---
-            import pandas as pd
             df = pd.DataFrame(transformed)
-            df['datetime_dt'] = pd.to_datetime(df['datetime'])
+            df['datetime_dt'] = pd.to_datetime(df['time'])
             df.set_index('datetime_dt', inplace=True)
             
             # Resample logic
@@ -121,23 +139,19 @@ class MarketDataService:
                 'high': 'max',
                 'low': 'min',
                 'close': 'last',
-                'volume': 'sum',
-                'oi': 'last',
-                'datetime': 'first' # retain original timezone localized string
+                'volume': 'sum'
             })
-            resampled = resampled.dropna(subset=['open'])
+            resampled = resampled.dropna(subset=['open', 'high', 'low', 'close'])
             
             final_candles = []
             for idx, row in resampled.iterrows():
-                # Reformat datetime back to Upstox ISO format string or just use Pandas ISO format limit
                 final_candles.append({
-                    "datetime": idx.strftime('%Y-%m-%dT%H:%M:%S+05:30'),
+                    "time": int(idx.timestamp()),
                     "open": float(row["open"]),
                     "high": float(row["high"]),
                     "low": float(row["low"]),
                     "close": float(row["close"]),
                     "volume": int(row["volume"]),
-                    "oi": int(row["oi"]),
                 })
                 
             return final_candles
@@ -385,3 +399,104 @@ class MarketDataService:
         except Exception as e:
             logger.error(f"Brokerage calc failed: {e}")
             return None
+    async def get_detailed_option_chain(
+        self, instrument_key: str, expiry_date: str | None = None
+    ) -> dict:
+        """
+        High-level helper to fetch a full option chain with LTP and Greeks.
+        Can be used by both the API routes and the Automation Engine.
+        """
+        try:
+            # 1. Get available contracts
+            contracts = self.get_option_contracts(instrument_key)
+            if not contracts:
+                return {"status": "error", "message": "No contracts found", "chain": []}
+            
+            # Get unique expiries (sorted strings)
+            def _fmt_expiry(e):
+                if hasattr(e, "strftime"): return e.strftime("%Y-%m-%d")
+                return str(e)
+                
+            all_expiries = sorted(list(set(_fmt_expiry(c.get("expiry")) for c in contracts if c.get("expiry"))))
+            if not all_expiries:
+                return {"status": "error", "message": "No expiries found", "chain": []}
+            
+            # Select expiry
+            target_expiry = expiry_date or all_expiries[0]
+            
+            # Filter contracts for this expiry (compare as strings)
+            expiry_contracts = [c for c in contracts if _fmt_expiry(c.get("expiry")) == target_expiry]
+            
+            # 2. Extract spot price from one contract (or fetch separately if needed)
+            # Upstox usually includes underlying_key in the contract
+            spot_price = 0.0
+            if expiry_contracts:
+                spot_price = self.get_ltp(instrument_key) or 0.0
+
+            # 3. Fetch Full Market Quote for all contracts to get LTP and Greeks
+            # We batch the keys for efficiency
+            instr_keys = [c["instrument_key"] for c in expiry_contracts]
+            
+            # Upstox LTP API supports up to 500 instruments in one call
+            # For full quote (Greeks), we might need to batch more carefully
+            quote_data = {}
+            for i in range(0, len(instr_keys), 50):
+                batch = ",".join(instr_keys[i:i+50])
+                res = self.get_full_quote(batch)
+                if res:
+                    # RE-MAP: Upstox quote data keys are "{exchange}:{symbol}" (e.g. NSE_FO:NIFTY24DEC25000CE)
+                    # We need to map them by instrument_token (which matches our instrument_key)
+                    for k, val in res.items():
+                        token = val.get("instrument_token")
+                        if token:
+                            quote_data[token] = val
+
+            # 4. Group by strike
+            strikes = {}
+            for c in expiry_contracts:
+                sp = float(str(c["strike_price"]))
+                # Normalize strike (paise check)
+                if sp > 1000000: sp /= 100.0
+                
+                if sp not in strikes:
+                    strikes[sp] = {"strike_price": sp, "ce": None, "pe": None}
+                
+                q = quote_data.get(c["instrument_key"], {})
+                ltp = q.get("last_price", 0.0)
+                g = q.get("greeks", {})
+                m = q.get("market_data", {})
+                
+                data = {
+                    "instrument_key": c["instrument_key"],
+                    "ltp": float(ltp),
+                    "volume": int(m.get("volume") or 0),
+                    "oi": float(m.get("oi") or 0.0),
+                    "iv": float(g.get("iv") or 0.0),
+                    "delta": float(g.get("delta") or 0.0),
+                    "theta": float(g.get("theta") or 0.0),
+                    "gamma": float(g.get("gamma") or 0.0),
+                    "vega": float(g.get("vega") or 0.0),
+                }
+                
+                # Classification based on instrument_type (Upstose SDK field)
+                opt_type = c.get("instrument_type", "").lower()
+                if opt_type == "ce":
+                    strikes[sp]["ce"] = data
+                elif opt_type == "pe":
+                    strikes[sp]["pe"] = data
+
+            # 5. Sort and return
+            matrix = sorted(strikes.values(), key=lambda x: x["strike_price"])
+            
+            return {
+                "status": "success",
+                "instrument_key": instrument_key,
+                "spot_price": spot_price,
+                "expiry_date": target_expiry,
+                "available_expiries": all_expiries,
+                "chain": matrix
+            }
+            
+        except Exception as e:
+            logger.error(f"Detailed option chain failed: {e}")
+            return {"status": "error", "message": str(e), "chain": []}

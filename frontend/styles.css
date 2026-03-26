@@ -99,6 +99,34 @@ body {
     gap: 16px;
 }
 
+/* Sidebar Toggle Button */
+.btn-sidebar-toggle {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    margin-right: 8px;
+    z-index: 101;
+}
+
+.btn-sidebar-toggle:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--primary);
+    border-color: var(--primary);
+    box-shadow: 0 0 15px rgba(92, 111, 255, 0.25);
+    transform: translateY(-1px);
+}
+
+.btn-sidebar-toggle:active {
+    transform: translateY(0);
+}
+
 /* Status Badges */
 .status-badge {
     display: flex;
@@ -126,6 +154,69 @@ body {
 .status-badge.offline .dot { background: var(--text-muted); }
 .status-badge.offline { color: var(--text-muted); }
 
+/* Sidebar Collapse Button — REMOVED */
+
+/* ═══ Global Search Overlay ══════════════════════════════ */
+.search-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(8px);
+    display: none;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 100px;
+    z-index: 2000;
+    animation: fadeIn 0.2s ease;
+}
+
+.search-overlay.active {
+    display: flex;
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.search-modal-content {
+    background: var(--bg-panel);
+    width: 600px;
+    max-width: 90vw;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+    backdrop-filter: var(--glass-blur);
+}
+
+.search-results-list {
+    max-height: 400px;
+    overflow-y: auto;
+    margin-top: 8px;
+    border-top: 1px solid var(--border-color);
+    padding-top: 8px;
+}
+
+.search-result-item {
+    padding: 12px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: background 0.2s;
+}
+
+.search-result-item:hover, .search-result-item.selected {
+    background: rgba(92, 111, 255, 0.3); /* Increased from 0.15 */
+    scale: 1.01;
+}
+
+.search-result-item .symbol { font-weight: 600; color: var(--primary); }
+.search-result-item .name { font-size: 0.8rem; color: var(--text-secondary); margin-left: 8px; }
+.search-result-item .exchange { font-size: 0.7rem; color: var(--text-muted); }
+
 /* ═══ Layout ══════════════════════════════════════════════ */
 .terminal-layout {
     display: flex;
@@ -133,16 +224,7 @@ body {
     overflow: hidden;
 }
 
-/* Left Panel: Watchlist */
-.panel-left {
-    width: 250px;
-    flex-shrink: 0;
-    border-right: 1px solid var(--border-color);
-    display: flex;
-    flex-direction: column;
-    background: var(--bg-panel);
-    backdrop-filter: var(--glass-blur);
-}
+/* Left Panel: Watchlist — REMOVED */
 
 /* Center Panel: Chart + Bottom Tabs */
 .panel-center {
@@ -514,3 +596,67 @@ input:checked + .toggle-slider:before {
 .log-time { color: var(--text-muted); margin-right: 8px; }
 .log-msg.error { color: var(--danger); }
 .log-msg.success { color: var(--success); }
+
+/* ═══ Settings View ════════════════════════════════════════ */
+.settings-tabs {
+    display: flex;
+    background: rgba(0,0,0,0.3);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0 20px;
+}
+
+.settings-tab {
+    padding: 12px 24px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    border-bottom: 3px solid transparent;
+    transition: all 0.2s;
+}
+
+.settings-tab:hover {
+    color: var(--text-main);
+    background: rgba(255,255,255,0.03);
+}
+
+.settings-tab.active {
+    color: var(--primary);
+    border-bottom-color: var(--primary);
+    background: rgba(92, 111, 255, 0.05);
+}
+
+.settings-content {
+    display: none;
+}
+
+.settings-content.active {
+    display: block;
+    animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.settings-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: var(--shadow-sm);
+}
+
+.settings-card h4 {
+    margin-top: 0;
+    margin-bottom: 20px;
+    font-size: 0.95rem;
+    color: var(--primary);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 8px;
+}

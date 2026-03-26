@@ -1,10 +1,13 @@
 """
 Engine API routes — control the automation engine from the dashboard.
+
+Config changes are persisted to the database.
 """
 
 from fastapi import APIRouter
 
 from app.engine import get_engine
+from app.config import get_settings
 
 router = APIRouter(prefix="/engine", tags=["Automation Engine"])
 
@@ -59,19 +62,45 @@ async def toggle_auto_mode(enabled: bool):
 
 
 @router.post("/config")
-async def update_risk_config(
-    trading_capital: float = 100000.0,
-    risk_per_trade_pct: float = 1.0,
-    max_daily_loss_pct: float = 3.0,
-    max_open_trades: int = 3,
-):
-    """Update engine risk and capital settings."""
+async def update_engine_config(config: dict):
+    """Update engine risk, capital, and trading mode settings. Persisted to DB."""
+    settings = get_settings()
     engine = get_engine()
-    engine.trading_capital = trading_capital
-    engine.risk_per_trade_pct = risk_per_trade_pct
-    engine.max_daily_loss_pct = max_daily_loss_pct
-    engine.max_open_trades = max_open_trades
-    return {"status": "success", "config": engine.get_status()["risk_controls"]}
+
+    # Map of config keys → (settings key, category)
+    key_map = {
+        "trading_capital": ("TRADING_CAPITAL", "ENGINE"),
+        "risk_per_trade_pct": ("MAX_RISK_PER_TRADE_PCT", "RISK"),
+        "max_daily_loss_pct": ("MAX_DAILY_LOSS_PCT", "RISK"),
+        "max_open_trades": ("MAX_OPEN_TRADES", "ENGINE"),
+        "paper_trading": ("PAPER_TRADING", "ENGINE"),
+        "trading_side": ("TRADING_SIDE", "ENGINE"),
+        "auto_mode": (None, None),  # In-memory only
+    }
+
+    for key, value in config.items():
+        mapping = key_map.get(key)
+        if mapping and mapping[0]:
+            settings.save_to_db(mapping[0], str(value), category=mapping[1])
+        if key == "auto_mode":
+            engine.auto_mode = value
+
+    # Refresh engine from DB
+    engine.sync_from_settings()
+
+    return {"status": "success", "config": engine.get_status()}
+
+
+@router.post("/test-signal")
+async def trigger_test_signal(payload: dict):
+    """Manually trigger a test signal for an instrument."""
+    engine = get_engine()
+    instrument_key = payload.get("instrument_key")
+    if not instrument_key:
+        return {"status": "error", "message": "Missing instrument_key"}
+        
+    res = await engine.trigger_test_signal(instrument_key)
+    return {"status": "success", "result": res}
 
 
 @router.get("/status")

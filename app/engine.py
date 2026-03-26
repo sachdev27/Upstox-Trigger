@@ -55,22 +55,41 @@ class AutomationEngine:
         self._is_running: bool = False
         self.auto_mode: bool = False
         
-        # Risk settings
-        self.trading_capital: float = 100000.0
-        self.risk_per_trade_pct: float = 1.0
-        self.max_daily_loss_pct: float = 3.0
-        self.max_open_trades: int = 3
+        # WebSocket broadcast callback (set by main.py)
+        self.broadcast_callback = None
+
+        # Load config from DB-backed settings
+        self.sync_from_settings()
+
+    def sync_from_settings(self):
+        """Sync engine runtime config from the DB-backed Settings singleton."""
+        s = self.settings
+        s.load_from_db()
+        self.paper_trading = s.PAPER_TRADING
+        self.trading_side = s.TRADING_SIDE
+        self.trading_capital = s.TRADING_CAPITAL
+        self.risk_per_trade_pct = s.MAX_RISK_PER_TRADE_PCT
+        self.max_daily_loss_pct = s.MAX_DAILY_LOSS_PCT
+        self.max_open_trades = s.MAX_OPEN_TRADES
 
     # ── Initialization ──────────────────────────────────────────
 
     def initialize(self):
         """Initialize all services and load strategies."""
         try:
-            config = self._auth.get_configuration()
-            self._market_service = MarketDataService(config)
-            self._order_service = OrderService(config)
+            # Refresh config from DB
+            self.sync_from_settings()
+
+            # 1. Market Data ALWAYS uses Live configuration (Sandbox doesn't support market data)
+            live_config = self._auth.get_configuration(use_sandbox=False)
+            self._market_service = MarketDataService(live_config)
+            
+            # 2. Order Service moves between Live/Sandbox based on global flag
+            order_config = self._auth.get_configuration(use_sandbox=self.settings.USE_SANDBOX)
+            self._order_service = OrderService(order_config)
+            
             self._is_initialized = True
-            logger.info("✅ Automation engine initialized.")
+            logger.info(f"✅ Automation engine initialized ({'SANDBOX' if self.settings.USE_SANDBOX else 'LIVE'} mode).")
         except Exception as e:
             logger.error(f"❌ Engine initialization failed: {e}")
             self._is_initialized = False
@@ -170,49 +189,120 @@ class AutomationEngine:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
+        # Fetch HTF candles if requested by strategy
+        htf_df = None
+        if strategy.params.get("use_htf_filter"):
+            htf_tf = strategy.params.get("htf_timeframe", "1D")
+            # Map simplified TF to Upstox API intervals
+            htf_interval = "day" if htf_tf in ["1D", "D", "W", "1W"] else "60minute" if htf_tf in ["1H", "60m"] else "day"
+            
+            htf_candles = self._market_service.get_historical_candles(
+                instrument_key, htf_interval
+            )
+            if htf_candles:
+                htf_df = pd.DataFrame(htf_candles)
+                if "datetime" in htf_df.columns:
+                    htf_df["datetime"] = pd.to_datetime(htf_df["datetime"])
+                for col in ["open", "high", "low", "close", "volume"]:
+                    if col in htf_df.columns:
+                        htf_df[col] = pd.to_numeric(htf_df[col], errors="coerce")
+
         # Evaluate strategy
-        signal = strategy.on_candle(df)
+        signal = strategy.on_candle(df, htf_df=htf_df)
         if signal:
             signal.instrument_key = instrument_key
             self._signals_log.append({
-                "timestamp": datetime.now(IST).isoformat(),
+                "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
                 "strategy": config.name,
+                "strategy_name": config.name,
                 "instrument": instrument_key,
+                "instrument_key": instrument_key,
                 "action": signal.action.value,
                 "price": signal.price,
                 "confidence": signal.confidence_score,
             })
             logger.info(
-                f"🎯 Signal: {signal.action.value} {instrument_key} "
                 f"@ {signal.price:.2f} (score: {signal.confidence_score})"
             )
+            
+            # Broadcast signal to UI
+            if self.broadcast_callback:
+                asyncio.create_task(self.broadcast_callback({
+                    "type": "new_signal",
+                    "data": {
+                        "timestamp": datetime.now(IST).isoformat(),
+                        "strategy": config.name,
+                        "instrument": instrument_key,
+                        "action": signal.action.value,
+                        "price": signal.price,
+                        "confidence": signal.confidence_score
+                    }
+                }))
 
         return signal
 
     async def _handle_signal(self, signal: TradeSignal, config: StrategyConfig):
         """Handle a validated trade signal — paper trade or execute."""
-        # Risk check: are we at max daily loss?
+        # 1. Trading Side check
+        if self.trading_side == "LONG_ONLY" and signal.action.value == "SELL":
+            logger.info("🚫 SHORT signal skipped (LONG_ONLY mode)")
+            return
+        if self.trading_side == "SHORT_ONLY" and signal.action.value == "BUY":
+            logger.info("🚫 LONG signal skipped (SHORT_ONLY mode)")
+            return
+
+        # 2. Risk check: are we at max daily loss?
         max_loss_abs = self.trading_capital * (self.max_daily_loss_pct / 100)
         if self._daily_pnl <= -max_loss_abs:
             logger.warning(
                 f"🛑 MAX DAILY LOSS HIT ({-self._daily_pnl:.2f} >= {max_loss_abs:.2f}). "
                 f"Blocking {signal.action.value} on {signal.instrument_key}."
             )
-            # Auto-disable engine
             self.auto_mode = False
             return
+
+        # 3. ATM Option Resolution (for Indices)
+        # If the instrument is an index, we trade the ATM option instead of the underlying
+        trade_instrument = signal.instrument_key
+        if ("INDEX" in signal.instrument_key or signal.instrument_key in ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]) and self._market_service:
+            try:
+                logger.info(f"🔍 Resolving ATM option for {signal.instrument_key} @ {signal.price}")
+                # Use the service directly to avoid circular imports with routes.py
+                chain_data = await self._market_service.get_detailed_option_chain(signal.instrument_key)
+                if chain_data["status"] == "success" and chain_data["chain"]:
+                    # Chain is sorted by strike. Find closest to price.
+                    matrix = chain_data["chain"]
+                    closest = min(matrix, key=lambda x: abs(x["strike_price"] - signal.price))
+                    
+                    if signal.action.value == "BUY":
+                        side = "ce"
+                    else:
+                        side = "pe"
+                        
+                    opt = closest.get(side)
+                    if opt:
+                        trade_instrument = opt["instrument_key"]
+                        logger.info(f"🎯 Resolved ATM {side.upper()}: {trade_instrument} (Strike: {closest['strike_price']})")
+                    else:
+                        logger.warning(f"No {side.upper()} available for ATM strike {closest['strike_price']}")
+            except Exception as e:
+                logger.error(f"Option resolution failed: {e}")
+
+        # 4. Use Global Paper Trading override if set
+        is_paper = self.paper_trading or config.paper_trading
             
-        if config.paper_trading:
+        if is_paper:
             logger.info(
-                f"📝 [PAPER] {signal.action.value} {signal.instrument_key} "
+                f"📝 [PAPER] {signal.action.value} {trade_instrument} "
                 f"@ {signal.price:.2f} | SL: {signal.stop_loss:.2f} | "
                 f"TP: {signal.take_profit:.2f}"
             )
             self._trades_today.append({
                 "timestamp": datetime.now(IST).isoformat(),
                 "type": "paper",
-                "strategy": signal.strategy_name,
-                "instrument": signal.instrument_key,
+                "strategy": signal.strategy_name or config.name,
+                "instrument": trade_instrument,
+                "underlying": signal.instrument_key,
                 "action": signal.action.value,
                 "price": signal.price,
                 "stop_loss": signal.stop_loss,
@@ -225,36 +315,65 @@ class AutomationEngine:
                 session = get_session()
                 log = TradeLog(
                     timestamp=datetime.now(IST),
-                    strategy_name=signal.strategy_name,
-                    instrument_key=signal.instrument_key,
+                    strategy_name=signal.strategy_name or config.name,
+                    instrument_key=trade_instrument,
                     action=signal.action.value,
                     quantity=0,
                     price=signal.price,
                     stop_loss=signal.stop_loss,
                     take_profit=signal.take_profit,
                     status="paper",
-                    metadata_json=signal.metadata,
+                    metadata_json={"underlying": signal.instrument_key, **(signal.metadata or {})}
                 )
                 session.add(log)
                 session.commit()
                 session.close()
+                
+                # Broadcast trade execution to UI
+                if self.broadcast_callback:
+                    asyncio.create_task(self.broadcast_callback({
+                        "type": "trade_executed",
+                        "data": {
+                            "type": "paper",
+                            "strategy": signal.strategy_name or config.name,
+                            "instrument": trade_instrument,
+                            "action": signal.action.value,
+                            "price": signal.price
+                        }
+                    }))
             except Exception as e:
                 logger.error(f"DB log failed: {e}")
 
         else:
-            # Live execution
+            # Live execution logic
             try:
+                # Update signal with resolved instrument
+                signal.instrument_key = trade_instrument
                 result = self._order_service.place_signal(signal)
                 logger.info(f"💰 [LIVE] Order placed: {result}")
                 self._trades_today.append({
                     "timestamp": datetime.now(IST).isoformat(),
                     "type": "live",
-                    "strategy": signal.strategy_name,
-                    "instrument": signal.instrument_key,
+                    "strategy": signal.strategy_name or config.name,
+                    "instrument": trade_instrument,
+                    "underlying": signal.instrument_key,
                     "action": signal.action.value,
                     "price": signal.price,
                     "order_result": result,
                 })
+                
+                # Broadcast trade execution to UI
+                if self.broadcast_callback:
+                    asyncio.create_task(self.broadcast_callback({
+                        "type": "trade_executed",
+                        "data": {
+                            "type": "live",
+                            "strategy": signal.strategy_name or config.name,
+                            "instrument": trade_instrument,
+                            "action": signal.action.value,
+                            "price": signal.price
+                        }
+                    }))
             except Exception as e:
                 logger.error(f"❌ Order execution failed: {e}")
 
@@ -266,6 +385,8 @@ class AutomationEngine:
             "initialized": self._is_initialized,
             "running": self._is_running,
             "auto_mode": self.auto_mode,
+            "paper_trading": self.paper_trading,
+            "trading_side": self.trading_side,
             "risk_controls": {
                 "trading_capital": self.trading_capital,
                 "risk_per_trade_pct": self.risk_per_trade_pct,
@@ -298,6 +419,28 @@ class AutomationEngine:
     def get_trades_log(self) -> list[dict]:
         """Get all trades executed today."""
         return self._trades_today
+
+    async def trigger_test_signal(self, instrument_key: str) -> dict:
+        """Force a test signal for debugging."""
+        logger.info(f"🧪 [TEST] Triggering manual signal for {instrument_key}")
+        
+        # Create a fake signal
+        from app.orders.models import TransactionType
+        signal = TradeSignal(
+            strategy_name="Manual Test",
+            instrument_key=instrument_key,
+            action=TransactionType.BUY,
+            price=25000.0,  # Arbitrary for test
+            stop_loss=24900.0,
+            take_profit=25300.0,
+            confidence_score=5,
+        )
+        
+        # Use a dummy strategy config
+        dummy_config = StrategyConfig(name="Test", enabled=True, instruments=[instrument_key], timeframe="1m", paper_trading=True)
+        
+        await self._handle_signal(signal, dummy_config)
+        return {"action": signal.action.value, "instrument": instrument_key}
 
     def reset_daily(self):
         """Reset daily counters (called post-market)."""

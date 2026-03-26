@@ -1,11 +1,10 @@
 """
 Auth Service — handles Upstox OAuth2 flow, token management, and auto-refresh.
 
-Refactored from legacy/login/login.py and legacy/login/check_token_expiry.py.
+Tokens are persisted to the database (config_settings table), NOT .env.
 """
 
 import logging
-import fileinput
 from pathlib import Path
 
 import jwt
@@ -28,11 +27,20 @@ class AuthService:
 
     # ── Public API ──────────────────────────────────────────────
 
-    def get_configuration(self) -> upstox_client.Configuration:
+    def get_configuration(self, use_sandbox: bool | None = None) -> upstox_client.Configuration:
         """
         Return a ready-to-use Upstox SDK Configuration object.
-        Automatically refreshes the token if expired.
+        Automatically refreshes the token if expired for Live mode.
         """
+        target_sandbox = use_sandbox if use_sandbox is not None else False
+
+        if target_sandbox:
+            logger.debug("Creating Upstox SANDBOX configuration.")
+            config = upstox_client.Configuration()
+            config.access_token = self.settings.SANDBOX_ACCESS_TOKEN
+            return config
+
+        # Live Mode logic (with refresh)
         if self._is_token_expired(self.settings.ACCESS_TOKEN):
             logger.info("Access token expired — refreshing...")
             self._refresh_token()
@@ -44,25 +52,29 @@ class AuthService:
 
     def get_auth_url(self) -> str:
         """Generate the Upstox login URL for the user."""
+        client_id = self.settings.SANDBOX_API_KEY if self.settings.USE_SANDBOX else self.settings.API_KEY
         return (
             f"https://api.upstox.com/v2/login/authorization/dialog"
             f"?response_type=code"
-            f"&client_id={self.settings.API_KEY}"
+            f"&client_id={client_id}"
             f"&redirect_uri={self.settings.REDIRECT_URI}"
         )
 
     def handle_callback(self, auth_code: str) -> str:
         """
         Handle the OAuth callback — exchange auth code for access token.
-        Returns the new access token.
+        Returns the new access token. Persists to DB.
         """
-        self._update_env("AUTH_CODE", auth_code)
+        # Save auth code to DB
+        self.settings.save_to_db("AUTH_CODE", auth_code, category="API", is_secret=True)
         self.settings.AUTH_CODE = auth_code
+
         token = self._exchange_code_for_token(auth_code)
         if token:
-            self._update_env("ACCESS_TOKEN", token)
+            # Save access token to DB
+            self.settings.save_to_db("ACCESS_TOKEN", token, category="API", is_secret=True)
             self.settings.ACCESS_TOKEN = token
-            logger.info("Successfully obtained new access token.")
+            logger.info("Successfully obtained and persisted new access token to DB.")
         return token
 
     # ── Internal ────────────────────────────────────────────────
@@ -87,7 +99,7 @@ class AuthService:
         """Exchange the stored auth code for a new access token."""
         token = self._exchange_code_for_token(self.settings.AUTH_CODE)
         if token:
-            self._update_env("ACCESS_TOKEN", token)
+            self.settings.save_to_db("ACCESS_TOKEN", token, category="API", is_secret=True)
             self.settings.ACCESS_TOKEN = token
         else:
             logger.error(
@@ -102,11 +114,14 @@ class AuthService:
             api_instance = upstox_client.LoginApi(
                 upstox_client.ApiClient(config)
             )
+            client_id = self.settings.SANDBOX_API_KEY if self.settings.USE_SANDBOX else self.settings.API_KEY
+            client_secret = self.settings.SANDBOX_API_SECRET if self.settings.USE_SANDBOX else self.settings.API_SECRET
+            
             response = api_instance.token(
                 self.settings.API_VERSION,
                 code=auth_code,
-                client_id=self.settings.API_KEY,
-                client_secret=self.settings.API_SECRET,
+                client_id=client_id,
+                client_secret=client_secret,
                 redirect_uri=self.settings.REDIRECT_URI,
                 grant_type="authorization_code",
             )
@@ -114,21 +129,6 @@ class AuthService:
         except Exception as e:
             logger.error(f"Token exchange failed: {e}")
             return None
-
-    @staticmethod
-    def _update_env(key: str, value: str):
-        """Update a key in the .env file."""
-        env_path = BASE_DIR / ".env"
-        if not env_path.exists():
-            logger.warning(f".env file not found at {env_path}")
-            return
-
-        with fileinput.FileInput(str(env_path), inplace=True) as f:
-            for line in f:
-                if line.startswith(f"{key}="):
-                    print(f'{key}="{value}"')
-                else:
-                    print(line, end="")
 
 
 # Module-level singleton

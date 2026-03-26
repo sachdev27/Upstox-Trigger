@@ -7,6 +7,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker
+from datetime import datetime
 
 from app.config import get_settings, BASE_DIR
 
@@ -66,6 +67,49 @@ class CandleCache(Base):
     low = Column(Float, nullable=False)
     close = Column(Float, nullable=False)
     volume = Column(Float, default=0)
+
+
+class ConfigSetting(Base):
+    """Dynamic application settings stored in the database."""
+
+    __tablename__ = "config_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=False)
+    category = Column(String, default="GENERAL")  # API, RISK, ENGINE, etc.
+    description = Column(String)
+    is_secret = Column(Boolean, default=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Instrument(Base):
+    """Master list of instruments (stocks, indices, options)."""
+
+    __tablename__ = "instruments"
+
+    instrument_key = Column(String, primary_key=True)
+    symbol = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    exchange = Column(String, nullable=False)
+    segment = Column(String)
+    lot_size = Column(Integer, default=1)
+    tick_size = Column(Float, default=0.05)
+    instrument_type = Column(String)  # INDEX, EQUITIES, CE, PE, FUT
+    expiry = Column(String)
+    strike = Column(Float)
+
+
+class MarketTick(Base):
+    """Real-time price ticks for instruments."""
+
+    __tablename__ = "market_ticks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    instrument_key = Column(String, nullable=False, index=True)
+    timestamp = Column(DateTime, nullable=False, index=True)
+    last_price = Column(Float, nullable=False)
+    volume = Column(Float)
+    oi = Column(Float)
 
 
 # ── Engine & Session ────────────────────────────────────────────
