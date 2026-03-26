@@ -84,31 +84,31 @@ async def download_instruments():
 
 @router.get("/instruments/featured")
 async def get_featured_instruments():
-    """Return Nifty 50 instruments from local CSV for the UI default Watchlist."""
-    import csv
-    from app.config import BASE_DIR
+    """Return featured instruments from the database for the UI default Watchlist."""
+    from app.database.connection import get_session, Instrument
     
-    csv_path = BASE_DIR / "ind_nifty50list.csv"
-    instruments = []
-    
-    # Add major indices manually
-    instruments.append({"name": "Nifty 50", "instrument_key": "NSE_INDEX|Nifty 50", "segment": "NSE_INDEX"})
-    instruments.append({"name": "Nifty Bank", "instrument_key": "NSE_INDEX|Nifty Bank", "segment": "NSE_INDEX"})
-
-    if csv_path.exists():
-        with open(csv_path, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                symbol = row.get("Symbol")
-                isin = row.get("ISIN Code")
-                if symbol and isin:
-                    instruments.append({
-                        "name": symbol,
-                        "instrument_key": f"NSE_EQ|{isin}",
-                        "segment": "NSE_EQ"
-                    })
-    
-    return {"status": "success", "count": len(instruments), "instruments": instruments}
+    session = get_session()
+    try:
+        # Fetch indices and a subset of equities
+        db_insts = session.query(Instrument).filter(
+            (Instrument.instrument_type == 'INDEX') | 
+            (Instrument.instrument_type == 'EQUITY')
+        ).limit(100).all()
+        
+        instruments = []
+        for inst in db_insts:
+            instruments.append({
+                "name": inst.name,
+                "instrument_key": inst.instrument_key,
+                "segment": inst.exchange,
+                "symbol": inst.symbol
+            })
+            
+        return {"status": "success", "count": len(instruments), "instruments": instruments}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to fetch from DB: {e}"}
+    finally:
+        session.close()
 
 
 @router.get("/instruments/search")

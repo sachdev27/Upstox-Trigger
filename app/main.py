@@ -7,6 +7,7 @@ Entry point: uvicorn app.main:app --reload --port 8000
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -40,6 +41,13 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("✅ Database initialized.")
 
+    # Load dynamic settings from DB
+    from app.database.connection import get_session
+    db_session = get_session()
+    settings.update_from_db(db_session)
+    db_session.close()
+    logger.info("⚙️ Dynamic settings loaded from database.")
+
     # Start the scheduler
     from app.scheduler.service import SchedulerService
     from app.engine import get_engine
@@ -59,11 +67,101 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     app.state.scheduler = scheduler
 
+    # --- Live Market Data Streamer ---
+    from app.market_data.streamer import MarketDataStreamer
+    from app.auth.service import get_auth_service
+    from app.database.connection import get_session, MarketTick
+    
+    auth_service = get_auth_service()
+    streamer = MarketDataStreamer(auth_service.get_configuration())
+
+    async def _handle_market_tick(data):
+        """
+        Callback for the streamer.
+        'data' is the decoded protobuf to dict from the SDK.
+        """
+        feeds = data.get("feeds", {})
+        if not feeds:
+            return
+
+        session = get_session()
+        try:
+            for instrument_key, feed in feeds.items():
+                # 1. Extract LTP
+                # Depending on mode, it might be in marketFF.ltpc or market_ohlc
+                ltp = feed.get("ff", {}).get("marketFF", {}).get("ltpc", {}).get("ltp")
+                if not ltp:
+                    # Try OHLC mode
+                    ltp = feed.get("ff", {}).get("marketFF", {}).get("market_ohlc", {}).get("ohlc", [{}])[0].get("close")
+                
+                if ltp:
+                    now = datetime.now(timezone(timedelta(hours=5, minutes=30))) # IST
+                    
+                    # 2. Persist to DB
+                    tick = MarketTick(
+                        instrument_key=instrument_key,
+                        timestamp=now,
+                        last_price=ltp,
+                        volume=feed.get("ff", {}).get("marketFF", {}).get("market_ohlc", {}).get("volume"),
+                        oi=feed.get("ff", {}).get("marketFF", {}).get("market_ohlc", {}).get("oi")
+                    )
+                    session.add(tick)
+                    
+                    # 3. Broadcast to frontend for chart
+                    # Lightweight Charts update needs { time: unix_timestamp_seconds, open, high, low, close }
+                    # We'll use a simplified tick update where OHLC is just LTP
+                    # The frontend's Lighthouse Charts will handle merging this into the current bar
+                    
+                    # Add IST offset for chart visualization if necessary (matching app.js)
+                    ds = (now.timestamp()) + 19800
+                    
+                    msg = {
+                        "type": "market_data",
+                        "data": {
+                            "instrument_key": instrument_key,
+                            "candle": {
+                                "time": int(ds),
+                                "open": ltp,
+                                "high": ltp,
+                                "low": ltp,
+                                "close": ltp
+                            }
+                        }
+                    }
+                    await broadcast_to_clients(msg)
+            
+            session.commit()
+        except Exception as e:
+            logger.error(f"Error in _handle_market_tick: {e}")
+            session.rollback()
+        finally:
+            session.close()
+
+    # We need to run the streamer's event loop in a way that doesn't block FastAPI
+    # The SDK streamer.connect() is often blocking or starts its own thread.
+    # To be safe with FastAPI's async loop, we can wrap the callback
+    def sync_on_tick(message):
+        # Schedule the async broadcast in the main loop
+        asyncio.run_coroutine_threadsafe(_handle_market_tick(message), asyncio.get_event_loop())
+
+    streamer.on_tick = sync_on_tick
+    
+    # Start streaming for some defaults (In a real app, this would be dynamic based on user watchlist)
+    default_instruments = [settings.NIFTY, settings.BANKNIFTY]
+    try:
+        streamer.start(default_instruments)
+        app.state.market_streamer = streamer
+        logger.info(f"📡 Market Data Streamer started for {default_instruments}")
+    except Exception as e:
+        logger.error(f"❌ Failed to start market data streamer: {e}")
+
     yield
     
     # Shutdown
     logger.info("🛑 Shutting down...")
     scheduler.stop()
+    if hasattr(app.state, "market_streamer"):
+        app.state.market_streamer.stop()
 
 
 app = FastAPI(

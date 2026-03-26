@@ -3,6 +3,7 @@ Centralized configuration — single source of truth for all settings.
 Loads from .env file via pydantic-settings.
 """
 
+import logging
 from functools import lru_cache
 from pydantic_settings import BaseSettings
 from pydantic import Field
@@ -10,6 +11,7 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -51,6 +53,35 @@ class Settings(BaseSettings):
         "env_file_encoding": "utf-8",
         "extra": "ignore",
     }
+
+    def update_from_db(self, session):
+        """
+        Refresh settings from the database ConfigSetting table.
+        This allows hot-swapping settings without a restart.
+        """
+        from sqlalchemy import inspect
+        
+        # We use a late import of our model to avoid circularities
+        # and check if the table exists first (for initial setup)
+        inspector = inspect(session.get_bind())
+        if "config_settings" not in inspector.get_table_names():
+            return
+
+        from app.database.connection import ConfigSetting
+        
+        db_settings = session.query(ConfigSetting).all()
+        for s in db_settings:
+            if hasattr(self, s.key):
+                # Type conversion based on default field type
+                attr_type = type(getattr(self, s.key))
+                try:
+                    if attr_type == bool:
+                        val = s.value.lower() in ("true", "1", "yes")
+                    else:
+                        val = attr_type(s.value)
+                    setattr(self, s.key, val)
+                except (ValueError, TypeError):
+                    logger.warning(f"Failed to convert DB setting {s.key}='{s.value}' to {attr_type}")
 
 
 @lru_cache()

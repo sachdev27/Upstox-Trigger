@@ -1,9 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Body
 from pydantic import BaseModel
-import os
-import dotenv
-from pathlib import Path
 from app.config import get_settings
+from app.database.connection import get_session, ConfigSetting
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
@@ -20,8 +18,13 @@ class SettingsUpdate(BaseModel):
 
 @router.get("/")
 async def get_current_settings():
-    """Return non-sensitive settings and masked sensitive settings."""
+    """Return non-sensitive settings and masked sensitive settings from DB."""
     settings = get_settings()
+    
+    # Refresh settings from DB to ensure UI is accurate
+    session = get_session()
+    settings.update_from_db(session)
+    session.close()
     
     # Mask the secrets for UI display
     masked_key = f"{settings.API_KEY[:6]}...{settings.API_KEY[-4:]}" if len(settings.API_KEY) > 10 else settings.API_KEY
@@ -38,10 +41,8 @@ async def get_current_settings():
 
 @router.post("/")
 async def update_settings(updates: SettingsUpdate = Body(...)):
-    """Update settings in the local .env file directly."""
-    if not ENV_PATH.exists():
-        ENV_PATH.touch()
-        
+    """Update settings in the database."""
+    session = get_session()
     updated = False
     
     for key, value in updates.dict(exclude_none=True).items():
@@ -50,11 +51,19 @@ async def update_settings(updates: SettingsUpdate = Body(...)):
             if key in ["API_KEY", "API_SECRET"] and ("*" in str(value) or "..." in str(value)):
                 continue
                 
-            dotenv.set_key(str(ENV_PATH), f"UPSTOX_{key}", str(value))
+            # Update or create in DB
+            setting = session.query(ConfigSetting).filter_by(key=key).first()
+            if setting:
+                setting.value = str(value)
+            else:
+                setting = ConfigSetting(key=key, value=str(value), category="GENERAL")
+                session.add(setting)
             updated = True
             
     if updated:
-        # Clear the Pydantic lru_cache so next get_settings() pulls fresh env
-        get_settings.cache_clear()
-        
-    return {"status": "success", "message": "Settings updated successfully"}
+        session.commit()
+        # Refresh the singleton
+        get_settings().update_from_db(session)
+    
+    session.close()
+    return {"status": "success", "message": "Settings updated in database successfully"}
