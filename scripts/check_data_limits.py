@@ -38,14 +38,21 @@ if __name__ == "__main__":
     print(f"{'Days Back':<15} | {'Candles Found':<15} | {'Status'}")
     print("-" * 60)
 
-    for d in [30, 25, 20, 15, 10, 7, 3, 1]:
+    # Expanded test ranges to show large limits
+    test_days = [3650, 1825, 365, 180, 90, 60, 30, 25, 20]
+    
+    for d in test_days:
+        # Skip absurd ranges for 1m
+        if interval in ["1m", "1minute", "5m", "15m"] and d > 31:
+            continue
+            
         count = check_limit(svc, instrument, interval, d)
         if count > 0:
             status = "✅ OK"
         elif count == 0:
             status = "❌ Empty / Rejected"
         else:
-            status = "💥 Error"
+            status = "💥 Error (Limit?)"
         print(f"{d:<15} | {count:<15} | {status}")
 
     print("-" * 60)

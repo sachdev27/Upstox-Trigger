@@ -32,7 +32,7 @@ class AuthService:
         Return a ready-to-use Upstox SDK Configuration object.
         Automatically refreshes the token if expired for Live mode.
         """
-        target_sandbox = use_sandbox if use_sandbox is not None else False
+        target_sandbox = use_sandbox if use_sandbox is not None else self.settings.USE_SANDBOX
 
         if target_sandbox:
             logger.debug("Creating Upstox SANDBOX configuration.")

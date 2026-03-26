@@ -44,7 +44,8 @@ class MarketDataService:
         """
         api = upstox_client.HistoryApi(upstox_client.ApiClient(self.config))
         
-        # Map UI timeframes (1m, 5m, 15m, 1H, 1D) to Upstox APIs strict interval modes
+        # Map UI timeframes to Upstox API interval modes
+        # Upstox supports: 1minute, 30minute, day, week, month
         tf_map = {
             "1m": ("1minute", False, None),
             "1minute": ("1minute", False, None),
@@ -52,14 +53,17 @@ class MarketDataService:
             "5minute": ("1minute", True, "5Min"),
             "15m": ("1minute", True, "15Min"),
             "15minute": ("1minute", True, "15Min"),
-            "30m": ("1minute", True, "30Min"),
-            "30minute": ("1minute", True, "30Min"),
-            "1H": ("1minute", True, "60Min"),
-            "1hour": ("1minute", True, "60Min"),
-            "4H": ("1minute", True, "240Min"),
+            "30m": ("30minute", False, None),
+            "30minute": ("30minute", False, None),
+            "1H": ("30minute", True, "60Min"),
+            "1hour": ("30minute", True, "60Min"),
+            "4H": ("30minute", True, "240Min"),
             "1D": ("day", False, None),
             "day": ("day", False, None),
             "1W": ("week", False, None),
+            "week": ("week", False, None),
+            "1M": ("month", False, None),
+            "month": ("month", False, None),
         }
         
         fetch_interval, needs_resample, resample_rule = tf_map.get(interval, ("1minute", False, None))
@@ -68,69 +72,124 @@ class MarketDataService:
             candles_dict = {}
             
             # 1. Fetch Historical Data (from_date -> to_date)
-            # Upstox API limit: ~30 days for intraday, but often 20-25 days is safer to avoid UDAPI1148
+            # Upstox API limits (approx):
+            # - 1minute: 1 month (safe: 25 days)
+            # - 30minute: 1 year (safe: 90-180 days often)
+            # - day: 1 year (safe: 365 days)
+            # - week/month: 10 years
+            
             if not from_date:
-                days = 30 if interval == "day" or interval == "1D" else 20
+                if interval in ["day", "1D"]:
+                    days = 365
+                elif interval in ["week", "1W", "month"]:
+                    days = 365 * 10
+                elif interval in ["30m", "30minute", "1H", "1hour", "4H"]:
+                    days = 180 # Upstox 30m can be picky about full 365 days
+                else:
+                    days = 25 # Safe for 1m
                 from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            
             if not to_date:
                 to_date = datetime.now().strftime('%Y-%m-%d')
 
-            try:
-                res1 = api.get_historical_candle_data1(
-                    instrument_key, fetch_interval, to_date, from_date, self.api_version
-                )
-                data1 = res1.to_dict()
-                for c in data1.get("data", {}).get("candles", []):
-                    candles_dict[c[0]] = c
-            except Exception as e:
-                logger.warning(f"Historical fetch failed for {instrument_key}: {e}")
+            # --- Resilient Fetch with Fallback for Date Range ---
+            max_retries = 3
+            current_days = days if 'days' in locals() else 30
+            
+            for attempt in range(max_retries):
+                try:
+                    res1 = api.get_historical_candle_data1(
+                        instrument_key, fetch_interval, to_date, from_date, self.api_version
+                    )
+                    
+                    if res1 and hasattr(res1, 'data') and res1.data.candles:
+                        # Success!
+                        for candle in res1.data.candles:
+                            # candle[0] can be datetime, str (ISO), or int
+                            raw_t = candle[0]
+                            try:
+                                if isinstance(raw_t, datetime):
+                                    ts = int(raw_t.timestamp())
+                                elif isinstance(raw_t, str):
+                                    # Handle "2026-03-25T15:29:00+05:30"
+                                    ts = int(pd.to_datetime(raw_t).timestamp())
+                                else:
+                                    ts = int(raw_t)
+                                    if ts > 10**11: ts //= 1000 # Convert ms to sec
+                            except:
+                                continue
+                            
+                            if not ts: continue
+                            
+                            candles_dict[ts] = {
+                                "time": ts,
+                                "open": float(candle[1]),
+                                "high": float(candle[2]),
+                                "low": float(candle[3]),
+                                "close": float(candle[4]),
+                                "volume": int(candle[5]) if len(candle) > 5 else 0
+                            }
+                        break
+                    else:
+                        break # Empty result, no point retrying unless it was an error
+                        
+                except Exception as e:
+                    # Check for "Invalid date range" (UDAPI1148)
+                    error_str = str(e)
+                    if "UDAPI1148" in error_str and attempt < max_retries - 1:
+                        # Reduce days and try again
+                        current_days = int(current_days * 0.7)
+                        from_date = (datetime.now() - timedelta(days=current_days)).strftime('%Y-%m-%d')
+                        logger.info(f"UDAPI1148 for {interval}, retrying with {current_days} days...")
+                        continue
+                    else:
+                        logger.error(f"Historical fetch failed for {instrument_key}: {e}")
+                        break
+            # The original line `logger.warning(f"Historical fetch failed for {instrument_key}: {e}")`
+            # was part of the old try-except block. The new resilient fetch handles logging internally.
 
             # 2. Fetch Intraday Data (Today) 
-            # Only for intraday intervals (day/week don't support get_intra_day_candle_data)
-            if fetch_interval not in ["day", "week"]:
+            # Only for intraday intervals (day/week/month don't support get_intra_day_candle_data)
+            if fetch_interval not in ["day", "week", "month"]:
                 try:
                     res2 = api.get_intra_day_candle_data(
                         instrument_key, fetch_interval, self.api_version
                     )
-                    data2 = res2.to_dict()
-                    for c in data2.get("data", {}).get("candles", []):
-                        candles_dict[c[0]] = c
+                    if res2 and hasattr(res2, 'data') and res2.data.candles:
+                        for candle in res2.data.candles:
+                            if isinstance(candle[0], datetime):
+                                ts = int(candle[0].timestamp())
+                            else:
+                                try:
+                                    ts = int(candle[0])
+                                    if ts > 10**11: ts //= 1000
+                                except: continue
+                                
+                            candles_dict[ts] = {
+                                "time": ts,
+                                "open": float(candle[1]),
+                                "high": float(candle[2]),
+                                "low": float(candle[3]),
+                                "close": float(candle[4]),
+                                "volume": int(candle[5]) if len(candle) > 5 else 0
+                            }
                 except Exception as e:
-                    logger.warning(f"Intraday fetch failed: {e}")
+                    logger.warning(f"Intraday fetch failed for {instrument_key}: {e}")
 
             if not candles_dict:
                 return []
 
-            # Sort chronologically
-            sorted_raw = sorted(candles_dict.values(), key=lambda x: x[0])
+            # Sort chronologically by timestamp
+            sorted_times = sorted(candles_dict.keys())
+            transformed = [candles_dict[t] for t in sorted_times]
             
-            transformed = []
-            for c in sorted_raw:
-                try:
-                    # Ensure all OHLC values are valid floats and not None
-                    if any(v is None for v in c[1:5]):
-                        continue
-                    transformed.append({
-                        "time": c[0],
-                        "open": float(c[1]),
-                        "high": float(c[2]),
-                        "low": float(c[3]),
-                        "close": float(c[4]),
-                        "volume": int(c[5]) if len(c) > 5 else 0,
-                    })
-                except (ValueError, TypeError, IndexError):
-                    continue
-                
             if not needs_resample:
-                for c in transformed:
-                    try:
-                        c["time"] = int(pd.to_datetime(c["time"]).timestamp())
-                    except: pass
                 return transformed
                 
             # --- Dynamic Pandas Resampling ---
             df = pd.DataFrame(transformed)
-            df['datetime_dt'] = pd.to_datetime(df['time'])
+            # Upstox timestamps are in seconds; convert to datetime for resampling
+            df['datetime_dt'] = pd.to_datetime(df['time'], unit='s')
             df.set_index('datetime_dt', inplace=True)
             
             # Resample logic
@@ -141,6 +200,7 @@ class MarketDataService:
                 'close': 'last',
                 'volume': 'sum'
             })
+            # Remove any bins with no data
             resampled = resampled.dropna(subset=['open', 'high', 'low', 'close'])
             
             final_candles = []

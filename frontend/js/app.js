@@ -8,9 +8,9 @@ import { EngineWS } from './ws.js';
 import { ChartManager } from './chart.js';
 
 // Application State
-let currentInstrumentKey = "NSE_INDEX|Nifty 50";
-let currentInstrumentName = "Nifty 50";
-let currentInterval = "15minute";
+let currentInstrumentKey = localStorage.getItem("currentInstrumentKey") || "NSE_INDEX|Nifty 50";
+let currentInstrumentName = localStorage.getItem("currentInstrumentName") || "Nifty 50";
+let currentInterval = localStorage.getItem("currentInterval") || "15minute";
 let engineActive = false;
 let dynamicSchemas = {};
 const IST_OFFSET = 19800; // 5.5 hours for IST display
@@ -37,6 +37,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     
     try { chart.init(); } catch(e) { console.error("Chart Init Failed", e); }
     try { ws.connect(); } catch(e) { console.error("WS Connect Failed", e); }
+
+    // Init UI Elements with persisted state
+    updateElementText('current-instrument', currentInstrumentName);
+    updateElementText('oc-instrument-name', currentInstrumentName);
+    const activeBtn = document.getElementById(`tf-${currentInterval}`);
+    if (activeBtn) {
+        activeBtn.classList.remove('btn-outline');
+        activeBtn.classList.add('btn-primary');
+    }
 
     await safeLoad(fetchHistoricalCandles);
     await safeLoad(refreshAccountSummary);
@@ -164,6 +173,9 @@ async function fetchHistoricalCandles() {
 async function selectInstrument(key, name) {
     currentInstrumentKey = key;
     currentInstrumentName = name;
+    localStorage.setItem("currentInstrumentKey", key);
+    localStorage.setItem("currentInstrumentName", name);
+    
     updateElementText('current-instrument', name);
     updateElementText('oc-instrument-name', name); // Sync option chain header
     
@@ -215,12 +227,13 @@ async function refreshAccountSummary() {
 
 async function refreshPositions() {
     try {
-        const { data } = await api.getPositions();
+        const res = await api.getPositions();
+        const data = res.data || [];
         const list = document.getElementById("positions-body");
         if (!list) return;
         list.innerHTML = "";
         
-        if (!data || data.length === 0) {
+        if (data.length === 0) {
             list.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--text-muted)">No open positions</td></tr>`;
             return;
         }
@@ -373,6 +386,18 @@ window.selectInstrument = selectInstrument;
 window.switchBottomTab = (tabId) => switchTab('bottom-panel', `tab-${tabId}`);
 window.setChartTimeframe = (interval) => {
     currentInterval = interval;
+    localStorage.setItem("currentInterval", interval);
+    
+    document.querySelectorAll('[id^="tf-"]').forEach(btn => {
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-outline');
+    });
+    const activeBtn = document.getElementById(`tf-${interval}`);
+    if (activeBtn) {
+        activeBtn.classList.remove('btn-outline');
+        activeBtn.classList.add('btn-primary');
+    }
+    
     fetchHistoricalCandles().then(() => refreshOverlay());
 };
 window.loginUpstox = () => window.location.href = "/auth/login";
@@ -470,6 +495,10 @@ window.toggleSandboxMode = async (enabled) => {
     try {
         await api.saveSettings({ USE_SANDBOX: enabled });
         showToast(`Sandbox Mode ${enabled ? 'Enabled' : 'Disabled'}`, 'info');
+        // Refresh everything to show correct environment data
+        refreshPositions();
+        refreshTrades();
+        refreshAccountSummary();
     } catch (e) { showToast('Failed to toggle sandbox mode', 'error'); }
 };
 
@@ -479,6 +508,8 @@ window.togglePaperMode = async (enabled) => {
         updatePaperBadge(enabled);
         showToast(`Paper Trading ${enabled ? 'Enabled' : 'Disabled'}`, 'info');
         logActivity(`System: Paper Trading ${enabled ? 'ON' : 'OFF'}`);
+        // Refresh trades to show paper vs live
+        refreshTrades();
     } catch (e) { showToast('Failed to toggle paper trading', 'error'); }
 };
 

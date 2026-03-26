@@ -65,12 +65,23 @@ class AutomationEngine:
         """Sync engine runtime config from the DB-backed Settings singleton."""
         s = self.settings
         s.load_from_db()
+
+        # Check for Sandbox mode change to re-initialize service if needed
+        old_sandbox = getattr(self, "use_sandbox", None)
+        self.use_sandbox = s.USE_SANDBOX
+        
         self.paper_trading = s.PAPER_TRADING
         self.trading_side = s.TRADING_SIDE
         self.trading_capital = s.TRADING_CAPITAL
         self.risk_per_trade_pct = s.MAX_RISK_PER_TRADE_PCT
         self.max_daily_loss_pct = s.MAX_DAILY_LOSS_PCT
         self.max_open_trades = s.MAX_OPEN_TRADES
+
+        # Re-initialize order service if sandbox mode changed and we were already initialized
+        if old_sandbox is not None and old_sandbox != self.use_sandbox and self._is_initialized:
+            logger.info(f"🔄 Environment changed to {'SANDBOX' if self.use_sandbox else 'LIVE'} — re-initializing order service.")
+            order_config = self._auth.get_configuration(use_sandbox=self.use_sandbox)
+            self._order_service = OrderService(order_config)
 
     # ── Initialization ──────────────────────────────────────────
 
