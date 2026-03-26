@@ -44,6 +44,10 @@ document.addEventListener("DOMContentLoaded", () => {
     // Load top instruments on boot
     restoreDefaultWatchlist();
     
+    // Initialize labels
+    const label = document.getElementById("current-instrument");
+    if (label) label.innerText = currentInstrumentName;
+    
     // Fetch generic python strategy parameters dynamically
     fetchStrategySchemas();
 });

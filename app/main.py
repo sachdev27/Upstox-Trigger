@@ -40,6 +40,11 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting Upstox Trading Automation...")
     init_db()
     logger.info("✅ Database initialized.")
+    
+    # Auto-initialize engine services
+    from app.engine import get_engine
+    engine = get_engine()
+    engine.initialize()
 
     # Load dynamic settings from DB
     from app.database.connection import get_session
@@ -54,6 +59,7 @@ async def lifespan(app: FastAPI):
     
     scheduler = SchedulerService()
     engine = get_engine()
+    engine.broadcast_callback = broadcast_to_clients
 
     async def _scheduled_run_cycle():
         """Called automatically every minute during market hours."""
@@ -265,6 +271,7 @@ async def websocket_endpoint(ws: WebSocket):
 
 async def broadcast_to_clients(message: dict):
     """Broadcast a message to all connected WebSocket clients."""
+    global ws_clients
     dead = set()
     for ws in ws_clients:
         try:

@@ -22,5 +22,5 @@ fi
 
 # 3. Start the application
 echo "✅ Starting Uvicorn on port $PORT..."
-source .venv/bin/activate
+source venv/bin/activate
 uvicorn app.main:app --reload --port $PORT

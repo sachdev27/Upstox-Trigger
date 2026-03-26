@@ -64,6 +64,9 @@ class AutomationEngine:
         self.risk_per_trade_pct: float = 1.0
         self.max_daily_loss_pct: float = 3.0
         self.max_open_trades: int = 3
+        
+        # WebSocket broadcast callback (set by main.py)
+        self.broadcast_callback = None
 
     # ── Initialization ──────────────────────────────────────────
 
@@ -210,9 +213,22 @@ class AutomationEngine:
                 "confidence": signal.confidence_score,
             })
             logger.info(
-                f"🎯 Signal: {signal.action.value} {instrument_key} "
                 f"@ {signal.price:.2f} (score: {signal.confidence_score})"
             )
+            
+            # Broadcast signal to UI
+            if self.broadcast_callback:
+                asyncio.create_task(self.broadcast_callback({
+                    "type": "new_signal",
+                    "data": {
+                        "timestamp": datetime.now(IST).isoformat(),
+                        "strategy": config.name,
+                        "instrument": instrument_key,
+                        "action": signal.action.value,
+                        "price": signal.price,
+                        "confidence": signal.confidence_score
+                    }
+                }))
 
         return signal
 
@@ -239,7 +255,7 @@ class AutomationEngine:
         # 3. ATM Option Resolution (for Indices)
         # If the instrument is an index, we trade the ATM option instead of the underlying
         trade_instrument = signal.instrument_key
-        if "INDEX" in signal.instrument_key or signal.instrument_key in ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]:
+        if ("INDEX" in signal.instrument_key or signal.instrument_key in ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]) and self._market_service:
             try:
                 logger.info(f"🔍 Resolving ATM option for {signal.instrument_key} @ {signal.price}")
                 # Use the service directly to avoid circular imports with routes.py
@@ -303,6 +319,19 @@ class AutomationEngine:
                 session.add(log)
                 session.commit()
                 session.close()
+                
+                # Broadcast trade execution to UI
+                if self.broadcast_callback:
+                    asyncio.create_task(self.broadcast_callback({
+                        "type": "trade_executed",
+                        "data": {
+                            "type": "paper",
+                            "strategy": signal.strategy_name or config.name,
+                            "instrument": trade_instrument,
+                            "action": signal.action.value,
+                            "price": signal.price
+                        }
+                    }))
             except Exception as e:
                 logger.error(f"DB log failed: {e}")
 
@@ -323,6 +352,19 @@ class AutomationEngine:
                     "price": signal.price,
                     "order_result": result,
                 })
+                
+                # Broadcast trade execution to UI
+                if self.broadcast_callback:
+                    asyncio.create_task(self.broadcast_callback({
+                        "type": "trade_executed",
+                        "data": {
+                            "type": "live",
+                            "strategy": signal.strategy_name or config.name,
+                            "instrument": trade_instrument,
+                            "action": signal.action.value,
+                            "price": signal.price
+                        }
+                    }))
             except Exception as e:
                 logger.error(f"❌ Order execution failed: {e}")
 
