@@ -128,55 +128,42 @@ async def lifespan(app: FastAPI):
                 # Index: feed['fullFeed']['indexFF']['ltpc']['ltp']
                 # LTQ: feed['ltpc']['ltp'] (some modes)
                 
-                # 1. Try to find the inner feed object
+                # 1. Fast inner extraction
                 inner = feed.get("fullFeed") or feed.get("ff") or feed
                 if "marketFF" in inner: inner = inner["marketFF"]
-                elif "market_ff" in inner: inner = inner["market_ff"]
                 elif "indexFF" in inner: inner = inner["indexFF"]
-                elif "index_ff" in inner: inner = inner["index_ff"]
                 
-                # 2. Extract LTP - check multiple places for ltpc
-                ltpc = inner.get("ltpc") or feed.get("ltpc") or {}
+                # 2. Direct extraction with early exit
+                ltpc = inner.get("ltpc", {})
                 ltp = ltpc.get("ltp")
+                if not ltp:
+                    continue
                 
-                # 3. Extract Greeks - prioritized
-                greeks_data = inner.get("optionGreeks") or inner.get("option_chain_ff", {}).get("optionGreeks") or {}
+                # 3. Optimized metadata extraction
+                greeks = inner.get("optionGreeks", {})
+                volume = inner.get("vtt", 0)
+                iv = inner.get("iv", greeks.get("iv", 0.0))
                 
-                # 4. Extract Volume
-                volume = inner.get("vtt") or inner.get("total_volume_traded") or 0
+                ds = datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp() # IST timestamp
+                # 4. Packed Array Transport (Binary-lite)
+                # Format: ["t", key, ltp, v, iv, delta, theta, ts]
+                msg = [
+                    "t", 
+                    instrument_key, 
+                    float(ltp), 
+                    int(volume), 
+                    round(float(iv or 0.0) * 100, 2),
+                    round(float(greeks.get("delta") or 0.0), 4),
+                    round(float(greeks.get("theta") or 0.0), 2),
+                    int(ds)
+                ]
                 
-                # 5. Extract IV
-                iv = inner.get("iv") or greeks_data.get("iv") or 0.0
-                
-                if ltp:
-                    ds = datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp() # IST timestamp
-                    # Include Greeks if available
-                    msg = {
-                        "type": "market_data",
-                        "data": {
-                            "instrument_key": instrument_key,
-                            "ltp": float(ltp),
-                            "iv": float(iv or 0.0) * 100, # IV usually expressed as percentage in UI
-                            "delta": float(greeks_data.get("delta") or 0.0),
-                            "theta": float(greeks_data.get("theta") or 0.0),
-                            "volume": int(volume or 0),
-                            "candle": {
-                                "time": int(ds),
-                                "open": float(ltp),
-                                "high": float(ltp),
-                                "low": float(ltp),
-                                "close": float(ltp)
-                            }
-                        }
-                    }                    
-                    
-                    target_clients = instrument_subscriptions.get(instrument_key, set())
-                    for client_ws in list(target_clients):
-                        try:
-                            await client_ws.send_json(msg)
-                        except Exception:
-                            # Cleanup dead client will happen in disconnect
-                            pass
+                target_clients = instrument_subscriptions.get(instrument_key, set())
+                for client_ws in list(target_clients):
+                    try:
+                        await client_ws.send_json(msg)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.error(f"Error in _handle_market_tick: {e}")
 

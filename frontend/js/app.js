@@ -17,6 +17,54 @@ const IST_OFFSET = 0; // Standardize to UTC seconds
 
 let globalSearchResults = [];
 let selectedSearchIndex = -1;
+const domNodes = new Map(); // Performance Cache: instrument_key -> { row: HTMLElement, ltp: HTMLElement, pnl: HTMLElement, ... }
+const lastUiUpdate = { status: 0, volume: 0 }; // Throttling state
+const pendingUpdates = new Map(); // Batching Queue: key -> last_tick_data
+let isFlushing = false;
+
+// --- IndexedDB Cache System ---
+const DB_NAME = 'TradingTerminalDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'historical_data';
+
+async function initDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME);
+            }
+        };
+        request.onsuccess = (e) => resolve(e.target.result);
+        request.onerror = (e) => reject(e.target.error);
+    });
+}
+
+async function getCachedHistorical(key, interval) {
+    const db = await initDB();
+    return new Promise((resolve) => {
+        const transaction = db.transaction(STORE_NAME, 'readonly');
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.get(`${key}_${interval}`);
+        request.onsuccess = () => {
+            const result = request.result;
+            if (result && (Date.now() - result.timestamp < 300000)) { // 5 minute TTL
+                resolve(result.data);
+            } else {
+                resolve(null);
+            }
+        };
+        request.onerror = () => resolve(null);
+    });
+}
+
+async function setCachedHistorical(key, interval, data) {
+    const db = await initDB();
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    store.put({ timestamp: Date.now(), data }, `${key}_${interval}`);
+}
 
 // Services
 const chart = new ChartManager('tvchart');
@@ -96,63 +144,29 @@ function setupEventListeners() {
 }
 
 function handleWsMessage(msg) {
-    if (msg.type === 'market_data') {
-        const d = msg.data;
-        // 1. Update Chart/Instrument/Header
-        if (d.instrument_key === currentInstrumentKey) {
-            chart.updateCandle(d.candle, currentInterval);
-            updateElementText("inst-ltp", `₹${formatPrice(d.ltp)}`);
-            updateElementText("inst-volume", `Vol: ${(d.volume || 0).toLocaleString()}`);
-            
-            // Add pulse effect to header LTP
-            const ltpEl = document.getElementById("inst-ltp");
-            if (ltpEl) {
-                ltpEl.classList.add('pulse');
-                setTimeout(() => ltpEl.classList.remove('pulse'), 500);
-            }
+    let d;
+    if (Array.isArray(msg) && msg[0] === 't') {
+        // Packed format: ["t", key, ltp, v, iv, delta, theta, ts]
+        d = {
+            instrument_key: msg[1],
+            ltp: msg[2],
+            volume: msg[3],
+            iv: msg[4],
+            delta: msg[5],
+            theta: msg[6],
+            candle: { time: msg[7], close: msg[2], open: msg[2], high: msg[2], low: msg[2] }
+        };
+    } else if (msg.type === "market_data") {
+        d = msg.data;
+    }
+
+    if (d) {
+        // Queue for batched UI update
+        pendingUpdates.set(d.instrument_key, d);
+        if (!isFlushing) {
+            isFlushing = true;
+            requestAnimationFrame(flushUpdates);
         }
-
-        // 2. Update Index Status Bar (Global Nifty/BankNifty display)
-        if (d.instrument_key.includes("NSE_INDEX")) {
-            const indicator = document.getElementById("market-status-indicator");
-            if (indicator) {
-                const name = d.instrument_key.includes("Nifty 50") ? "NIFTY 50" : "BANK NIFTY";
-                const currentText = indicator.innerText;
-                const statusPart = currentText.includes("|") ? currentText.split("|")[0].trim() : "🟢 Market";
-                indicator.innerHTML = `${statusPart} | <span class="mono" style="color:var(--primary); font-weight:600;">${name}: ${formatPrice(d.ltp)}</span>`;
-            }
-        }
-
-        // 2. Update Position Rows
-        const posRows = document.querySelectorAll(`#positions-body tr[data-key="${d.instrument_key}"]`);
-        posRows.forEach(row => {
-            const ltpCell = row.querySelector('.ltp-cell');
-            if (ltpCell) {
-                ltpCell.innerText = `₹${formatPrice(d.ltp)}`;
-                ltpCell.classList.add('pulse');
-                setTimeout(() => ltpCell.classList.remove('pulse'), 500);
-            }
-            updatePositionPnL(row, d.ltp);
-        });
-
-        // 3. Update Option Chain Cells (LTP, Volume, Greeks)
-        const ocCells = document.querySelectorAll(`#oc-tbody [data-key="${d.instrument_key}"]`);
-        ocCells.forEach(cell => {
-            const field = cell.dataset.field;
-            if (field === 'ltp') {
-                cell.innerText = formatPrice(d.ltp);
-                cell.classList.add('pulse');
-                setTimeout(() => cell.classList.remove('pulse'), 500);
-            } else if (field === 'volume') {
-                cell.innerText = (d.volume || 0).toLocaleString();
-            } else if (field === 'iv') {
-                cell.innerText = (d.iv || 0).toFixed(1) + '%';
-            } else if (field === 'delta') {
-                cell.innerText = (d.delta || 0).toFixed(2);
-            } else if (field === 'theta') {
-                cell.innerText = (d.theta || 0).toFixed(2);
-            }
-        });
     } else if (msg.type === "portfolio_update") {
         refreshPositions();
         refreshAccountSummary();
@@ -178,14 +192,83 @@ function handleWsMessage(msg) {
     }
 }
 
+function flushUpdates() {
+    isFlushing = false;
+    const items = Array.from(pendingUpdates.values());
+    pendingUpdates.clear();
+
+    items.forEach(d => {
+        // 1. Update Chart (Primary)
+        if (d.instrument_key === currentInstrumentKey) {
+            chart.updateCandle(d.candle, currentInterval);
+            updateElementText("inst-ltp", `₹${formatPrice(d.ltp)}`);
+            if (Date.now() - lastUiUpdate.volume > 500) {
+                updateElementText("inst-volume", `Vol: ${(d.volume || 0).toLocaleString()}`);
+                lastUiUpdate.volume = Date.now();
+            }
+        }
+
+        // 2. Status Bar
+        if (d.instrument_key.includes("NSE_INDEX") && Date.now() - lastUiUpdate.status > 1000) {
+            const indicator = document.getElementById("market-status-indicator");
+            if (indicator) {
+                const name = d.instrument_key.includes("Nifty 50") ? "NIFTY 50" : "BANK NIFTY";
+                const currentText = indicator.innerText;
+                const statusPart = currentText.includes("|") ? currentText.split("|")[0].trim() : "🟢 Market";
+                indicator.innerHTML = `${statusPart} | <span class="mono" style="color:var(--primary); font-weight:600;">${name}: ${formatPrice(d.ltp)}</span>`;
+                lastUiUpdate.status = Date.now();
+            }
+        }
+
+        // 3. Positions (Cached)
+        const cachedPos = domNodes.get(`pos-${d.instrument_key}`);
+        if (cachedPos) {
+            if (cachedPos.ltp) {
+                cachedPos.ltp.innerText = `₹${formatPrice(d.ltp)}`;
+            }
+            updatePositionPnL(cachedPos, d.ltp);
+        }
+
+        // 4. Option Chain (Cached)
+        const cachedOC = domNodes.get(`oc-${d.instrument_key}`);
+        if (cachedOC) {
+            if (cachedOC.ltp) cachedOC.ltp.innerText = formatPrice(d.ltp);
+            if (cachedOC.volume) cachedOC.volume.innerText = (d.volume || 0).toLocaleString();
+            if (cachedOC.delta && d.delta !== undefined) cachedOC.delta.innerText = d.delta.toFixed(2);
+            if (cachedOC.theta && d.theta !== undefined) cachedOC.theta.innerText = d.theta.toFixed(2);
+            if (cachedOC.iv && d.iv !== undefined) cachedOC.iv.innerText = `${(d.iv || 0).toFixed(1)}%`;
+        }
+    });
+
+    // PnL Global update
+    updateGlobalPnL();
+}
+
+function updateGlobalPnL() {
+    let totalPnL = 0;
+    for (const [key, cached] of domNodes.entries()) {
+        if (key.startsWith('pos-')) {
+            const pnl = parseFloat(cached.pnl.innerText.replace('₹', '').replace(/,/g, '')) || 0;
+            totalPnL += pnl;
+        }
+    }
+    
+    const pnlEl = document.getElementById('account-pnl');
+    if (pnlEl) {
+        pnlEl.innerText = `₹${formatPrice(totalPnL)}`;
+        pnlEl.className = `mono ${totalPnL >= 0 ? 'text-success' : 'text-danger'}`;
+    }
+}
+
 // Helper function to update PnL for position rows
-function updatePositionPnL(row, ltp) {
-    const pnlCell = row.querySelector('.pnl-cell');
-    if (pnlCell && row.dataset.avg !== undefined && row.dataset.qty !== undefined) {
-        const avg = parseFloat(row.dataset.avg);
-        const qty = parseFloat(row.dataset.qty);
-        // Only update PnL if we have an open position. 
-        // For closed positions (qty=0), PnL is already realized and shouldn't change with LTP.
+function updatePositionPnL(container, ltp) {
+    // container can be a DOM row or a cached object { pnl: HTMLElement, avg: number, qty: number }
+    const isCached = !container.querySelector;
+    const pnlCell = isCached ? container.pnl : container.querySelector('.pnl-cell');
+    const avg = isCached ? container.avg : parseFloat(container.dataset.avg);
+    const qty = isCached ? container.qty : parseFloat(container.dataset.qty);
+
+    if (pnlCell && avg !== undefined && qty !== undefined) {
         if (qty !== 0) {
             const pnl = (ltp - avg) * qty;
             pnlCell.innerText = `₹${formatPrice(pnl)}`;
@@ -197,15 +280,20 @@ function updatePositionPnL(row, ltp) {
 
 async function fetchHistoricalCandles() {
     try {
+        // 1. Check IndexedDB Cache
+        const cached = await getCachedHistorical(currentInstrumentKey, currentInterval);
+        if (cached && cached.length > 0) {
+            chart.setData(cached);
+            return;
+        }
+
+        // 2. Fetch from API
         const data = await api.getHistoricalCandles(currentInstrumentKey, currentInterval);
-        // Backend returns {instrument_key, count, candles}
         if (data && data.candles) {
-            // Filter invalid candles and sort chronologically
             const valid = data.candles
                 .filter(c => c && c.time && c.open != null && c.high != null && c.low != null && c.close != null)
                 .sort((a, b) => a.time - b.time);
             
-            // Deduplicate (LightweightCharts requires unique time)
             const unique = [];
             let lastT = null;
             for (const c of valid) {
@@ -215,7 +303,12 @@ async function fetchHistoricalCandles() {
                 }
             }
             
+            // 3. Store in Cache & Update Chart
+            if (unique.length > 0) {
+                await setCachedHistorical(currentInstrumentKey, currentInterval, unique);
+            }
             chart.setData(unique);
+            
             if (unique.length === 0) {
                 showToast("No candle data found for this interval", "warning");
             }
@@ -302,6 +395,12 @@ async function refreshPositions() {
         const { data } = await api.getPositions();
         const list = document.getElementById("positions-body");
         if (!list) return;
+
+        // Clear only position-related cache
+        for (const key of domNodes.keys()) {
+            if (key.startsWith('pos-')) domNodes.delete(key);
+        }
+        
         list.innerHTML = "";
         
         if (!data || data.length === 0) {
@@ -327,14 +426,18 @@ async function refreshPositions() {
                 <td class="mono pnl-cell ${pnlClass}">₹${formatPrice(p.pnl)}</td>
             `;
             list.appendChild(row);
+
+            // Cache the row and key cells for fast WS updates
+            domNodes.set(`pos-${p.instrument_token}`, {
+                pnl: row.querySelector('.pnl-cell'),
+                ltp: row.querySelector('.ltp-cell'),
+                avg: p.average_price,
+                qty: p.quantity
+            });
         });
 
         // Update Global PnL in header
-        const pnlEl = document.getElementById('account-pnl');
-        if (pnlEl) {
-            pnlEl.innerText = `₹${formatPrice(totalPnL)}`;
-            pnlEl.className = `mono ${totalPnL >= 0 ? 'text-success' : 'text-danger'}`;
-        }
+        updateGlobalPnL();
 
         // Trigger dynamic subscription if this tab is active
         const activeTab = document.querySelector('.bottom-tab.active');
@@ -1045,10 +1148,8 @@ window.fetchOptionChain = async () => {
             renderOptionChain(res);
             
             // Subscribe to visible strikes (±10 around ATM)
-            // This is more efficient than the whole chain
             if (ws && ws.isConnected()) {
                 const keys = [];
-                // We'll subscribe to all for now as limits are high (2000 combined)
                 res.chain.forEach(row => {
                     if (row.ce?.instrument_key) keys.push(row.ce.instrument_key);
                     if (row.pe?.instrument_key) keys.push(row.pe.instrument_key);
@@ -1077,9 +1178,15 @@ function unsubscribeFromOptionChain() {
 }
 
 function renderOptionChain(data) {
-    const tbody = document.getElementById('oc-tbody');
-    if (!tbody) return;
-    tbody.innerHTML = "";
+    const list = document.getElementById('oc-tbody');
+    if (!list) return;
+
+    // Clear only OC-related cache
+    for (const key of domNodes.keys()) {
+        if (key.startsWith('oc-')) domNodes.delete(key);
+    }
+    
+    list.innerHTML = "";
     
     // Hide placeholder
     const placeholder = document.getElementById('oc-placeholder');
@@ -1146,7 +1253,27 @@ function renderOptionChain(data) {
             <td data-key="${pe.instrument_key}" data-field="theta" style="color:var(--text-muted); font-size:0.7rem;">${(pe.theta || 0).toFixed(2)}</td>
             <td data-key="${pe.instrument_key}" data-field="delta" style="color:var(--text-muted); font-size:0.7rem;">${(pe.delta || 0).toFixed(2)}</td>
         `;
-        tbody.appendChild(tr);
+        list.appendChild(tr);
+
+        // Cache references for fast WS updates
+        if (ce.instrument_key) {
+            domNodes.set(`oc-${ce.instrument_key}`, {
+                ltp: tr.querySelector(`[data-key="${ce.instrument_key}"][data-field="ltp"]`),
+                volume: tr.querySelector(`[data-key="${ce.instrument_key}"][data-field="volume"]`),
+                iv: tr.querySelector(`[data-key="${ce.instrument_key}"][data-field="iv"]`),
+                delta: tr.querySelector(`[data-key="${ce.instrument_key}"][data-field="delta"]`),
+                theta: tr.querySelector(`[data-key="${ce.instrument_key}"][data-field="theta"]`)
+            });
+        }
+        if (pe.instrument_key) {
+            domNodes.set(`oc-${pe.instrument_key}`, {
+                ltp: tr.querySelector(`[data-key="${pe.instrument_key}"][data-field="ltp"]`),
+                volume: tr.querySelector(`[data-key="${pe.instrument_key}"][data-field="volume"]`),
+                iv: tr.querySelector(`[data-key="${pe.instrument_key}"][data-field="iv"]`),
+                delta: tr.querySelector(`[data-key="${pe.instrument_key}"][data-field="delta"]`),
+                theta: tr.querySelector(`[data-key="${pe.instrument_key}"][data-field="theta"]`)
+            });
+        }
     });
 
     // Auto-scroll to ATM
