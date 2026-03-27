@@ -3,7 +3,7 @@
  */
 
 import { api } from './api.js';
-import { showToast, switchTab, updateElementText, formatPrice } from './ui.js';
+import { showToast, updateElementText, formatPrice } from './ui.js';
 import { EngineWS } from './ws.js';
 import { ChartManager } from './chart.js';
 
@@ -96,38 +96,62 @@ function setupEventListeners() {
 }
 
 function handleWsMessage(msg) {
-    if (msg.type !== 'market_data') console.log("WS Message:", msg);
-    switch (msg.type) {
-        case 'status':
-            updateEngineStatus(msg.data);
-            break;
-        case 'new_signal':
-            addLog(`🎯 Signal: ${msg.data.action} on ${msg.data.instrument}`, 'info');
-            showToast(`New Signal: ${msg.data.action} on ${msg.data.instrument}`);
-            refreshSignals();
-            break;
-        case 'trade_executed':
-            addLog(`💰 Trade: ${msg.data.action} @ ${msg.data.price}`, 'success');
-            showToast(`Trade Executed: ${msg.data.action}`, 'success');
-            refreshTrades();
-            refreshPositions();
-            break;
-        case 'market_data':
-            if (msg.data && msg.data.instrument_key === currentInstrumentKey) {
-                // Update ticker price in header
-                if (msg.data.ltp) {
-                    updateElementText('current-instrument', `${currentInstrumentName} - ₹${formatPrice(msg.data.ltp)}`);
-                }
-                const c = msg.data.candle;
-                if (c && c.time && c.open != null && c.high != null && c.low != null && c.close != null) {
-                    chart.updateCandle({ ...c, time: c.time + IST_OFFSET }, currentInterval);
+    if (msg.type === "market_data") {
+        const { instrument_key, ltp, candle } = msg.data;
+        
+        // 1. Update Chart if this is the active instrument
+        if (instrument_key === currentInstrumentKey) {
+            updateElementText("current-instrument", `${currentInstrumentName} - ₹${formatPrice(ltp)}`); // Changed from ticker-price to current-instrument
+            if (candle && candle.time && candle.open != null && candle.high != null && candle.low != null && candle.close != null) {
+                chart.updateCandle({ ...candle, time: candle.time + IST_OFFSET }, currentInterval);
+            }
+        }
+
+        // 2. Update Positions Table LTP/PnL
+        const rows = document.querySelectorAll(`#positions-body tr[data-key="${instrument_key}"]`);
+        rows.forEach(row => {
+            const ltpCell = row.querySelector('.ltp-cell');
+            const pnlCell = row.querySelector('.pnl-cell');
+            if (ltpCell) {
+                ltpCell.innerText = `₹${formatPrice(ltp)}`;
+                // Add a brief pulse effect
+                ltpCell.style.color = "var(--primary)";
+                setTimeout(() => ltpCell.style.color = "", 300);
+            }
+            if (pnlCell && row.dataset.avg !== undefined && row.dataset.qty !== undefined) {
+                const avg = parseFloat(row.dataset.avg);
+                const qty = parseFloat(row.dataset.qty);
+                // Only update PnL if we have an open position. 
+                // For closed positions (qty=0), PnL is already realized and shouldn't change with LTP.
+                if (qty !== 0) {
+                    const pnl = (ltp - avg) * qty;
+                    pnlCell.innerText = `₹${formatPrice(pnl)}`;
+                    pnlCell.className = `mono pnl-cell ${pnl >= 0 ? 'text-success' : 'text-danger'}`;
                 }
             }
-            break;
-        case 'portfolio_update':
-            refreshPositions();
-            refreshAccountSummary();
-            break;
+        });
+    } else if (msg.type === "portfolio_update") {
+        refreshPositions();
+        refreshAccountSummary();
+    } else {
+        // For other message types, log and handle via switch
+        console.log("WS Message:", msg);
+        switch (msg.type) {
+            case 'status':
+                updateEngineStatus(msg.data);
+                break;
+            case 'new_signal':
+                addLog(`🎯 Signal: ${msg.data.action} on ${msg.data.instrument}`, 'info');
+                showToast(`New Signal: ${msg.data.action} on ${msg.data.instrument}`);
+                refreshSignals();
+                break;
+            case 'trade_executed':
+                addLog(`💰 Trade: ${msg.data.action} @ ${msg.data.price}`, 'success');
+                showToast(`Trade Executed: ${msg.data.action}`, 'success');
+                refreshTrades();
+                refreshPositions();
+                break;
+        }
     }
 }
 
@@ -165,11 +189,9 @@ async function fetchHistoricalCandles() {
 
 
 async function selectInstrument(key, name) {
-    // Unsubscribe from old
-    if (currentInstrumentKey) {
-        ws.send({ action: 'unsubscribe', instrument_key: currentInstrumentKey });
-    }
-
+    const oldKey = currentInstrumentKey;
+    
+    // 1. Update state
     currentInstrumentKey = key;
     currentInstrumentName = name;
     localStorage.setItem("currentInstrumentKey", key);
@@ -178,7 +200,12 @@ async function selectInstrument(key, name) {
     updateElementText('current-instrument', name);
     updateElementText('oc-instrument-name', name); // Sync option chain header
     
-    // Subscribe to new
+    // 2. Unsubscribe from old if appropriate
+    if (oldKey && shouldUnsubscribe(oldKey)) {
+        ws.send({ action: 'unsubscribe', instrument_key: oldKey });
+    }
+
+    // 3. Subscribe to new
     ws.send({ action: 'subscribe', instrument_key: currentInstrumentKey });
     
     chart.clear();
@@ -242,17 +269,27 @@ async function refreshPositions() {
         
         data.forEach(p => {
             const row = document.createElement("tr");
+            row.dataset.key = p.instrument_token;
+            row.dataset.avg = p.average_price;
+            row.dataset.qty = p.quantity;
+
             const pnlClass = p.pnl >= 0 ? "text-success" : "text-danger";
             row.innerHTML = `
                 <td class="mono" style="font-size:0.75rem">${p.tradingsymbol}</td>
                 <td>${p.quantity}</td>
                 <td><span class="badge ${p.quantity > 0 ? 'buy' : 'sell'}">${p.quantity > 0 ? 'BUY' : 'SELL'}</span></td>
                 <td class="mono">₹${formatPrice(p.average_price)}</td>
-                <td class="mono">₹${formatPrice(p.last_price)}</td>
-                <td class="mono ${pnlClass}">₹${formatPrice(p.pnl)}</td>
+                <td class="mono ltp-cell">₹${formatPrice(p.last_price)}</td>
+                <td class="mono pnl-cell ${pnlClass}">₹${formatPrice(p.pnl)}</td>
             `;
             list.appendChild(row);
         });
+
+        // Trigger dynamic subscription if this tab is active
+        const activeTab = document.querySelector('.bottom-tab.active');
+        if (activeTab && activeTab.innerText.toLowerCase().includes('position')) {
+            subscribeToPositions();
+        }
     } catch (e) {
         console.error("Failed to refresh positions", e);
     }
@@ -410,6 +447,41 @@ async function checkAuth() {
     }
 }
 
+/**
+ * Logic to determine if an instrument should be unsubscribed.
+ * @param {string} key - The instrument key to check.
+ * @param {boolean} leavingPositions - Force unsubscribe if leaving the positions tab.
+ * @returns {boolean} - True if it's safe to unsubscribe.
+ */
+function shouldUnsubscribe(key, leavingPositions = false) {
+    // Never unsubscribe from the active chart instrument
+    if (key === currentInstrumentKey) return false;
+
+    // Check if it's visible in the active Positions tab
+    // If leavingPositions is true, we ignore the 'active' class on the tab
+    if (!leavingPositions) {
+        const activeTab = document.querySelector('.bottom-tab.active');
+        const isPositionsActive = activeTab && activeTab.innerText.toLowerCase().includes('position');
+        if (isPositionsActive) {
+            const inPositions = document.querySelector(`#positions-body tr[data-key="${key}"]`);
+            if (inPositions) return false;
+        }
+    }
+    
+    return true;
+}
+
+function unsubscribeFromPositions() {
+    if (!ws || !ws.isConnected()) return;
+    const rows = document.querySelectorAll('#positions-body tr[data-key]');
+    rows.forEach(row => {
+        const key = row.dataset.key;
+        if (key && shouldUnsubscribe(key, true)) {
+            ws.send({ action: 'unsubscribe', instrument_key: key });
+        }
+    });
+}
+
 function updateClock() {
     const clock = document.getElementById('clock');
     if (clock) {
@@ -427,6 +499,29 @@ function addLog(msg, type = "info") {
     logViewer.appendChild(div);
     const pnl = document.getElementById('tab-activity');
     if (pnl) pnl.scrollTop = pnl.scrollHeight;
+}
+
+function subscribeToPositions() {
+    if (!ws || !ws.isConnected()) return;
+    const rows = document.querySelectorAll('#positions-body tr[data-key]');
+    rows.forEach(row => {
+        const key = row.dataset.key;
+        if (key) {
+            ws.send({ action: 'subscribe', instrument_key: key });
+        }
+    });
+}
+
+function unsubscribeFromPositions() {
+    if (!ws || !ws.isConnected()) return;
+    const rows = document.querySelectorAll('#positions-body tr[data-key]');
+    rows.forEach(row => {
+        const key = row.dataset.key;
+        // Don't unsubscribe if it's the active chart instrument
+        if (key && key !== currentInstrumentKey) {
+            ws.send({ action: 'unsubscribe', instrument_key: key });
+        }
+    });
 }
 
 // Window globals for legacy onclick handlers
@@ -827,6 +922,56 @@ window.switchMainView = (view) => {
     if (view === 'options') fetchOptionChain();
     if (view === 'settings') refreshStatus();
 };
+
+function switchTab(containerId, contentId) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    
+    // Manage dynamic subscriptions for bottom panel
+    if (containerId === 'bottom-panel') {
+        const isLeavingPositions = document.querySelector('.bottom-tab.active')?.innerText.toLowerCase().includes('position');
+        const isEnteringPositions = contentId === 'tab-positions';
+
+        if (isLeavingPositions && !isEnteringPositions) {
+            unsubscribeFromPositions();
+        } else if (isEnteringPositions) {
+            subscribeToPositions();
+        }
+    }
+
+    // 1. Reset buttons
+    container.querySelectorAll('.bottom-tab, .settings-tab, .sidebar-link').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    
+    // 2. Hide all content containers within this scope
+    // Use more specific selectors if needed, but for now we hide everything in the container
+    const allContents = container.querySelectorAll('.bottom-content, .settings-content, .tab-content, .settings-view-container');
+    allContents.forEach(content => {
+        content.classList.remove('active');
+        // Ensure display:none is forced if class removal isn't enough
+        if (content.classList.contains('bottom-content') || content.classList.contains('settings-content')) {
+            content.style.display = 'none';
+        }
+    });
+
+    // 3. Activate the clicked tab button
+    // Find button that contains the contentId in its onclick
+    const clickedButton = container.querySelector(`[onclick*="${contentId.replace('tab-', '')}"]`);
+    if (clickedButton) {
+        clickedButton.classList.add('active');
+    }
+
+    // 4. Activate the corresponding content
+    const targetContent = document.getElementById(contentId);
+    if (targetContent) {
+        targetContent.classList.add('active');
+        // Force display:block for visibility
+        if (targetContent.classList.contains('bottom-content') || targetContent.classList.contains('settings-content')) {
+            targetContent.style.display = 'block';
+        }
+    }
+}
 
 window.switchSettingsTab = (tabId) => {
     // Hide all contents

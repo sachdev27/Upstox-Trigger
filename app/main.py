@@ -27,8 +27,12 @@ from app.settings_routes import router as config_router
 
 logger = logging.getLogger(__name__)
 
-# Track WebSocket clients for live updates
+# Track WebSocket clients and their specific instrument interests
 ws_clients: set[WebSocket] = set()
+# instrument_key -> set of WebSockets
+instrument_subscriptions: dict[str, set[WebSocket]] = {}
+# WebSocket -> set of instrument_keys
+client_subscriptions: dict[WebSocket, set[str]] = {}
 
 
 @asynccontextmanager
@@ -97,17 +101,18 @@ async def lifespan(app: FastAPI):
         if not data:
             return
             
+        if not isinstance(data, dict):
+            return
+            
         # SDK V3 usually passes a dict with 'feeds'
-        # But let's handle cases where it might be the feed itself or a different wrapper
-        feeds = data if isinstance(data, dict) and "feeds" not in data else data.get("feeds", {})
+        feeds = data.get("feeds", {})
         if not feeds:
-            # Try to see if data itself has the feed keys (e.g. "NSE_EQ|...")
-            if isinstance(data, dict) and any("|" in k for k in data.keys()):
+            # Fallback: Check if the top-level keys look like instrument keys (e.g. "NSE_EQ|...")
+            if any("|" in k for k in data.keys()):
                 feeds = data
             else:
                 return
 
-        session = get_session()
         try:
             for instrument_key, feed in feeds.items():
                 # 1. Extract LTP
@@ -127,30 +132,9 @@ async def lifespan(app: FastAPI):
                     ltp = feed.get("ltp") or feed.get("ltpc", {}).get("ltp")
                 
                 if ltp:
-                    now = datetime.now(timezone(timedelta(hours=5, minutes=30))) # IST
-                    
-                    # 2. Persist to DB
-                    # V3 volume is 'vtt' or inside ohlc, OI is in market_ff
-                    volume = market_ff.get("vtt") or market_ff.get("marketOHLC", {}).get("volume") or market_ff.get("market_ohlc", {}).get("volume")
-                    oi = market_ff.get("oi") or market_ff.get("marketOHLC", {}).get("oi") or market_ff.get("market_ohlc", {}).get("oi")
-                    
-                    tick = MarketTick(
-                        instrument_key=instrument_key,
-                        timestamp=now,
-                        last_price=ltp,
-                        volume=int(volume) if volume else 0,
-                        oi=float(oi) if oi else 0.0
-                    )
-                    session.add(tick)
-                    
-                    # 3. Broadcast to frontend for chart
-                    # Lightweight Charts update needs { time: unix_timestamp_seconds, open, high, low, close }
-                    # We'll use a simplified tick update where OHLC is just LTP
-                    # The frontend's Lighthouse Charts will handle merging this into the current bar
-                    
-                    # Add IST offset for chart visualization if necessary (matching app.js)
-                    ds = now.timestamp()
-                    
+                    ds = datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp() # IST timestamp
+                    # 2. Targeted Broadcast (Skip DB insertion for efficiency)
+                    # Only send to clients who actually subscribed to THIS instrument
                     msg = {
                         "type": "market_data",
                         "data": {
@@ -165,14 +149,18 @@ async def lifespan(app: FastAPI):
                             }
                         }
                     }
-                    await broadcast_to_clients(msg)
+                    
+                    target_clients = instrument_subscriptions.get(instrument_key, set())
+                    for ws in list(target_clients):
+                        try:
+                            await ws.send_json(msg)
+                        except Exception:
+                            # Cleanup dead client will happen in disconnect
+                            pass
             
             session.commit()
         except Exception as e:
             logger.error(f"Error in _handle_market_tick: {e}")
-            session.rollback()
-        finally:
-            session.close()
 
     # We need to run the streamer's event loop in a way that doesn't block FastAPI
     # The SDK streamer.connect() is often blocking or starts its own thread.
@@ -183,14 +171,13 @@ async def lifespan(app: FastAPI):
 
     streamer.on_tick = sync_on_tick
     
-    # Start streaming for some defaults
-    default_instruments = [settings.NIFTY, settings.BANKNIFTY]
+    # Initialize market data streamer (dynamic subscriptions started from frontend)
     try:
-        streamer.start(default_instruments)
+        streamer.start([])
         app.state.market_streamer = streamer
-        logger.info(f"📡 Market Data Streamer started for {default_instruments}")
+        logger.info("📡 Market Data Streamer started (Ready for dynamic subscriptions)")
     except Exception as e:
-        logger.error(f"❌ Failed to start portfolio streamer: {e}")
+        logger.error(f"❌ Failed to start market streamer: {e}")
 
     # Start Portfolio Streamer
     # Portfolio streamers MUST use Live configuration for notifications
@@ -298,27 +285,61 @@ async def websocket_endpoint(ws: WebSocket):
 
     try:
         while True:
-            # Keep connection alive and listen for client messages
             data = await ws.receive_text()
-            # Client can send commands like {"action": "get_status"}
             try:
                 msg = json.loads(data)
-                if msg.get("action") == "get_status":
+                action = msg.get("action")
+                key = msg.get("instrument_key")
+                
+                if action == "get_status":
                     from app.engine import get_engine
                     status = get_engine().get_status()
                     await ws.send_json({"type": "status", "data": status})
-                elif msg.get("action") == "subscribe":
-                    key = msg.get("instrument_key")
-                    if key and hasattr(app.state, "market_streamer"):
-                        app.state.market_streamer.subscribe([key])
-                        logger.info(f"WS Client requested subscription to {key}")
-                elif msg.get("action") == "unsubscribe":
-                    key = msg.get("instrument_key")
-                    if key and hasattr(app.state, "market_streamer"):
-                        app.state.market_streamer.unsubscribe([key])
+                
+                elif action == "subscribe" and key:
+                    # 1. Update internal registry
+                    if key not in instrument_subscriptions:
+                        instrument_subscriptions[key] = set()
+                    instrument_subscriptions[key].add(ws)
+                    
+                    if ws not in client_subscriptions:
+                        client_subscriptions[ws] = set()
+                    client_subscriptions[ws].add(key)
+                    
+                    # 2. Inform SDK if this is the first interest
+                    if len(instrument_subscriptions[key]) == 1:
+                        if hasattr(app.state, "market_streamer"):
+                            app.state.market_streamer.subscribe([key])
+                            logger.info(f"📡 SDK Subscription started for: {key} (First Client)")
+                
+                elif action == "unsubscribe" and key:
+                    # 1. Update internal registry
+                    if key in instrument_subscriptions:
+                        instrument_subscriptions[key].discard(ws)
+                        if ws in client_subscriptions:
+                            client_subscriptions[ws].discard(key)
+                            
+                        # 2. Inform SDK if NO ONE is interested anymore
+                        if len(instrument_subscriptions[key]) == 0:
+                            del instrument_subscriptions[key]
+                            if hasattr(app.state, "market_streamer"):
+                                app.state.market_streamer.unsubscribe([key])
+                                logger.info(f"🛑 SDK Subscription stopped for: {key} (No more clients)")
+                                
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect:
+        # Complete cleanup for this client
+        keys = client_subscriptions.pop(ws, set())
+        for key in keys:
+            if key in instrument_subscriptions:
+                instrument_subscriptions[key].discard(ws)
+                if len(instrument_subscriptions[key]) == 0:
+                    del instrument_subscriptions[key]
+                    if hasattr(app.state, "market_streamer"):
+                        app.state.market_streamer.unsubscribe([key])
+                        logger.info(f"🛑 SDK Subscription stopped for: {key} (Client disconnected)")
+        
         ws_clients.discard(ws)
         logger.info(f"WebSocket client disconnected. Total: {len(ws_clients)}")
 

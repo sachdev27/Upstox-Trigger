@@ -49,8 +49,12 @@ export class EngineWS {
     }
 
     send(data) {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (this.isConnected()) {
             this.ws.send(JSON.stringify(data));
         }
+    }
+
+    isConnected() {
+        return this.ws && this.ws.readyState === WebSocket.OPEN;
     }
 }

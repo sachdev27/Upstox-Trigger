@@ -25,26 +25,6 @@ export function formatPrice(p) {
     return Number(p).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export function switchTab(tabContainerId, activeTabId) {
-    const container = document.getElementById(tabContainerId);
-    if (!container) return;
-    
-    // 1. Update Content Panes
-    const contents = container.querySelectorAll('.bottom-content, .settings-content');
-    contents.forEach(c => c.classList.remove('active'));
-    
-    const activeContent = document.getElementById(activeTabId);
-    if (activeContent) activeContent.classList.add('active');
-
-    // 2. Update Tab Buttons (Assuming they are in a sibling container or same container)
-    const tabs = container.querySelectorAll('.bottom-tab, .settings-tab');
-    tabs.forEach(t => {
-        const idMatch = t.getAttribute('onclick')?.includes(activeTabId.replace('tab-', ''));
-        if (idMatch) t.classList.add('active');
-        else t.classList.remove('active');
-    });
-}
-
 export function updateElementText(id, text) {
     const el = document.getElementById(id);
     if (el) el.innerText = text;
