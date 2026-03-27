@@ -444,12 +444,33 @@ class MarketDataService:
                 batch = ",".join(instr_keys[i:i+50])
                 res = self.get_full_quote(batch)
                 if res:
-                    # RE-MAP: Upstox quote data keys are "{exchange}:{symbol}" (e.g. NSE_FO:NIFTY24DEC25000CE)
-                    # We need to map them by instrument_token (which matches our instrument_key)
+                    # RE-MAP: Upstox quote data keys can be the symbol name or instrument_token
+                    # We need to map them back to the original instrument_token/key
                     for k, val in res.items():
+                        # Option 1: Try k directly
+                        if k in instr_keys:
+                            quote_data[k] = val
+                        
+                        # Option 2: Try instrument_token inside val
                         token = val.get("instrument_token")
-                        if token:
+                        if token and token in instr_keys:
                             quote_data[token] = val
+                            
+                        # Option 3: Try to find which instrument_key matches this token
+                        # Some keys are NSE_FO|54479 but token is 54479
+                        if token:
+                            for ik in instr_keys:
+                                if "|" in ik and ik.split("|")[-1] == str(token):
+                                    quote_data[ik] = val
+                                    break
+                        
+                        # Option 4: Fallback for symbol matching
+                        if ":" in k:
+                            sym = k.split(":")[-1]
+                            for ik in instr_keys:
+                                if ik.endswith(sym):
+                                    quote_data[ik] = val
+                                    break
 
             # 4. Group by strike
             strikes = {}

@@ -54,12 +54,12 @@
             <!-- Chart Container -->
             <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px; background: var(--bg-dark); border-bottom: 1px solid var(--border-color);">
                 <div style="display: flex; gap: 4px;">
-                    <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('1minute')">1m</button>
-                    <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('5minute')">5m</button>
-                    <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('15minute')">15m</button>
-                    <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('30minute')">30m</button>
-                    <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('1hour')">1H</button>
-                    <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('day')">1D</button>
+                    <button id="tf-1minute" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('1minute')">1m</button>
+                    <button id="tf-5minute" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('5minute')">5m</button>
+                    <button id="tf-15minute" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('15minute')">15m</button>
+                    <button id="tf-30minute" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('30minute')">30m</button>
+                    <button id="tf-1hour" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('1hour')">1H</button>
+                    <button id="tf-day" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="setChartTimeframe('day')">1D</button>
                     <div id="current-instrument" style="margin-left: 10px; font-weight: 600; font-size: 0.85rem; color: var(--primary); align-self: center;">Select Symbol</div>
                 </div>
                 <div style="display: flex; gap: 8px; margin-right: 12px; align-items: center;">

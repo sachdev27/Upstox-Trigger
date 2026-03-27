@@ -660,3 +660,15 @@ input:checked + .toggle-slider:before {
     border-bottom: 1px solid var(--border-color);
     padding-bottom: 8px;
 }
+
+/* Real-time pulse effect */
+@keyframes pulse {
+    0% { background-color: rgba(92, 111, 255, 0.2); transform: scale(1.02); }
+    100% { background-color: transparent; transform: scale(1); }
+}
+
+.pulse {
+    animation: pulse 0.5s ease-out;
+    border-radius: 4px;
+}
+

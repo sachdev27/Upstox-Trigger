@@ -13,7 +13,7 @@ let currentInstrumentName = localStorage.getItem("currentInstrumentName") || "Ni
 let currentInterval = localStorage.getItem("currentInterval") || "15minute";
 let engineActive = false;
 let dynamicSchemas = {};
-const IST_OFFSET = 19800; // 5.5 hours for IST display
+const IST_OFFSET = 0; // Standardize to UTC seconds
 
 let globalSearchResults = [];
 let selectedSearchIndex = -1;
@@ -44,19 +44,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     refreshOrderBook();
     updateClock();
     await fetchStrategySchemas();
-
+    
+    // Restore UI from localStorage
+    updateElementText('current-instrument', currentInstrumentName);
+    updateElementText('oc-instrument-name', currentInstrumentName);
+    updateElementText('inst-ltp', `₹0.00`);
+    
     // Set active state for persisted timeframe
     const activeBtn = document.getElementById(`tf-${currentInterval}`);
     if (activeBtn) {
         activeBtn.classList.remove('btn-outline');
         activeBtn.classList.add('btn-primary');
     }
-    
-    // Subscribe to current instrument (Handled by onConnect, but this is a backup for reconnects)
-    if (ws.ws && ws.ws.readyState === WebSocket.OPEN) {
-        ws.send({ action: 'subscribe', instrument_key: currentInstrumentKey });
-    }
-    
+
     // Set up listeners
     setupEventListeners();
     setupGlobalSearch();
@@ -96,38 +96,61 @@ function setupEventListeners() {
 }
 
 function handleWsMessage(msg) {
-    if (msg.type === "market_data") {
-        const { instrument_key, ltp, candle } = msg.data;
-        
-        // 1. Update Chart if this is the active instrument
-        if (instrument_key === currentInstrumentKey) {
-            updateElementText("current-instrument", `${currentInstrumentName} - ₹${formatPrice(ltp)}`); // Changed from ticker-price to current-instrument
-            if (candle && candle.time && candle.open != null && candle.high != null && candle.low != null && candle.close != null) {
-                chart.updateCandle({ ...candle, time: candle.time + IST_OFFSET }, currentInterval);
+    if (msg.type === 'market_data') {
+        const d = msg.data;
+        // 1. Update Chart/Instrument/Header
+        if (d.instrument_key === currentInstrumentKey) {
+            chart.updateCandle(d.candle, currentInterval);
+            updateElementText("inst-ltp", `₹${formatPrice(d.ltp)}`);
+            updateElementText("inst-volume", `Vol: ${(d.volume || 0).toLocaleString()}`);
+            
+            // Add pulse effect to header LTP
+            const ltpEl = document.getElementById("inst-ltp");
+            if (ltpEl) {
+                ltpEl.classList.add('pulse');
+                setTimeout(() => ltpEl.classList.remove('pulse'), 500);
             }
         }
 
-        // 2. Update Positions Table LTP/PnL
-        const rows = document.querySelectorAll(`#positions-body tr[data-key="${instrument_key}"]`);
-        rows.forEach(row => {
-            const ltpCell = row.querySelector('.ltp-cell');
-            const pnlCell = row.querySelector('.pnl-cell');
-            if (ltpCell) {
-                ltpCell.innerText = `₹${formatPrice(ltp)}`;
-                // Add a brief pulse effect
-                ltpCell.style.color = "var(--primary)";
-                setTimeout(() => ltpCell.style.color = "", 300);
+        // 2. Update Index Status Bar (Global Nifty/BankNifty display)
+        if (d.instrument_key.includes("NSE_INDEX")) {
+            const indicator = document.getElementById("market-status-indicator");
+            if (indicator) {
+                const name = d.instrument_key.includes("Nifty 50") ? "NIFTY 50" : "BANK NIFTY";
+                const currentText = indicator.innerText;
+                const statusPart = currentText.includes("|") ? currentText.split("|")[0].trim() : "🟢 Market";
+                indicator.innerHTML = `${statusPart} | <span class="mono" style="color:var(--primary); font-weight:600;">${name}: ${formatPrice(d.ltp)}</span>`;
             }
-            if (pnlCell && row.dataset.avg !== undefined && row.dataset.qty !== undefined) {
-                const avg = parseFloat(row.dataset.avg);
-                const qty = parseFloat(row.dataset.qty);
-                // Only update PnL if we have an open position. 
-                // For closed positions (qty=0), PnL is already realized and shouldn't change with LTP.
-                if (qty !== 0) {
-                    const pnl = (ltp - avg) * qty;
-                    pnlCell.innerText = `₹${formatPrice(pnl)}`;
-                    pnlCell.className = `mono pnl-cell ${pnl >= 0 ? 'text-success' : 'text-danger'}`;
-                }
+        }
+
+        // 2. Update Position Rows
+        const posRows = document.querySelectorAll(`#positions-body tr[data-key="${d.instrument_key}"]`);
+        posRows.forEach(row => {
+            const ltpCell = row.querySelector('.ltp-cell');
+            if (ltpCell) {
+                ltpCell.innerText = `₹${formatPrice(d.ltp)}`;
+                ltpCell.classList.add('pulse');
+                setTimeout(() => ltpCell.classList.remove('pulse'), 500);
+            }
+            updatePositionPnL(row, d.ltp);
+        });
+
+        // 3. Update Option Chain Cells (LTP, Volume, Greeks)
+        const ocCells = document.querySelectorAll(`#oc-tbody [data-key="${d.instrument_key}"]`);
+        ocCells.forEach(cell => {
+            const field = cell.dataset.field;
+            if (field === 'ltp') {
+                cell.innerText = formatPrice(d.ltp);
+                cell.classList.add('pulse');
+                setTimeout(() => cell.classList.remove('pulse'), 500);
+            } else if (field === 'volume') {
+                cell.innerText = (d.volume || 0).toLocaleString();
+            } else if (field === 'iv') {
+                cell.innerText = (d.iv || 0).toFixed(1) + '%';
+            } else if (field === 'delta') {
+                cell.innerText = (d.delta || 0).toFixed(2);
+            } else if (field === 'theta') {
+                cell.innerText = (d.theta || 0).toFixed(2);
             }
         });
     } else if (msg.type === "portfolio_update") {
@@ -155,6 +178,23 @@ function handleWsMessage(msg) {
     }
 }
 
+// Helper function to update PnL for position rows
+function updatePositionPnL(row, ltp) {
+    const pnlCell = row.querySelector('.pnl-cell');
+    if (pnlCell && row.dataset.avg !== undefined && row.dataset.qty !== undefined) {
+        const avg = parseFloat(row.dataset.avg);
+        const qty = parseFloat(row.dataset.qty);
+        // Only update PnL if we have an open position. 
+        // For closed positions (qty=0), PnL is already realized and shouldn't change with LTP.
+        if (qty !== 0) {
+            const pnl = (ltp - avg) * qty;
+            pnlCell.innerText = `₹${formatPrice(pnl)}`;
+            pnlCell.className = `mono pnl-cell ${pnl >= 0 ? 'text-success' : 'text-danger'}`;
+        }
+    }
+}
+
+
 async function fetchHistoricalCandles() {
     try {
         const data = await api.getHistoricalCandles(currentInstrumentKey, currentInterval);
@@ -175,7 +215,7 @@ async function fetchHistoricalCandles() {
                 }
             }
             
-            chart.setData(unique.map(c => ({ ...c, time: c.time + IST_OFFSET })));
+            chart.setData(unique);
             if (unique.length === 0) {
                 showToast("No candle data found for this interval", "warning");
             }
@@ -198,7 +238,9 @@ async function selectInstrument(key, name) {
     localStorage.setItem("currentInstrumentName", name);
 
     updateElementText('current-instrument', name);
-    updateElementText('oc-instrument-name', name); // Sync option chain header
+    updateElementText('oc-instrument-name', name);
+    updateElementText('inst-ltp', '₹--');
+    updateElementText('inst-volume', 'Vol: --');
     
     // 2. Unsubscribe from old if appropriate
     if (oldKey && shouldUnsubscribe(oldKey)) {
@@ -248,8 +290,8 @@ async function refreshAccountSummary() {
     try {
         const data = await api.getFunds();
         const funds = data.data || {};
-        updateElementText('account-balance', `₹${formatPrice(funds.utilised_margin || 0)}`);
-        updateElementText('account-pnl', `₹${formatPrice(funds.pnl || 0)}`);
+        // Use available_margin for a more useful "Capital" display
+        updateElementText('account-balance', `₹${formatPrice(funds.available_margin || 0)}`);
     } catch (e) {
         console.error("Failed to fetch funds", e);
     }
@@ -267,7 +309,9 @@ async function refreshPositions() {
             return;
         }
         
+        let totalPnL = 0;
         data.forEach(p => {
+            totalPnL += (p.pnl || 0);
             const row = document.createElement("tr");
             row.dataset.key = p.instrument_token;
             row.dataset.avg = p.average_price;
@@ -284,6 +328,13 @@ async function refreshPositions() {
             `;
             list.appendChild(row);
         });
+
+        // Update Global PnL in header
+        const pnlEl = document.getElementById('account-pnl');
+        if (pnlEl) {
+            pnlEl.innerText = `₹${formatPrice(totalPnL)}`;
+            pnlEl.className = `mono ${totalPnL >= 0 ? 'text-success' : 'text-danger'}`;
+        }
 
         // Trigger dynamic subscription if this tab is active
         const activeTab = document.querySelector('.bottom-tab.active');
@@ -512,17 +563,7 @@ function subscribeToPositions() {
     });
 }
 
-function unsubscribeFromPositions() {
-    if (!ws || !ws.isConnected()) return;
-    const rows = document.querySelectorAll('#positions-body tr[data-key]');
-    rows.forEach(row => {
-        const key = row.dataset.key;
-        // Don't unsubscribe if it's the active chart instrument
-        if (key && key !== currentInstrumentKey) {
-            ws.send({ action: 'unsubscribe', instrument_key: key });
-        }
-    });
-}
+
 
 // Window globals for legacy onclick handlers
 window.selectInstrument = selectInstrument;
@@ -781,7 +822,7 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
             
             if (res.overlay && res.overlay.length > 0) {
                 const stData = res.overlay.filter(pt => pt.supertrend !== null).map(pt => ({
-                    time: Math.floor(pt.time) + IST_OFFSET,
+                    time: Math.floor(pt.time),
                     value: pt.supertrend,
                     color: pt.trend === 1 ? '#00d084' : '#ff4757'
                 }));
@@ -792,7 +833,7 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
                     const ds = pt.time;
                     if (lastTrend !== null && pt.trend !== lastTrend) {
                         markers.push({
-                            time: Math.floor(ds) + IST_OFFSET,
+                            time: Math.floor(ds),
                             position: pt.trend === 1 ? 'belowBar' : 'aboveBar',
                             color: pt.trend === 1 ? '#00d084' : '#ff4757',
                             shape: pt.trend === 1 ? 'arrowUp' : 'arrowDown',
@@ -937,6 +978,15 @@ function switchTab(containerId, contentId) {
         } else if (isEnteringPositions) {
             subscribeToPositions();
         }
+        
+        // Option Chain logic
+        const prevTabName = document.querySelector('.bottom-tab.active')?.innerText.toLowerCase() || "";
+        const isLeavingOptions = prevTabName.includes('option chain');
+        const isEnteringOptions = contentId === 'tab-options';
+        
+        if (isLeavingOptions && !isEnteringOptions) {
+            unsubscribeFromOptionChain();
+        }
     }
 
     // 1. Reset buttons
@@ -993,11 +1043,38 @@ window.fetchOptionChain = async () => {
         const res = await api.getOptionChain(currentInstrumentKey, expiry);
         if (res.status === 'success') {
             renderOptionChain(res);
+            
+            // Subscribe to visible strikes (±10 around ATM)
+            // This is more efficient than the whole chain
+            if (ws && ws.isConnected()) {
+                const keys = [];
+                // We'll subscribe to all for now as limits are high (2000 combined)
+                res.chain.forEach(row => {
+                    if (row.ce?.instrument_key) keys.push(row.ce.instrument_key);
+                    if (row.pe?.instrument_key) keys.push(row.pe.instrument_key);
+                });
+                if (keys.length > 0) {
+                    ws.send({ action: 'subscribe', instrument_key: keys.join(',') });
+                }
+            }
         }
     } catch (e) {
         showToast("Failed to fetch option chain", "error");
     }
 };
+
+function unsubscribeFromOptionChain() {
+    if (!ws || !ws.isConnected()) return;
+    const cells = document.querySelectorAll('#oc-tbody [data-key]');
+    const keys = new Set();
+    cells.forEach(c => {
+        const k = c.dataset.key;
+        if (k && shouldUnsubscribe(k)) keys.add(k);
+    });
+    if (keys.size > 0) {
+        ws.send({ action: 'unsubscribe', instrument_key: Array.from(keys).join(',') });
+    }
+}
 
 function renderOptionChain(data) {
     const tbody = document.getElementById('oc-tbody');
@@ -1051,23 +1128,23 @@ function renderOptionChain(data) {
         }
         
         tr.innerHTML = `
-            <td style="color:var(--text-muted); font-size:0.7rem;">${(ce.delta || 0).toFixed(2)}</td>
-            <td style="color:var(--text-muted); font-size:0.7rem;">${(ce.theta || 0).toFixed(2)}</td>
-            <td style="color:var(--text-muted);">${(ce.iv || 0).toFixed(1)}%</td>
+            <td data-key="${ce.instrument_key}" data-field="delta" style="color:var(--text-muted); font-size:0.7rem;">${(ce.delta || 0).toFixed(2)}</td>
+            <td data-key="${ce.instrument_key}" data-field="theta" style="color:var(--text-muted); font-size:0.7rem;">${(ce.theta || 0).toFixed(2)}</td>
+            <td data-key="${ce.instrument_key}" data-field="iv" style="color:var(--text-muted);">${(ce.iv || 0).toFixed(1)}%</td>
             <td style="width: 60px;">
-                <div style="font-size:0.65rem; color: #8b8b9e;">${(ce.volume || 0).toLocaleString()}</div>
+                <div data-key="${ce.instrument_key}" data-field="volume" style="font-size:0.65rem; color: #8b8b9e;">${(ce.volume || 0).toLocaleString()}</div>
                 <div style="height:2px; background:#00d084; width:${Math.min(100, (ce.volume || 0)/1000)}%; opacity:0.5;"></div>
             </td>
-            <td style="font-weight:600; color:#10b981; background:${ceITM ? 'rgba(16,185,129,0.08)' : 'transparent'}">${ce.ltp ? formatPrice(ce.ltp) : '-'}</td>
+            <td data-key="${ce.instrument_key}" data-field="ltp" style="font-weight:600; color:#10b981; background:${ceITM ? 'rgba(16,185,129,0.08)' : 'transparent'}">${ce.ltp ? formatPrice(ce.ltp) : '-'}</td>
             <td style="background:var(--bg-dark); font-weight:700; border-left:1px solid var(--border-color); border-right:1px solid var(--border-color);">${row.strike_price}</td>
-            <td style="font-weight:600; color:#ef4444; background:${peITM ? 'rgba(239,68,68,0.08)' : 'transparent'}">${pe.ltp ? formatPrice(pe.ltp) : '-'}</td>
+            <td data-key="${pe.instrument_key}" data-field="ltp" style="font-weight:600; color:#ef4444; background:${peITM ? 'rgba(239,68,68,0.08)' : 'transparent'}">${pe.ltp ? formatPrice(pe.ltp) : '-'}</td>
             <td style="width: 60px;">
-                <div style="font-size:0.65rem; color: #8b8b9e;">${(pe.volume || 0).toLocaleString()}</div>
+                <div data-key="${pe.instrument_key}" data-field="volume" style="font-size:0.65rem; color: #8b8b9e;">${(pe.volume || 0).toLocaleString()}</div>
                 <div style="height:2px; background:#ef4444; width:${Math.min(100, (pe.volume || 0)/1000)}%; opacity:0.5;"></div>
             </td>
-            <td style="color:var(--text-muted);">${(pe.iv || 0).toFixed(1)}%</td>
-            <td style="color:var(--text-muted); font-size:0.7rem;">${(pe.theta || 0).toFixed(2)}</td>
-            <td style="color:var(--text-muted); font-size:0.7rem;">${(pe.delta || 0).toFixed(2)}</td>
+            <td data-key="${pe.instrument_key}" data-field="iv" style="color:var(--text-muted);">${(pe.iv || 0).toFixed(1)}%</td>
+            <td data-key="${pe.instrument_key}" data-field="theta" style="color:var(--text-muted); font-size:0.7rem;">${(pe.theta || 0).toFixed(2)}</td>
+            <td data-key="${pe.instrument_key}" data-field="delta" style="color:var(--text-muted); font-size:0.7rem;">${(pe.delta || 0).toFixed(2)}</td>
         `;
         tbody.appendChild(tr);
     });

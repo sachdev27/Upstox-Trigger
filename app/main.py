@@ -92,6 +92,13 @@ async def lifespan(app: FastAPI):
     auth_service = get_auth_service()
     # Market streamers MUST use Live configuration (Sandbox doesn't support market data)
     streamer = MarketDataStreamer(auth_service.get_configuration(use_sandbox=False))
+    
+    # Always subscribe to core indices for the status bar
+    try:
+        streamer.start(["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"])
+        logger.info("📡 Core indices (Nifty/Bank Nifty) subscribed on startup (V3).")
+    except Exception as e:
+        logger.error(f"Failed to subscribe to core indices on startup: {e}")
 
     async def _handle_market_tick(data):
         """
@@ -115,50 +122,61 @@ async def lifespan(app: FastAPI):
 
         try:
             for instrument_key, feed in feeds.items():
-                # 1. Extract LTP
-                # V3 can use 'marketFF' (Equities/FO) or 'indexFF' (Indices)
-                ff = feed.get("fullFeed") or feed.get("ff") or {}
-                market_ff = ff.get("marketFF") or ff.get("indexFF") or {}
-                ltpc = market_ff.get("ltpc") or {}
+                # V3 structure from Upstox is nested. Let's try to find ltp anywhere.
+                # Common paths:
+                # Stock: feed['fullFeed']['marketFF']['ltpc']['ltp']
+                # Index: feed['fullFeed']['indexFF']['ltpc']['ltp']
+                # LTQ: feed['ltpc']['ltp'] (some modes)
                 
+                # 1. Try to find the inner feed object
+                inner = feed.get("fullFeed") or feed.get("ff") or feed
+                if "marketFF" in inner: inner = inner["marketFF"]
+                elif "market_ff" in inner: inner = inner["market_ff"]
+                elif "indexFF" in inner: inner = inner["indexFF"]
+                elif "index_ff" in inner: inner = inner["index_ff"]
+                
+                # 2. Extract LTP - check multiple places for ltpc
+                ltpc = inner.get("ltpc") or feed.get("ltpc") or {}
                 ltp = ltpc.get("ltp")
-                if not ltp:
-                    # Fallback for OHLC mode
-                    ohlc_data = market_ff.get("marketOHLC") or market_ff.get("market_ohlc") or {}
-                    ltp = ohlc_data.get("ohlc", [{}])[0].get("close")
                 
-                # Ultimate fallback: check top level for simple ltp feeds
-                if not ltp:
-                    ltp = feed.get("ltp") or feed.get("ltpc", {}).get("ltp")
+                # 3. Extract Greeks - prioritized
+                greeks_data = inner.get("optionGreeks") or inner.get("option_chain_ff", {}).get("optionGreeks") or {}
+                
+                # 4. Extract Volume
+                volume = inner.get("vtt") or inner.get("total_volume_traded") or 0
+                
+                # 5. Extract IV
+                iv = inner.get("iv") or greeks_data.get("iv") or 0.0
                 
                 if ltp:
                     ds = datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp() # IST timestamp
-                    # 2. Targeted Broadcast (Skip DB insertion for efficiency)
-                    # Only send to clients who actually subscribed to THIS instrument
+                    # Include Greeks if available
                     msg = {
                         "type": "market_data",
                         "data": {
                             "instrument_key": instrument_key,
-                            "ltp": ltp,
+                            "ltp": float(ltp),
+                            "iv": float(iv or 0.0) * 100, # IV usually expressed as percentage in UI
+                            "delta": float(greeks_data.get("delta") or 0.0),
+                            "theta": float(greeks_data.get("theta") or 0.0),
+                            "volume": int(volume or 0),
                             "candle": {
                                 "time": int(ds),
-                                "open": ltp,
-                                "high": ltp,
-                                "low": ltp,
-                                "close": ltp
+                                "open": float(ltp),
+                                "high": float(ltp),
+                                "low": float(ltp),
+                                "close": float(ltp)
                             }
                         }
-                    }
+                    }                    
                     
                     target_clients = instrument_subscriptions.get(instrument_key, set())
-                    for ws in list(target_clients):
+                    for client_ws in list(target_clients):
                         try:
-                            await ws.send_json(msg)
+                            await client_ws.send_json(msg)
                         except Exception:
                             # Cleanup dead client will happen in disconnect
                             pass
-            
-            session.commit()
         except Exception as e:
             logger.error(f"Error in _handle_market_tick: {e}")
 
@@ -297,34 +315,35 @@ async def websocket_endpoint(ws: WebSocket):
                     await ws.send_json({"type": "status", "data": status})
                 
                 elif action == "subscribe" and key:
-                    # 1. Update internal registry
-                    if key not in instrument_subscriptions:
-                        instrument_subscriptions[key] = set()
-                    instrument_subscriptions[key].add(ws)
-                    
-                    if ws not in client_subscriptions:
-                        client_subscriptions[ws] = set()
-                    client_subscriptions[ws].add(key)
-                    
-                    # 2. Inform SDK if this is the first interest
-                    if len(instrument_subscriptions[key]) == 1:
-                        if hasattr(app.state, "market_streamer"):
-                            app.state.market_streamer.subscribe([key])
-                            logger.info(f"📡 SDK Subscription started for: {key} (First Client)")
+                    keys_to_sub = [k.strip() for k in key.split(',') if k.strip()]
+                    for k in keys_to_sub:
+                        if k not in instrument_subscriptions:
+                            instrument_subscriptions[k] = set()
+                        instrument_subscriptions[k].add(ws)
+                        
+                        if ws not in client_subscriptions:
+                            client_subscriptions[ws] = set()
+                        client_subscriptions[ws].add(k)
+                        
+                        if len(instrument_subscriptions[k]) == 1:
+                            if hasattr(app.state, "market_streamer"):
+                                # Use mode='full' to get Greeks and Volume as per V3 docs
+                                app.state.market_streamer.subscribe([k], mode="full")
+                                logger.info(f"📡 SDK Subscription started (FULL mode) for: {k}")
                 
                 elif action == "unsubscribe" and key:
-                    # 1. Update internal registry
-                    if key in instrument_subscriptions:
-                        instrument_subscriptions[key].discard(ws)
-                        if ws in client_subscriptions:
-                            client_subscriptions[ws].discard(key)
-                            
-                        # 2. Inform SDK if NO ONE is interested anymore
-                        if len(instrument_subscriptions[key]) == 0:
-                            del instrument_subscriptions[key]
-                            if hasattr(app.state, "market_streamer"):
-                                app.state.market_streamer.unsubscribe([key])
-                                logger.info(f"🛑 SDK Subscription stopped for: {key} (No more clients)")
+                    keys_to_unsub = [k.strip() for k in key.split(',') if k.strip()]
+                    for k in keys_to_unsub:
+                        if k in instrument_subscriptions:
+                            instrument_subscriptions[k].discard(ws)
+                            if ws in client_subscriptions:
+                                client_subscriptions[ws].discard(k)
+                                
+                            if len(instrument_subscriptions[k]) == 0:
+                                del instrument_subscriptions[k]
+                                if hasattr(app.state, "market_streamer"):
+                                    app.state.market_streamer.unsubscribe([k])
+                                    logger.info(f"🛑 SDK Subscription stopped for: {k}")
                                 
             except json.JSONDecodeError:
                 pass
