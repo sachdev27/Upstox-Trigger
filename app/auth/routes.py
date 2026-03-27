@@ -12,9 +12,9 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 @router.get("/login")
 async def login():
-    """Return the Upstox login URL for the frontend to redirect the user."""
+    """Return an HTTP redirect to the Upstox login URL."""
     auth = get_auth_service()
-    return {"auth_url": auth.get_auth_url()}
+    return RedirectResponse(url=auth.get_auth_url())
 
 
 @router.get("/callback")
