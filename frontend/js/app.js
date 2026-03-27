@@ -8,9 +8,9 @@ import { EngineWS } from './ws.js';
 import { ChartManager } from './chart.js';
 
 // Application State
-let currentInstrumentKey = "NSE_INDEX|Nifty 50";
-let currentInstrumentName = "Nifty 50";
-let currentInterval = "15minute";
+let currentInstrumentKey = localStorage.getItem("currentInstrumentKey") || "NSE_INDEX|Nifty 50";
+let currentInstrumentName = localStorage.getItem("currentInstrumentName") || "Nifty 50";
+let currentInterval = localStorage.getItem("currentInterval") || "15minute";
 let engineActive = false;
 let dynamicSchemas = {};
 const IST_OFFSET = 19800; // 5.5 hours for IST display
@@ -20,7 +20,11 @@ let selectedSearchIndex = -1;
 
 // Services
 const chart = new ChartManager('tvchart');
-const ws = new EngineWS(handleWsMessage);
+const ws = new EngineWS(handleWsMessage, () => {
+    if (currentInstrumentKey) {
+        ws.send({ action: 'subscribe', instrument_key: currentInstrumentKey });
+    }
+});
 
 document.addEventListener("DOMContentLoaded", async () => {
     chart.init();
@@ -28,7 +32,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     
     // Restore sidebar state — REMOVED
     
-    // Initial data fetch
     await fetchHistoricalCandles();
     await refreshAccountSummary();
     await refreshPositions();
@@ -36,7 +39,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     await refreshSignals();
     await checkAuth();
     await refreshStatus();
-    await fetchStrategySchemas(); // Ported: load strategy options
+    refreshAccountSummary();
+    refreshMarketStatus();
+    refreshOrderBook();
+    updateClock();
+    await fetchStrategySchemas();
+
+    // Set active state for persisted timeframe
+    const activeBtn = document.getElementById(`tf-${currentInterval}`);
+    if (activeBtn) {
+        activeBtn.classList.remove('btn-outline');
+        activeBtn.classList.add('btn-primary');
+    }
+    
+    // Subscribe to current instrument (Handled by onConnect, but this is a backup for reconnects)
+    if (ws.ws && ws.ws.readyState === WebSocket.OPEN) {
+        ws.send({ action: 'subscribe', instrument_key: currentInstrumentKey });
+    }
     
     // Set up listeners
     setupEventListeners();
@@ -46,6 +65,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     setInterval(updateClock, 1000);
     setInterval(refreshAccountSummary, 60000); // Every minute
     setInterval(refreshPositions, 30000); // Every 30 seconds
+    setInterval(refreshMarketStatus, 60000); // Every minute
+    setInterval(refreshOrderBook, 30000); // Every 30 seconds
 });
 
 function setupEventListeners() {
@@ -75,7 +96,7 @@ function setupEventListeners() {
 }
 
 function handleWsMessage(msg) {
-    console.log("WS Message:", msg);
+    if (msg.type !== 'market_data') console.log("WS Message:", msg);
     switch (msg.type) {
         case 'status':
             updateEngineStatus(msg.data);
@@ -93,9 +114,13 @@ function handleWsMessage(msg) {
             break;
         case 'market_data':
             if (msg.data && msg.data.instrument_key === currentInstrumentKey) {
+                // Update ticker price in header
+                if (msg.data.ltp) {
+                    updateElementText('current-instrument', `${currentInstrumentName} - ₹${formatPrice(msg.data.ltp)}`);
+                }
                 const c = msg.data.candle;
                 if (c && c.time && c.open != null && c.high != null && c.low != null && c.close != null) {
-                    chart.updateCandle({ ...c, time: c.time + IST_OFFSET });
+                    chart.updateCandle({ ...c, time: c.time + IST_OFFSET }, currentInterval);
                 }
             }
             break;
@@ -140,10 +165,21 @@ async function fetchHistoricalCandles() {
 
 
 async function selectInstrument(key, name) {
+    // Unsubscribe from old
+    if (currentInstrumentKey) {
+        ws.send({ action: 'unsubscribe', instrument_key: currentInstrumentKey });
+    }
+
     currentInstrumentKey = key;
     currentInstrumentName = name;
+    localStorage.setItem("currentInstrumentKey", key);
+    localStorage.setItem("currentInstrumentName", name);
+
     updateElementText('current-instrument', name);
     updateElementText('oc-instrument-name', name); // Sync option chain header
+    
+    // Subscribe to new
+    ws.send({ action: 'subscribe', instrument_key: currentInstrumentKey });
     
     chart.clear();
     await fetchHistoricalCandles();
@@ -173,6 +209,7 @@ async function placeManualOrder(side) {
             setTimeout(() => {
                 refreshTrades();
                 refreshPositions();
+                refreshOrderBook();
             }, 1000);
         }
     } catch (e) {
@@ -279,6 +316,52 @@ async function refreshSignals() {
     }
 }
 
+async function refreshOrderBook() {
+    try {
+        const { data } = await api.getOrderBook();
+        const list = document.getElementById("order-book-body");
+        if (!list) return;
+        list.innerHTML = "";
+        
+        if (!data || data.length === 0) {
+            list.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--text-muted)">No orders today</td></tr>`;
+            return;
+        }
+        
+        data.reverse().forEach(o => {
+            const row = document.createElement("tr");
+            const sideClass = o.transaction_type === 'BUY' ? 'buy' : 'sell';
+            const statusClass = (o.status === 'COMPLETE' || o.status === 'FILLED') ? 'text-success' : (o.status === 'REJECTED' || o.status === 'CANCELLED') ? 'text-danger' : 'text-warning';
+            
+            row.innerHTML = `
+                <td class="text-muted small">${new Date(o.order_timestamp).toLocaleTimeString()}</td>
+                <td class="mono small">${o.tradingsymbol}</td>
+                <td><span class="badge ${sideClass}">${o.transaction_type}</span></td>
+                <td>${o.quantity}</td>
+                <td class="mono">₹${formatPrice(o.average_price || o.price)}</td>
+                <td class="${statusClass} small">${o.status}</td>
+                <td class="text-muted small">${o.status_message || '-'}</td>
+            `;
+            list.appendChild(row);
+        });
+    } catch (e) {
+        console.error("Failed to refresh order book", e);
+    }
+}
+
+async function refreshMarketStatus() {
+    try {
+        const data = await api.getMarketStatus();
+        const indicator = document.getElementById("market-status-indicator");
+        if (indicator) {
+            indicator.innerText = data.market_open ? "🟢 Market Open" : "🔴 Market Closed";
+            indicator.className = data.market_open ? "text-success" : "text-muted";
+        }
+    } catch (e) {
+        console.error("Failed to refresh market status", e);
+    }
+}
+
 async function refreshStatus() {
     try {
         const data = await api.getStatus();
@@ -351,6 +434,26 @@ window.selectInstrument = selectInstrument;
 window.switchBottomTab = (tabId) => switchTab('bottom-panel', `tab-${tabId}`);
 window.setChartTimeframe = (interval) => {
     currentInterval = interval;
+    localStorage.setItem("currentInterval", interval);
+
+    // Update timeframe buttons
+    document.querySelectorAll('[onclick^="setChartTimeframe"]').forEach(btn => {
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-outline');
+    });
+    
+    // This is a bit hacky because buttons don't have IDs in index.html,
+    // let's just find the one with the matching text or re-render based on interval.
+    // Actually, I'll add IDs to them in index.html for reliability if possible, 
+    // but for now I'll just use the event target logic or iterate.
+    const btns = document.querySelectorAll('[onclick^="setChartTimeframe"]');
+    btns.forEach(b => {
+        if (b.getAttribute('onclick').includes(interval)) {
+            b.classList.remove('btn-outline');
+            b.classList.add('btn-primary');
+        }
+    });
+
     fetchHistoricalCandles().then(() => refreshOverlay());
 };
 window.loginUpstox = () => window.location.href = "/auth/login";

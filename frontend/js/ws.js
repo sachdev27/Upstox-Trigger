@@ -7,8 +7,9 @@ import { showToast } from './ui.js';
 const WS_URL = (window.location.protocol === "https:" ? "wss://" : "ws://") + window.location.host + "/ws";
 
 export class EngineWS {
-    constructor(onMessage) {
+    constructor(onMessage, onConnect) {
         this.onMessage = onMessage;
+        this.onConnect = onConnect;
         this.ws = null;
         this.reconnectInterval = 3000;
     }
@@ -23,6 +24,7 @@ export class EngineWS {
             if (wsStatusText) wsStatusText.innerText = "Live";
             if (wsStatusBadge) wsStatusBadge.className = "status-badge online";
             showToast("Connected to Engine WebSocket");
+            if (this.onConnect) this.onConnect();
         };
 
         this.ws.onmessage = (event) => {

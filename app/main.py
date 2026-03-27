@@ -94,24 +94,37 @@ async def lifespan(app: FastAPI):
         Callback for the streamer.
         'data' is the decoded protobuf to dict from the SDK.
         """
-        feeds = data.get("feeds", {})
-        if not feeds:
+        if not data:
             return
+            
+        # SDK V3 usually passes a dict with 'feeds'
+        # But let's handle cases where it might be the feed itself or a different wrapper
+        feeds = data if isinstance(data, dict) and "feeds" not in data else data.get("feeds", {})
+        if not feeds:
+            # Try to see if data itself has the feed keys (e.g. "NSE_EQ|...")
+            if isinstance(data, dict) and any("|" in k for k in data.keys()):
+                feeds = data
+            else:
+                return
 
         session = get_session()
         try:
             for instrument_key, feed in feeds.items():
                 # 1. Extract LTP
-                # V3 uses 'fullFeed'/'marketFF'/'ltpc', V2 might use 'ff'
+                # V3 can use 'marketFF' (Equities/FO) or 'indexFF' (Indices)
                 ff = feed.get("fullFeed") or feed.get("ff") or {}
-                market_ff = ff.get("marketFF") or {}
+                market_ff = ff.get("marketFF") or ff.get("indexFF") or {}
                 ltpc = market_ff.get("ltpc") or {}
                 
                 ltp = ltpc.get("ltp")
                 if not ltp:
-                    # Try OHLC mode (V3 'marketOHLC', V2 'market_ohlc')
+                    # Fallback for OHLC mode
                     ohlc_data = market_ff.get("marketOHLC") or market_ff.get("market_ohlc") or {}
                     ltp = ohlc_data.get("ohlc", [{}])[0].get("close")
+                
+                # Ultimate fallback: check top level for simple ltp feeds
+                if not ltp:
+                    ltp = feed.get("ltp") or feed.get("ltpc", {}).get("ltp")
                 
                 if ltp:
                     now = datetime.now(timezone(timedelta(hours=5, minutes=30))) # IST
@@ -142,6 +155,7 @@ async def lifespan(app: FastAPI):
                         "type": "market_data",
                         "data": {
                             "instrument_key": instrument_key,
+                            "ltp": ltp,
                             "candle": {
                                 "time": int(ds),
                                 "open": ltp,
@@ -169,8 +183,15 @@ async def lifespan(app: FastAPI):
 
     streamer.on_tick = sync_on_tick
     
-    # Start streaming for some defaults (In a real app, this would be dynamic based on user watchlist)
+    # Start streaming for some defaults
     default_instruments = [settings.NIFTY, settings.BANKNIFTY]
+    try:
+        streamer.start(default_instruments)
+        app.state.market_streamer = streamer
+        logger.info(f"📡 Market Data Streamer started for {default_instruments}")
+    except Exception as e:
+        logger.error(f"❌ Failed to start portfolio streamer: {e}")
+
     # Start Portfolio Streamer
     # Portfolio streamers MUST use Live configuration for notifications
     portfolio_streamer = PortfolioStreamer(auth_service.get_configuration(use_sandbox=False))
@@ -189,7 +210,26 @@ async def lifespan(app: FastAPI):
         app.state.portfolio_streamer = portfolio_streamer
         logger.info("📡 Portfolio Data Streamer started.")
     except Exception as e:
-        logger.error(f"❌ Failed to start portfolio streamer: {e}")
+        logger.error(f"❌ Failed to start market streamer: {e}")
+
+    # --- Heartbeat & Periodic Status ---
+    async def _periodic_updates():
+        while True:
+            try:
+                # Send a heartbeat every 10 seconds to keep WS alive and show it's working
+                await broadcast_to_clients({
+                    "type": "heartbeat", 
+                    "data": {"timestamp": datetime.now().isoformat()}
+                })
+                # Refresh status too
+                from app.engine import get_engine
+                engine = get_engine()
+                await broadcast_to_clients({"type": "status", "data": engine.get_status()})
+            except Exception:
+                pass
+            await asyncio.sleep(10)
+
+    asyncio.create_task(_periodic_updates())
 
     yield
     
@@ -267,6 +307,15 @@ async def websocket_endpoint(ws: WebSocket):
                     from app.engine import get_engine
                     status = get_engine().get_status()
                     await ws.send_json({"type": "status", "data": status})
+                elif msg.get("action") == "subscribe":
+                    key = msg.get("instrument_key")
+                    if key and hasattr(app.state, "market_streamer"):
+                        app.state.market_streamer.subscribe([key])
+                        logger.info(f"WS Client requested subscription to {key}")
+                elif msg.get("action") == "unsubscribe":
+                    key = msg.get("instrument_key")
+                    if key and hasattr(app.state, "market_streamer"):
+                        app.state.market_streamer.unsubscribe([key])
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect:

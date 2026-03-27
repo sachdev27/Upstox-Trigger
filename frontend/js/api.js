@@ -38,6 +38,9 @@ export const api = {
     async getTrades() {
         return fetch(`${API_BASE}/orders/trades`).then(r => r.json());
     },
+    async getOrderBook() {
+        return fetch(`${API_BASE}/orders/book`).then(r => r.json());
+    },
     async placeOrder(payload) {
         const params = new URLSearchParams(payload);
         return fetch(`${API_BASE}/orders/place?${params.toString()}`, { method: 'POST' }).then(r => r.json());
@@ -71,6 +74,9 @@ export const api = {
     },
     async getSignals() {
         return fetch(`${API_BASE}/strategies/signals`).then(r => r.json());
+    },
+    async getMarketStatus() {
+        return fetch(`${API_BASE}/orders/status/market-hours`).then(r => r.json());
     },
     async triggerTestSignal(instrumentKey) {
         return fetch(`${API_BASE}/engine/test-signal`, {

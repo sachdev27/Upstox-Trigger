@@ -35,6 +35,7 @@
             </span>
             <button id="btn-view-settings" class="btn btn-outline" style="width: auto; padding: 4px 10px;" onclick="switchMainView('settings')">⚙️ Settings</button>
             <button class="btn btn-outline" style="width: auto; padding: 4px 10px; margin-left: 8px;" onclick="loginUpstox()">🔐 Login</button>
+            <span id="market-status-indicator" class="text-muted" style="font-size: 0.8rem; margin-left: 10px;">Market Loading...</span>
             <span id="clock" class="mono" style="color: var(--text-muted); font-size: 0.8rem; margin-left: 10px;"></span>
             <div style="margin-left: 15px; border-left: 1px solid var(--border-color); padding-left: 15px; display: flex; gap: 12px; font-size: 0.8rem;">
                 <div><span style="color:var(--text-muted)">Margin:</span> <span id="account-balance" class="mono">₹0.00</span></div>
@@ -226,7 +227,8 @@
             <!-- Bottom Tabs/Tables -->
             <div id="bottom-panel" class="bottom-panel">
                 <div class="bottom-tabs">
-                    <button class="bottom-tab active" onclick="switchBottomTab('positions')">Open Positions</button>
+                    <button class="bottom-tab active" onclick="switchBottomTab('positions')">Positions</button>
+                    <button class="bottom-tab" onclick="switchBottomTab('orderbook')">Order Book</button>
                     <button class="bottom-tab" onclick="switchBottomTab('trades')">Trade History</button>
                     <button class="bottom-tab" onclick="switchBottomTab('signals')">Signals</button>
                     <button class="bottom-tab" onclick="switchBottomTab('activity')">Activity Log</button>
@@ -247,6 +249,26 @@
                         </thead>
                         <tbody id="positions-body">
                             <tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">No open positions</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- Order Book Tab -->
+                <div id="tab-orderbook" class="bottom-content">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Instrument</th>
+                                <th>Side</th>
+                                <th>Qty</th>
+                                <th>Price</th>
+                                <th>Status</th>
+                                <th>Message</th>
+                            </tr>
+                        </thead>
+                        <tbody id="order-book-body">
+                            <tr><td colspan="7" style="text-align:center; padding: 20px;" class="text-muted">No orders today</td></tr>
                         </tbody>
                     </table>
                 </div>

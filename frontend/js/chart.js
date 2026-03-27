@@ -9,6 +9,16 @@ export class ChartManager {
         this.candleSeries = null;
         this.supertrendSeries = null;
         this.resizeObserver = null;
+        this.lastBar = null;
+        
+        this.intervalMap = {
+            "1minute": 60,
+            "5minute": 300,
+            "15minute": 900,
+            "30minute": 1800,
+            "1hour": 3600,
+            "day": 86400
+        };
     }
 
     init() {
@@ -67,12 +77,37 @@ export class ChartManager {
         });
     }
 
-    updateCandle(candle) {
-        if (this.candleSeries) this.candleSeries.update(candle);
+    updateCandle(candle, interval = "1minute") {
+        if (!this.candleSeries) return;
+
+        // 1. Round time to interval
+        const seconds = this.intervalMap[interval] || 60;
+        const roundedTime = Math.floor(Math.round(candle.time) / seconds) * seconds;
+
+        console.log(`[CHART] Tick: ${candle.time} | Rounded: ${roundedTime} | Interval: ${interval} | Last: ${this.lastBar?.time}`);
+
+        // 2. Aggregate OHLC if same bar (Compare as Numbers to be safe)
+        if (this.lastBar && Number(this.lastBar.time) === Number(roundedTime)) {
+            this.lastBar.high = Math.max(this.lastBar.high, candle.high);
+            this.lastBar.low = Math.min(this.lastBar.low, candle.low);
+            this.lastBar.close = candle.close;
+        } else {
+            console.warn(`[CHART] NEW BAR: Current Rounded ${roundedTime} vs Last ${this.lastBar?.time}`);
+            this.lastBar = { ...candle, time: roundedTime };
+        }
+
+        // 3. Pass a copy to ensure the chart re-renders correctly
+        this.candleSeries.update({ ...this.lastBar });
     }
 
     setData(candles) {
-        if (this.candleSeries) this.candleSeries.setData(candles);
+        if (this.candleSeries) {
+            this.candleSeries.setData(candles);
+            // Track the last bar from history for future updates
+            if (candles.length > 0) {
+                this.lastBar = { ...candles[candles.length - 1] };
+            }
+        }
     }
 
     setOverlayData(data) {
@@ -89,5 +124,6 @@ export class ChartManager {
             this.candleSeries.setMarkers([]);
         }
         if (this.supertrendSeries) this.supertrendSeries.setData([]);
+        this.lastBar = null;
     }
 }
