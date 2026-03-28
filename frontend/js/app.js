@@ -706,6 +706,8 @@ function subscribeToPositions() {
 
 // ── Watchlist Management ──────────────────────────────────────
 
+const AVAILABLE_TIMEFRAMES = ['1m', '5m', '15m', '30m', '1H', '1D'];
+
 async function refreshWatchlist() {
     try {
         const data = await api.getWatchlist();
@@ -713,33 +715,66 @@ async function refreshWatchlist() {
         if (!container) return;
         
         const items = data.data || [];
+        // Also refresh the name map for active signals
+        _watchlistNameMap = {};
+        items.forEach(i => {
+            _watchlistNameMap[i.instrument_key] = { symbol: i.symbol, name: i.name };
+        });
+
         if (items.length === 0) {
-            container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">No instruments in watchlist</div>`;
+            container.innerHTML = '<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">No instruments in watchlist</div>';
             return;
         }
 
         container.innerHTML = "";
         items.forEach(item => {
+            const activeTFs = item.timeframes || ['15m'];
+            const tfBadges = AVAILABLE_TIMEFRAMES.map(tf => {
+                const isActive = activeTFs.includes(tf);
+                const cls = isActive ? 'tf-active' : 'tf-inactive';
+                const escapedTFs = JSON.stringify(activeTFs).replace(/"/g, '&quot;');
+                return '<span class="tf-badge ' + cls + '" onclick="event.stopPropagation(); toggleWatchlistTF(' + item.id + ', \'' + tf + '\', ' + escapedTFs + ')" title="' + (isActive ? 'Remove' : 'Add') + ' ' + tf + '">' + tf + '</span>';
+            }).join('');
+
+            const symSafe = (item.symbol || item.name || '').replace(/'/g, "\\'");
             const div = document.createElement("div");
             div.className = "watchlist-item";
-            div.innerHTML = `
-                <div style="flex: 1; min-width: 0;">
-                    <div class="instrument-name" style="font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${item.symbol || item.instrument_key}</div>
-                    <div style="display: flex; gap: 3px; flex-wrap: wrap; margin-top: 3px;">
-                        ${(item.timeframes || ['15m']).map(tf => `<span class="badge" style="font-size: 0.6rem; padding: 1px 4px;">${tf}</span>`).join('')}
-                    </div>
-                </div>
-                <div style="display: flex; gap: 4px; align-items: center; flex-shrink: 0;">
-                    <button class="btn btn-outline" style="width: auto; padding: 2px 6px; font-size: 0.6rem;" onclick="event.stopPropagation(); selectInstrument('${item.instrument_key}', '${(item.symbol || item.name || '').replace(/'/g, '\\\'')}')" title="View Chart">📈</button>
-                    <button class="btn btn-outline" style="width: auto; padding: 2px 6px; font-size: 0.6rem; color: var(--danger);" onclick="event.stopPropagation(); removeFromWatchlist('${item.instrument_key}')" title="Remove">✕</button>
-                </div>
-            `;
+            div.innerHTML = '<div style="flex: 1; min-width: 0;">'
+                + '<div style="display: flex; align-items: baseline; gap: 6px;">'
+                + '<span style="font-size: 0.82rem; font-weight: 600;">' + (item.symbol || item.instrument_key) + '</span>'
+                + '<span style="font-size: 0.65rem; color: var(--text-muted);">' + (item.name || '') + '</span>'
+                + '</div>'
+                + '<div class="tf-picker" style="display: flex; gap: 2px; margin-top: 4px;">' + tfBadges + '</div>'
+                + '</div>'
+                + '<div style="display: flex; gap: 4px; align-items: center; flex-shrink: 0;">'
+                + '<button class="btn btn-outline" style="width: auto; padding: 2px 6px; font-size: 0.6rem;" onclick="event.stopPropagation(); selectInstrument(\'' + item.instrument_key + '\', \'' + symSafe + '\')" title="View Chart">📈</button>'
+                + '<button class="btn btn-outline" style="width: auto; padding: 2px 6px; font-size: 0.6rem; color: var(--danger);" onclick="event.stopPropagation(); removeFromWatchlist(\'' + item.instrument_key + '\')" title="Remove">✕</button>'
+                + '</div>';
             container.appendChild(div);
         });
     } catch (e) {
         console.error("Failed to refresh watchlist", e);
     }
 }
+
+window.toggleWatchlistTF = async (itemId, tf, currentTFs) => {
+    let newTFs;
+    if (currentTFs.includes(tf)) {
+        if (currentTFs.length <= 1) {
+            showToast('Must have at least one timeframe', 'warning');
+            return;
+        }
+        newTFs = currentTFs.filter(t => t !== tf);
+    } else {
+        newTFs = [...currentTFs, tf];
+    }
+    try {
+        await api.updateWatchlistTimeframes(itemId, newTFs.join(','));
+        refreshWatchlist();
+    } catch (e) {
+        showToast('Failed to update timeframes', 'error');
+    }
+};
 
 window.addCurrentToWatchlist = async () => {
     if (!currentInstrumentKey) {
