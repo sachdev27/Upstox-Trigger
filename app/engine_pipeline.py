@@ -155,22 +155,47 @@ class AlerterProcessor(SignalProcessor):
         except Exception as e:
             logger.error(f"Failed to persist ActiveSignal: {e}")
 
-        # 2. Send notification
+        # 2. Resolve instrument name from watchlist
+        instrument_name = signal.instrument_key
+        instrument_symbol = signal.instrument_key.split("|")[-1] if "|" in signal.instrument_key else signal.instrument_key
+        try:
+            from app.database.connection import Watchlist
+            wl_session = get_session()
+            wl_item = wl_session.query(Watchlist).filter_by(instrument_key=signal.instrument_key).first()
+            if wl_item:
+                instrument_name = wl_item.name or wl_item.symbol or instrument_name
+                instrument_symbol = wl_item.symbol or instrument_symbol
+            wl_session.close()
+        except Exception:
+            pass
+
+        # 3. Send notification
         manager = get_notification_manager()
         is_paper = engine.paper_trading or config.paper_trading
-        mode_str = "[PAPER]" if is_paper else "[LIVE]"
+        mode_str = "📋 PAPER" if is_paper else "🔴 LIVE"
+        action_emoji = "🟢" if signal.action.value == "BUY" else "🔴"
         
-        subject = f"🎯 {mode_str} Trade Alert: {signal.action.value} {signal.instrument_key}"
+        subject = f"🎯 {signal.action.value} Signal: {instrument_symbol} ({instrument_name})"
         
         body = (
-            f"Strategy: {signal.strategy_name or config.name}\n"
-            f"Action: {signal.action.value}\n"
-            f"Symbol: {signal.instrument_key}\n"
-            f"Timeframe: {config.timeframe}\n"
-            f"Price: ₹{signal.price:.2f}\n"
-            f"SL: ₹{signal.stop_loss:.2f} | TP: ₹{signal.take_profit:.2f}\n"
-            f"Score: {signal.confidence_score}\n"
-            f"Time: {datetime.now(IST).strftime('%H:%M:%S')}"
+            f"{'━' * 40}\n"
+            f"  {action_emoji} {signal.action.value} SIGNAL — {mode_str}\n"
+            f"{'━' * 40}\n\n"
+            f"📌 Instrument:\n"
+            f"   Symbol:    {instrument_symbol}\n"
+            f"   Name:      {instrument_name}\n"
+            f"   Key:       {signal.instrument_key}\n\n"
+            f"📊 Strategy:  {signal.strategy_name or config.name}\n"
+            f"⏱️ Timeframe: {config.timeframe}\n\n"
+            f"{'─' * 40}\n"
+            f"  💰 PRICE LEVELS\n"
+            f"{'─' * 40}\n"
+            f"   Entry:       ₹{signal.price:.2f}\n"
+            f"   Stop Loss:   ₹{signal.stop_loss:.2f}\n"
+            f"   Take Profit: ₹{signal.take_profit:.2f}\n\n"
+            f"   Confidence:  {signal.confidence_score}/100\n"
+            f"   Time:        {datetime.now(IST).strftime('%d-%b-%Y %H:%M:%S IST')}\n"
+            f"{'━' * 40}\n"
         )
         
         asyncio.create_task(manager.send_alert(subject, body))

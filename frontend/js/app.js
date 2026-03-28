@@ -799,45 +799,80 @@ window.exportWatchlistCSV = async () => {
 
 // ── Active Signals ────────────────────────────────────────────
 
+// Cached watchlist lookup for resolving instrument names
+let _watchlistNameMap = {};
+
+async function _refreshWatchlistNameMap() {
+    try {
+        const wlData = await api.getWatchlist();
+        const items = wlData.data || [];
+        _watchlistNameMap = {};
+        items.forEach(i => {
+            _watchlistNameMap[i.instrument_key] = { symbol: i.symbol, name: i.name };
+        });
+    } catch (e) { /* ignore */ }
+}
+
+function _resolveInstrument(instrumentKey) {
+    const cached = _watchlistNameMap[instrumentKey];
+    if (cached) return cached;
+    // Fallback: extract from key
+    const parts = instrumentKey.split("|");
+    return { symbol: parts.length > 1 ? parts[1] : instrumentKey, name: '' };
+}
+
 async function refreshActiveSignals() {
     try {
         const data = await api.getActiveSignals();
-        const list = document.getElementById("active-signals-body");
-        if (!list) return;
-        list.innerHTML = "";
-        
         const signals = data.data || [];
-        if (signals.length === 0) {
-            list.innerHTML = `<tr><td colspan="11" style="text-align:center; padding:20px; color:var(--text-muted)">No active signals</td></tr>`;
-            return;
+        
+        // Ensure name map is populated
+        if (Object.keys(_watchlistNameMap).length === 0) {
+            await _refreshWatchlistNameMap();
         }
         
-        signals.forEach(s => {
-            const row = document.createElement("tr");
-            if (s.status === 'active') row.classList.add('active-signal-row');
+        // Build rows HTML once, apply to both tables
+        const targets = ['active-signals-body', 'active-signals-body-main'];
+        
+        targets.forEach(targetId => {
+            const tbody = document.getElementById(targetId);
+            if (!tbody) return;
+            tbody.innerHTML = "";
             
-            const time = s.created_at ? new Date(s.created_at).toLocaleTimeString('en-IN', { hour12: false }) : '--';
-            const statusBadge = s.status === 'active' 
-                ? '<span class="badge" style="background:rgba(0,208,132,0.15); color:#00d084;">ACTIVE</span>'
-                : '<span class="badge" style="background:rgba(139,139,158,0.15); color:#8b8b9e;">CLOSED</span>';
+            if (signals.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:20px; color:var(--text-muted)">No active signals</td></tr>`;
+                return;
+            }
             
-            row.innerHTML = `
-                <td class="text-muted" style="font-size:0.7rem">${time}</td>
-                <td style="font-size:0.75rem">${s.strategy_name}</td>
-                <td class="mono" style="font-size:0.75rem">${s.instrument_key}</td>
-                <td><span class="badge" style="font-size:0.6rem; padding:1px 4px;">${s.timeframe || '15m'}</span></td>
-                <td><span class="badge ${s.action.toLowerCase()}">${s.action}</span></td>
-                <td class="mono">₹${formatPrice(s.price)}</td>
-                <td class="mono text-muted" style="font-size:0.75rem">${s.stop_loss ? '₹' + formatPrice(s.stop_loss) : '-'}</td>
-                <td class="mono text-muted" style="font-size:0.75rem">${s.take_profit ? '₹' + formatPrice(s.take_profit) : '-'}</td>
-                <td>${s.confidence_score || 0}</td>
-                <td>${statusBadge}</td>
-                <td>
-                    ${s.status === 'active' ? `<button class="btn btn-outline" style="width:auto; padding:2px 6px; font-size:0.65rem;" onclick="closeActiveSignal(${s.id})">Close</button>` : ''}
-                    <button class="btn btn-outline" style="width:auto; padding:2px 6px; font-size:0.65rem; color:var(--danger);" onclick="deleteActiveSignal(${s.id})">✕</button>
-                </td>
-            `;
-            list.appendChild(row);
+            signals.forEach(s => {
+                const row = document.createElement("tr");
+                if (s.status === 'active') row.classList.add('active-signal-row');
+                
+                const inst = _resolveInstrument(s.instrument_key);
+                const time = s.created_at ? new Date(s.created_at).toLocaleTimeString('en-IN', { hour12: false }) : '--';
+                const statusBadge = s.status === 'active' 
+                    ? '<span class="badge" style="background:rgba(0,208,132,0.15); color:#00d084;">ACTIVE</span>'
+                    : '<span class="badge" style="background:rgba(139,139,158,0.15); color:#8b8b9e;">CLOSED</span>';
+                
+                row.innerHTML = `
+                    <td class="text-muted" style="font-size:0.7rem">${time}</td>
+                    <td style="font-size:0.75rem">${s.strategy_name}</td>
+                    <td class="mono" style="font-size:0.75rem; font-weight:600; color:var(--primary);">${inst.symbol}</td>
+                    <td style="font-size:0.7rem; color:var(--text-muted);">${inst.name || '-'}</td>
+                    <td><span class="badge" style="font-size:0.6rem; padding:1px 4px;">${s.timeframe || '15m'}</span></td>
+                    <td><span class="badge ${s.action.toLowerCase()}">${s.action}</span></td>
+                    <td class="mono">₹${formatPrice(s.price)}</td>
+                    <td class="mono text-muted" style="font-size:0.75rem">${s.stop_loss ? '₹' + formatPrice(s.stop_loss) : '-'}</td>
+                    <td class="mono text-muted" style="font-size:0.75rem">${s.take_profit ? '₹' + formatPrice(s.take_profit) : '-'}</td>
+                    <td>${s.confidence_score || 0}</td>
+                    <td>${statusBadge}</td>
+                    <td>
+                        ${s.status === 'active' ? `<button class="btn btn-outline" style="width:auto; padding:2px 6px; font-size:0.65rem;" onclick="closeActiveSignal(${s.id})">Close</button>` : ''}
+                        <button class="btn btn-outline" style="width:auto; padding:2px 6px; font-size:0.65rem; color:var(--danger);" onclick="deleteActiveSignal(${s.id})">✕</button>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
         });
     } catch (e) {
         console.error("Failed to refresh active signals", e);
@@ -1294,7 +1329,7 @@ function renderStrategyHUD(strategy) {
 }
 window.switchMainView = (view) => {
     // Hide all
-    const views = ['tvchart', 'option-chain-container', 'settings-view-container'];
+    const views = ['tvchart', 'option-chain-container', 'watchlist-view-container', 'settings-view-container'];
     views.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
@@ -1304,6 +1339,7 @@ window.switchMainView = (view) => {
     const btnMap = {
         'chart': 'btn-view-chart',
         'options': 'btn-view-options',
+        'watchlist': 'btn-view-watchlist',
         'settings': 'btn-view-settings-center'
     };
     Object.values(btnMap).forEach(bid => {
@@ -1314,6 +1350,7 @@ window.switchMainView = (view) => {
     const targetMap = {
         'chart': 'tvchart',
         'options': 'option-chain-container',
+        'watchlist': 'watchlist-view-container',
         'settings': 'settings-view-container'
     };
     const targetId = targetMap[view];
@@ -1325,6 +1362,12 @@ window.switchMainView = (view) => {
             btn.classList.remove('btn-outline');
             btn.classList.add('btn-primary');
         }
+    }
+
+    // Refresh watchlist + active signals when switching to watchlist view
+    if (view === 'watchlist') {
+        refreshWatchlist();
+        refreshActiveSignals();
     }
 
     // Persist instrument name across view transitions
