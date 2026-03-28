@@ -111,6 +111,7 @@
                     <button class="settings-tab active" onclick="switchSettingsTab('general')">General</button>
                     <button class="settings-tab" onclick="switchSettingsTab('strategy')">Strategy Config</button>
                     <button class="settings-tab" onclick="switchSettingsTab('risk')">Risk & Capital</button>
+                    <button class="settings-tab" onclick="switchSettingsTab('notifications')">Notifications</button>
                 </div>
                 
                 <!-- General Settings -->
@@ -220,6 +221,49 @@
                             <input type="number" id="risk-maxtrades" class="form-input" value="3">
                         </div>
                         <button class="btn btn-primary" onclick="saveRiskConfig()">Save Risk Config</button>
+                    </div>
+                </div>
+
+                <!-- Notifications Settings -->
+                <div id="set-tab-notifications" class="settings-content">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px;">
+                        <div class="settings-card">
+                            <h4>Email (SMTP) Configuration</h4>
+                            <div class="form-group">
+                                <label class="form-label">Notification Channels</label>
+                                <input type="text" id="setting-notification-channels" class="form-input" placeholder="EMAIL">
+                                <small class="text-muted">Comma-separated: EMAIL, TELEGRAM (coming soon)</small>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">SMTP Server</label>
+                                <input type="text" id="setting-smtp-server" class="form-input" placeholder="smtp.gmail.com">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">SMTP Port</label>
+                                <input type="number" id="setting-smtp-port" class="form-input" placeholder="587">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">SMTP User (Email)</label>
+                                <input type="text" id="setting-smtp-user" class="form-input" placeholder="your-email@gmail.com">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">SMTP Password</label>
+                                <input type="password" id="setting-smtp-password" class="form-input" placeholder="********">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Email Recipient(s)</label>
+                                <input type="text" id="setting-email-recipient" class="form-input" placeholder="recipient@example.com">
+                                <small class="text-muted">Comma-separated list</small>
+                            </div>
+                            <button class="btn btn-primary" onclick="saveNotificationSettings()">Save Notification Settings</button>
+                        </div>
+                        <div class="settings-card">
+                            <h4>Test Notifications</h4>
+                            <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 20px;">
+                                Send a test signal to verify your configuration is working correctly.
+                            </p>
+                            <button class="btn btn-outline" onclick="testNotification('email')">📧 Send Test Email</button>
+                        </div>
                     </div>
                 </div>
             </div>

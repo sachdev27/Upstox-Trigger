@@ -24,6 +24,8 @@ from app.orders.routes import router as orders_router
 from app.strategies.routes import router as strategies_router
 from app.engine_routes import router as engine_router
 from app.settings_routes import router as config_router
+from app.monitoring.routes import router as monitoring_router
+from app.notifications.routes import router as notification_router
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +263,8 @@ app.include_router(orders_router)
 app.include_router(strategies_router)
 app.include_router(engine_router)
 app.include_router(config_router)
+app.include_router(monitoring_router)
+app.include_router(notification_router)
 
 # ── Static files (frontend) ────────────────────────────────────
 frontend_dir = BASE_DIR / "frontend"
@@ -313,10 +317,13 @@ async def websocket_endpoint(ws: WebSocket):
                         client_subscriptions[ws].add(k)
                         
                         if len(instrument_subscriptions[k]) == 1:
-                            if hasattr(app.state, "market_streamer"):
-                                # Use mode='full' to get Greeks and Volume as per V3 docs
-                                app.state.market_streamer.subscribe([k], mode="full")
-                                logger.info(f"📡 SDK Subscription started (FULL mode) for: {k}")
+                            if hasattr(app.state, "market_streamer") and app.state.market_streamer:
+                                try:
+                                    # Use mode='full' to get Greeks and Volume as per V3 docs
+                                    app.state.market_streamer.subscribe([k], mode="full")
+                                    logger.info(f"📡 SDK Subscription started (FULL mode) for: {k}")
+                                except Exception as e:
+                                    logger.error(f"Failed to subscribe to {k}: {e}")
                 
                 elif action == "unsubscribe" and key:
                     keys_to_unsub = [k.strip() for k in key.split(',') if k.strip()]
@@ -328,9 +335,12 @@ async def websocket_endpoint(ws: WebSocket):
                                 
                             if len(instrument_subscriptions[k]) == 0:
                                 del instrument_subscriptions[k]
-                                if hasattr(app.state, "market_streamer"):
-                                    app.state.market_streamer.unsubscribe([k])
-                                    logger.info(f"🛑 SDK Subscription stopped for: {k}")
+                                if hasattr(app.state, "market_streamer") and app.state.market_streamer:
+                                    try:
+                                        app.state.market_streamer.unsubscribe([k])
+                                        logger.info(f"🛑 SDK Subscription stopped for: {k}")
+                                    except Exception as e:
+                                        logger.error(f"Failed to unsubscribe from {k}: {e}")
                                 
             except json.JSONDecodeError:
                 pass
@@ -342,9 +352,12 @@ async def websocket_endpoint(ws: WebSocket):
                 instrument_subscriptions[key].discard(ws)
                 if len(instrument_subscriptions[key]) == 0:
                     del instrument_subscriptions[key]
-                    if hasattr(app.state, "market_streamer"):
-                        app.state.market_streamer.unsubscribe([key])
-                        logger.info(f"🛑 SDK Subscription stopped for: {key} (Client disconnected)")
+                    if hasattr(app.state, "market_streamer") and app.state.market_streamer:
+                        try:
+                            app.state.market_streamer.unsubscribe([key])
+                            logger.info(f"🛑 SDK Subscription stopped for: {key} (Client disconnected)")
+                        except Exception as e:
+                            logger.error(f"Failed to unsubscribe from {key} during disconnect: {e}")
         
         ws_clients.discard(ws)
         logger.info(f"WebSocket client disconnected. Total: {len(ws_clients)}")
@@ -397,7 +410,8 @@ async def health():
     from app.auth.service import get_auth_service
 
     auth = get_auth_service()
-    token_valid = not auth._is_token_expired(auth.settings.ACCESS_TOKEN)
+    target_token = auth.settings.SANDBOX_ACCESS_TOKEN if auth.settings.USE_SANDBOX else auth.settings.ACCESS_TOKEN
+    token_valid = not auth._is_token_expired(target_token)
 
     return {
         "status": "healthy",

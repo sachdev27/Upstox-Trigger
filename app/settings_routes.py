@@ -31,10 +31,19 @@ class SettingsUpdate(BaseModel):
     SQUARE_OFF_TIME: str | None = None
     TELEGRAM_BOT_TOKEN: str | None = None
     TELEGRAM_CHAT_ID: str | None = None
+    SMTP_SERVER: str | None = None
+    SMTP_PORT: int | None = None
+    SMTP_USER: str | None = None
+    SMTP_PASSWORD: str | None = None
+    EMAIL_RECIPIENT: str | None = None
+    NOTIFICATION_CHANNELS: str | None = None
 
 
 # Keys that should be masked in the UI
-_SECRET_KEYS = {"API_KEY", "API_SECRET", "SANDBOX_API_KEY", "SANDBOX_API_SECRET", "SANDBOX_ACCESS_TOKEN", "ACCESS_TOKEN"}
+_SECRET_KEYS = {
+    "API_KEY", "API_SECRET", "SANDBOX_API_KEY", "SANDBOX_API_SECRET", 
+    "SANDBOX_ACCESS_TOKEN", "ACCESS_TOKEN", "SMTP_PASSWORD", "TELEGRAM_BOT_TOKEN"
+}
 
 # Category mapping for DB storage
 _CATEGORY_MAP = {
@@ -43,6 +52,8 @@ _CATEGORY_MAP = {
     "TRADING_CAPITAL": "ENGINE", "PAPER_TRADING": "ENGINE", "TRADING_SIDE": "ENGINE", "MAX_OPEN_TRADES": "ENGINE",
     "USE_SANDBOX": "ENGINE", "SANDBOX_API_KEY": "API", "SANDBOX_API_SECRET": "API", "SANDBOX_ACCESS_TOKEN": "API",
     "TELEGRAM_BOT_TOKEN": "NOTIFICATIONS", "TELEGRAM_CHAT_ID": "NOTIFICATIONS",
+    "SMTP_SERVER": "NOTIFICATIONS", "SMTP_PORT": "NOTIFICATIONS", "SMTP_USER": "NOTIFICATIONS", 
+    "SMTP_PASSWORD": "NOTIFICATIONS", "EMAIL_RECIPIENT": "NOTIFICATIONS", "NOTIFICATION_CHANNELS": "NOTIFICATIONS",
 }
 
 
@@ -78,6 +89,12 @@ async def get_current_settings():
         "MAX_OPEN_TRADES": settings.MAX_OPEN_TRADES,
         "TELEGRAM_BOT_TOKEN": "********" if settings.TELEGRAM_BOT_TOKEN else "",
         "TELEGRAM_CHAT_ID": settings.TELEGRAM_CHAT_ID,
+        "SMTP_SERVER": settings.SMTP_SERVER,
+        "SMTP_PORT": settings.SMTP_PORT,
+        "SMTP_USER": settings.SMTP_USER,
+        "SMTP_PASSWORD": "********" if settings.SMTP_PASSWORD else "",
+        "EMAIL_RECIPIENT": settings.EMAIL_RECIPIENT,
+        "NOTIFICATION_CHANNELS": settings.NOTIFICATION_CHANNELS,
     }
 
 
@@ -87,7 +104,10 @@ async def update_settings(updates: SettingsUpdate = Body(...)):
     settings = get_settings()
     updated_keys = []
 
-    for key, value in updates.dict(exclude_none=True).items():
+    # Map the Pydantic model to a dict, excluding None values
+    update_data = updates.dict(exclude_none=True)
+
+    for key, value in update_data.items():
         # Skip masked placeholder values (user didn't change them)
         if key in _SECRET_KEYS and ("*" in str(value) or "..." in str(value)):
             continue

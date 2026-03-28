@@ -87,6 +87,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     await refreshSignals();
     await checkAuth();
     await refreshStatus();
+    await loadSettingsIntoUI();
     refreshAccountSummary();
     refreshMarketStatus();
     refreshOrderBook();
@@ -787,6 +788,76 @@ window.saveRiskConfig = async () => {
     }
 };
 
+window.saveNotificationSettings = async () => {
+    const channels = document.getElementById('setting-notification-channels').value;
+    const server = document.getElementById('setting-smtp-server').value;
+    const port = document.getElementById('setting-smtp-port').value;
+    const user = document.getElementById('setting-smtp-user').value;
+    const password = document.getElementById('setting-smtp-password').value;
+    const recipient = document.getElementById('setting-email-recipient').value;
+    
+    const payload = {};
+    if (channels) payload.NOTIFICATION_CHANNELS = channels;
+    if (server) payload.SMTP_SERVER = server;
+    if (port) payload.SMTP_PORT = parseInt(port);
+    if (user) payload.SMTP_USER = user;
+    if (password && !password.includes('***')) payload.SMTP_PASSWORD = password;
+    if (recipient) payload.EMAIL_RECIPIENT = recipient;
+    
+    try {
+        await api.saveSettings(payload);
+        showToast("Notification settings saved", "success");
+    } catch (e) {
+        showToast("Failed to save notification settings", "error");
+    }
+};
+
+window.testNotification = async (channel = "email") => {
+    try {
+        showToast(`Sending test ${channel}...`, "info");
+        const res = await api.testNotification(channel);
+        if (res.status === 'success') {
+            showToast(res.message, "success");
+        } else {
+            showToast(res.message, "error");
+        }
+    } catch (e) {
+        showToast("Failed to dispatch test notification", "error");
+    }
+};
+
+async function loadSettingsIntoUI() {
+    try {
+        const settings = await api.getSettings();
+        
+        // General
+        if (document.getElementById('setting-api-key')) document.getElementById('setting-api-key').value = settings.API_KEY || '';
+        if (document.getElementById('setting-redirect-uri')) document.getElementById('setting-redirect-uri').value = settings.REDIRECT_URI || '';
+        
+        // Sandbox
+        if (document.getElementById('setting-sandbox-key')) document.getElementById('setting-sandbox-key').value = settings.SANDBOX_API_KEY || '';
+        if (document.getElementById('toggle-sandboxmode')) document.getElementById('toggle-sandboxmode').checked = settings.USE_SANDBOX || false;
+        
+        // Risk
+        if (document.getElementById('risk-capital')) document.getElementById('risk-capital').value = settings.TRADING_CAPITAL || 100000;
+        if (document.getElementById('risk-pct')) document.getElementById('risk-pct').value = settings.MAX_RISK_PER_TRADE_PCT || 1.0;
+        if (document.getElementById('risk-maxloss')) document.getElementById('risk-maxloss').value = settings.MAX_DAILY_LOSS_PCT || 3.0;
+        if (document.getElementById('risk-maxtrades')) document.getElementById('risk-maxtrades').value = settings.MAX_OPEN_TRADES || 3;
+        if (document.getElementById('setting-trading-side')) document.getElementById('setting-trading-side').value = settings.TRADING_SIDE || 'BOTH';
+        
+        // Notifications
+        if (document.getElementById('setting-notification-channels')) document.getElementById('setting-notification-channels').value = settings.NOTIFICATION_CHANNELS || 'EMAIL';
+        if (document.getElementById('setting-smtp-server')) document.getElementById('setting-smtp-server').value = settings.SMTP_SERVER || '';
+        if (document.getElementById('setting-smtp-port')) document.getElementById('setting-smtp-port').value = settings.SMTP_PORT || 587;
+        if (document.getElementById('setting-smtp-user')) document.getElementById('setting-smtp-user').value = settings.SMTP_USER || '';
+        if (document.getElementById('setting-smtp-password')) document.getElementById('setting-smtp-password').value = settings.SMTP_PASSWORD || '';
+        if (document.getElementById('setting-email-recipient')) document.getElementById('setting-email-recipient').value = settings.EMAIL_RECIPIENT || '';
+        
+    } catch (e) {
+        console.error("Failed to load settings into UI", e);
+    }
+}
+
 window.loadStrategy = async () => {
     const selector = document.getElementById('strategy-selector');
     if (!selector) return;
@@ -1064,7 +1135,10 @@ window.switchMainView = (view) => {
     updateElementText('oc-instrument-name', currentInstrumentName);
 
     if (view === 'options') fetchOptionChain();
-    if (view === 'settings') refreshStatus();
+    if (view === 'settings') {
+        refreshStatus();
+        loadSettingsIntoUI();
+    }
 };
 
 function switchTab(containerId, contentId) {

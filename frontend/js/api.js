@@ -106,5 +106,10 @@ export const api = {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(settings)
         }).then(r => r.json());
+    },
+    async testNotification(channel = "email") {
+        return fetch(`${API_BASE}/notifications/test?channel=${channel}`, {
+            method: 'POST'
+        }).then(r => r.json());
     }
 };

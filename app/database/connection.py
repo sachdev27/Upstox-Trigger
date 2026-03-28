@@ -112,6 +112,18 @@ class MarketTick(Base):
     oi = Column(Float)
 
 
+class Watchlist(Base):
+    """User-defined watchlist for monitoring and strategy evaluation."""
+
+    __tablename__ = "watchlists"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    instrument_key = Column(String, unique=True, nullable=False)
+    symbol = Column(String)
+    name = Column(String)
+    added_at = Column(DateTime, default=datetime.utcnow)
+
+
 # ── Engine & Session ────────────────────────────────────────────
 
 _engine = None

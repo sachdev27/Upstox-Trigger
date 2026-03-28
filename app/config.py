@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     REDIRECT_URI: str = "http://localhost:8210/callback/"
     AUTH_CODE: str = ""
     ACCESS_TOKEN: str = ""
-    
+
     # -- Upstox Sandbox ------------------------------------------
     USE_SANDBOX: bool = False
     SANDBOX_API_KEY: str = ""
@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     # ── Notifications ───────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
+
+    # Email (SMTP)
+    SMTP_SERVER: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    EMAIL_RECIPIENT: str = ""                       # Comma-separated list
+    NOTIFICATION_CHANNELS: str = "EMAIL"            # Enabled channels (comma-separated)
 
     model_config = {
         "env_file": str(BASE_DIR / ".env"),
