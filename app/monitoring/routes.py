@@ -1,14 +1,20 @@
+import io
+import csv
+import json
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Query
+from datetime import datetime, timezone, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from app.database.connection import get_session, Watchlist, Instrument
-from typing import List
+from app.database.connection import get_session, Watchlist, Instrument, ActiveSignal
+from typing import List, Optional
 
 router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 logger = logging.getLogger(__name__)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # Static Nifty 200 list (simplified for this implementation)
-# In a real app, this would be fetched from a CSV or external API.
 NIFTY200_KEYS = [
     "NSE_EQ|INE002A01018", # RELIANCE
     "NSE_EQ|INE040A01034", # HDFCBANK
@@ -20,44 +26,78 @@ NIFTY200_KEYS = [
     "NSE_EQ|INE154A01025", # ITC
     "NSE_EQ|INE238A01034", # AXISBANK
     "NSE_EQ|INE081A01012", # ICICIBANK
-    # ... more would be added here or loaded from a file
 ]
 
 def get_nifty200_list() -> List[str]:
     """Return the list of instrument keys for Nifty 200 components."""
     return NIFTY200_KEYS
 
+
+# ── Watchlist CRUD ──────────────────────────────────────────────
+
 @router.get("/watchlist")
 def get_watchlist(session: Session = Depends(get_session)):
     """Fetch the custom user watchlist."""
     items = session.query(Watchlist).all()
     return {"status": "success", "data": [
-        {"instrument_key": i.instrument_key, "symbol": i.symbol, "name": i.name}
+        {
+            "id": i.id,
+            "instrument_key": i.instrument_key,
+            "symbol": i.symbol,
+            "name": i.name,
+            "timeframes": i.timeframes or ["15m"],
+        }
         for i in items
     ]}
 
+
 @router.post("/watchlist")
-def add_to_watchlist(instrument_key: str, session: Session = Depends(get_session)):
+def add_to_watchlist(
+    instrument_key: str,
+    timeframes: Optional[str] = Query(None, description="Comma-separated TFs, e.g. '5m,15m,1H'"),
+    session: Session = Depends(get_session),
+):
     """Add a new instrument to the watchlist."""
-    # Check if instrument exists in master
     master = session.query(Instrument).filter_by(instrument_key=instrument_key).first()
-    if not master:
-        raise HTTPException(status_code=404, detail="Instrument not found in master list")
     
     existing = session.query(Watchlist).filter_by(instrument_key=instrument_key).first()
     if existing:
-        return {"status": "success", "message": "Already in watchlist"}
+        # Update timeframes if provided
+        if timeframes:
+            existing.timeframes = [t.strip() for t in timeframes.split(",") if t.strip()]
+            session.commit()
+        return {"status": "success", "message": "Already in watchlist (timeframes updated)"}
+    
+    tf_list = [t.strip() for t in timeframes.split(",") if t.strip()] if timeframes else ["15m"]
     
     item = Watchlist(
         instrument_key=instrument_key,
-        symbol=master.symbol,
-        name=master.name
+        symbol=master.symbol if master else instrument_key.split("|")[-1],
+        name=master.name if master else instrument_key,
+        timeframes=tf_list,
     )
     session.add(item)
     session.commit()
-    return {"status": "success", "message": f"Added {master.symbol} to watchlist"}
+    return {"status": "success", "message": f"Added {item.symbol} to watchlist"}
 
-@router.delete("/watchlist/{instrument_key}")
+
+@router.put("/watchlist/{item_id}/timeframes")
+def update_watchlist_timeframes(
+    item_id: int,
+    timeframes: str = Query(..., description="Comma-separated TFs"),
+    session: Session = Depends(get_session),
+):
+    """Update timeframes for a watchlist item."""
+    item = session.query(Watchlist).filter_by(id=item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Watchlist item not found")
+    
+    item.timeframes = [t.strip() for t in timeframes.split(",") if t.strip()]
+    session.commit()
+    return {"status": "success", "timeframes": item.timeframes}
+
+
+@router.delete("/watchlist/{instrument_key:path}")
 def remove_from_watchlist(instrument_key: str, session: Session = Depends(get_session)):
     """Remove an instrument from the watchlist."""
     item = session.query(Watchlist).filter_by(instrument_key=instrument_key).first()
@@ -67,3 +107,117 @@ def remove_from_watchlist(instrument_key: str, session: Session = Depends(get_se
     session.delete(item)
     session.commit()
     return {"status": "success", "message": "Removed from watchlist"}
+
+
+# ── Watchlist Import / Export ───────────────────────────────────
+
+@router.get("/watchlist/export")
+def export_watchlist(session: Session = Depends(get_session)):
+    """Export watchlist as CSV."""
+    items = session.query(Watchlist).all()
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["instrument_key", "symbol", "name", "timeframes"])
+    for item in items:
+        tfs = ",".join(item.timeframes or ["15m"])
+        writer.writerow([item.instrument_key, item.symbol, item.name, tfs])
+    
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=watchlist.csv"},
+    )
+
+
+@router.post("/watchlist/import")
+async def import_watchlist(file: UploadFile = File(...), session: Session = Depends(get_session)):
+    """Import watchlist from CSV. Expected columns: instrument_key, symbol, name, timeframes"""
+    content = await file.read()
+    text = content.decode("utf-8")
+    reader = csv.DictReader(io.StringIO(text))
+    
+    added = 0
+    skipped = 0
+    for row in reader:
+        key = row.get("instrument_key", "").strip()
+        if not key:
+            continue
+        
+        existing = session.query(Watchlist).filter_by(instrument_key=key).first()
+        if existing:
+            skipped += 1
+            continue
+        
+        tfs_raw = row.get("timeframes", "15m").strip()
+        tfs = [t.strip() for t in tfs_raw.split(",") if t.strip()] or ["15m"]
+        
+        item = Watchlist(
+            instrument_key=key,
+            symbol=row.get("symbol", key.split("|")[-1]).strip(),
+            name=row.get("name", key).strip(),
+            timeframes=tfs,
+        )
+        session.add(item)
+        added += 1
+    
+    session.commit()
+    return {"status": "success", "added": added, "skipped": skipped}
+
+
+# ── Active Signals ──────────────────────────────────────────────
+
+@router.get("/active-signals")
+def get_active_signals(
+    status: Optional[str] = Query(None, description="Filter by status: active or closed"),
+    session: Session = Depends(get_session),
+):
+    """Fetch persisted strategy signals."""
+    q = session.query(ActiveSignal).order_by(ActiveSignal.created_at.desc())
+    if status:
+        q = q.filter(ActiveSignal.status == status)
+    
+    signals = q.limit(100).all()
+    return {"status": "success", "data": [
+        {
+            "id": s.id,
+            "strategy_name": s.strategy_name,
+            "instrument_key": s.instrument_key,
+            "timeframe": s.timeframe,
+            "action": s.action,
+            "price": s.price,
+            "stop_loss": s.stop_loss,
+            "take_profit": s.take_profit,
+            "confidence_score": s.confidence_score,
+            "status": s.status,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+            "closed_at": s.closed_at.isoformat() if s.closed_at else None,
+        }
+        for s in signals
+    ]}
+
+
+@router.post("/active-signals/{signal_id}/close")
+def close_active_signal(signal_id: int, session: Session = Depends(get_session)):
+    """Mark an active signal as closed."""
+    sig = session.query(ActiveSignal).filter_by(id=signal_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Signal not found")
+    
+    sig.status = "closed"
+    sig.closed_at = datetime.now(IST)
+    session.commit()
+    return {"status": "success", "message": "Signal closed"}
+
+
+@router.delete("/active-signals/{signal_id}")
+def delete_active_signal(signal_id: int, session: Session = Depends(get_session)):
+    """Delete a signal record."""
+    sig = session.query(ActiveSignal).filter_by(id=signal_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Signal not found")
+    
+    session.delete(sig)
+    session.commit()
+    return {"status": "success", "message": "Signal deleted"}

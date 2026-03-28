@@ -49,9 +49,11 @@ def test_scheduler_imports():
 def test_database_imports():
     from app.database.connection import (
         Base, TradeLog, StrategyState, CandleCache,
+        Watchlist, ActiveSignal,
         get_engine, get_session, init_db,
     )
     assert Base is not None
+    assert ActiveSignal is not None
 
 
 def test_main_app_imports():

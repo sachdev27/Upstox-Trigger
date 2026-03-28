@@ -131,26 +131,48 @@ class ExecutionProcessor(SignalProcessor):
         return True
 
 class AlerterProcessor(SignalProcessor):
-    """Sends notifications (Email) for trade signals."""
+    """Sends notifications (Email) for trade signals and persists to ActiveSignal."""
     async def process(self, signal: 'TradeSignal', config: 'StrategyConfig', engine: 'AutomationEngine') -> bool:
+        # 1. Persist to ActiveSignal table
+        try:
+            from app.database.connection import ActiveSignal
+            session = get_session()
+            active_sig = ActiveSignal(
+                strategy_name=signal.strategy_name or config.name,
+                instrument_key=signal.instrument_key,
+                timeframe=config.timeframe,
+                action=signal.action.value,
+                price=signal.price,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+                confidence_score=signal.confidence_score,
+                status="active",
+                metadata_json=signal.metadata or {},
+            )
+            session.add(active_sig)
+            session.commit()
+            session.close()
+        except Exception as e:
+            logger.error(f"Failed to persist ActiveSignal: {e}")
+
+        # 2. Send notification
         manager = get_notification_manager()
         is_paper = engine.paper_trading or config.paper_trading
         mode_str = "[PAPER]" if is_paper else "[LIVE]"
         
         subject = f"🎯 {mode_str} Trade Alert: {signal.action.value} {signal.instrument_key}"
         
-        # Build message body
         body = (
             f"Strategy: {signal.strategy_name or config.name}\n"
             f"Action: {signal.action.value}\n"
             f"Symbol: {signal.instrument_key}\n"
+            f"Timeframe: {config.timeframe}\n"
             f"Price: ₹{signal.price:.2f}\n"
             f"SL: ₹{signal.stop_loss:.2f} | TP: ₹{signal.take_profit:.2f}\n"
             f"Score: {signal.confidence_score}\n"
             f"Time: {datetime.now(IST).strftime('%H:%M:%S')}"
         )
         
-        # Dispatch alert (non-blocking)
         asyncio.create_task(manager.send_alert(subject, body))
         return True
 

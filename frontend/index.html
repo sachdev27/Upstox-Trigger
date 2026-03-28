@@ -275,6 +275,7 @@
                     <button class="bottom-tab" onclick="switchBottomTab('orderbook')">Order Book</button>
                     <button class="bottom-tab" onclick="switchBottomTab('trades')">Trade History</button>
                     <button class="bottom-tab" onclick="switchBottomTab('signals')">Signals</button>
+                    <button class="bottom-tab" onclick="switchBottomTab('active-signals')">🟢 Active Signals</button>
                     <button class="bottom-tab" onclick="switchBottomTab('activity')">Activity Log</button>
                 </div>
                 
@@ -361,12 +362,57 @@
                         <div class="log-line"><span class="log-time">[System]</span> Terminal initialized.</div>
                     </div>
                 </div>
+
+                <!-- Active Signals Tab -->
+                <div id="tab-active-signals" class="bottom-content">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Strategy</th>
+                                <th>Instrument</th>
+                                <th>TF</th>
+                                <th>Action</th>
+                                <th>Price</th>
+                                <th>SL</th>
+                                <th>TP</th>
+                                <th>Score</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="active-signals-body">
+                            <tr><td colspan="11" style="text-align:center; padding: 20px;" class="text-muted">No active signals</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </main>
 
         <!-- ── Right Panel (Controls) ── -->
         <aside class="panel-right">
             
+            <!-- Watchlist Management -->
+            <div class="panel-header">
+                Watchlist
+                <div style="display: flex; gap: 4px;">
+                    <button class="btn btn-outline" style="padding: 2px 6px; font-size: 0.65rem; width: auto;" onclick="importWatchlistCSV()" title="Import CSV">📥</button>
+                    <button class="btn btn-outline" style="padding: 2px 6px; font-size: 0.65rem; width: auto;" onclick="exportWatchlistCSV()" title="Export CSV">📤</button>
+                </div>
+            </div>
+            <div class="control-section" style="padding: 8px 12px;">
+                <div style="display: flex; gap: 6px; margin-bottom: 8px;">
+                    <input type="text" id="watchlist-search" class="form-input" placeholder="Search to add..." style="font-size: 0.8rem; padding: 6px; flex: 1;" autocomplete="off">
+                    <button class="btn btn-primary" style="width: auto; padding: 4px 10px; font-size: 0.8rem; white-space: nowrap;" onclick="addCurrentToWatchlist()">+ Add</button>
+                </div>
+                <div id="watchlist-search-results" style="max-height: 120px; overflow-y: auto; margin-bottom: 4px;"></div>
+                <div id="watchlist-items" class="watchlist" style="max-height: 200px; overflow-y: auto;">
+                    <div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">No instruments in watchlist</div>
+                </div>
+                <!-- Hidden file input for CSV import -->
+                <input type="file" id="watchlist-csv-input" accept=".csv" style="display: none;" onchange="handleWatchlistCSVImport(this)">
+            </div>
+
             <div class="panel-header">Engine Control</div>
             <div class="control-section">
                 

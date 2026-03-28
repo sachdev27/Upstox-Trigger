@@ -57,6 +57,10 @@ async def lifespan(app: FastAPI):
         from app.database.seed import seed_settings
         seed_settings()
 
+    # Seed watchlist with Nifty 50 if empty
+    from app.database.seed import seed_watchlist_nifty50
+    seed_watchlist_nifty50()
+
     # Load dynamic settings from DB → overrides .env defaults
     settings.load_from_db()
     logger.info("⚙️ Dynamic settings loaded from database.")

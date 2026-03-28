@@ -178,26 +178,45 @@ class AutomationEngine:
             for instrument in config.instruments:
                 # Expanded watchlist support
                 target_instruments = [instrument]
+                tf_overrides = {}  # instrument_key -> [timeframes]
                 if instrument == "NIFTY200":
                     from app.monitoring.routes import get_nifty200_list
                     target_instruments = get_nifty200_list()
                 elif instrument == "CUSTOM_WATCHLIST":
                     from app.database.connection import get_session, Watchlist
                     session = get_session()
-                    target_instruments = [w.instrument_key for w in session.query(Watchlist).all()]
+                    wl_items = session.query(Watchlist).all()
+                    target_instruments = [w.instrument_key for w in wl_items]
+                    # Build TF override map from watchlist
+                    for w in wl_items:
+                        if w.timeframes:
+                            tf_overrides[w.instrument_key] = w.timeframes
                     session.close()
 
                 for target in target_instruments:
-                    try:
-                        signal = await self._evaluate_instrument(
-                            strategy, config, target
-                        )
-                        if signal:
-                            await self._handle_signal(signal, config)
-                    except Exception as e:
-                        logger.error(
-                            f"Error evaluating {target} with {config.name}: {e}"
-                        )
+                    # Get timeframes for this instrument (custom or default)
+                    timeframes_to_scan = tf_overrides.get(target, [config.timeframe])
+                    
+                    for tf in timeframes_to_scan:
+                        try:
+                            # Create a shallow copy of config with this TF
+                            tf_config = StrategyConfig(
+                                name=config.name,
+                                enabled=config.enabled,
+                                instruments=config.instruments,
+                                timeframe=tf,
+                                params=config.params,
+                                paper_trading=config.paper_trading,
+                            )
+                            signal = await self._evaluate_instrument(
+                                strategy, tf_config, target
+                            )
+                            if signal:
+                                await self._handle_signal(signal, tf_config)
+                        except Exception as e:
+                            logger.error(
+                                f"Error evaluating {target} ({tf}) with {config.name}: {e}"
+                            )
 
     async def _evaluate_instrument(
         self,
@@ -326,6 +345,7 @@ class AutomationEngine:
             ],
             "signals_today": len(self._signals_log),
             "trades_today": len(self._trades_today),
+            "active_signals_count": self._get_active_signal_count(),
             "recent_signals": self._signals_log[-10:],
             "recent_trades": self._trades_today[-10:],
             "market_hours": self._order_service.is_market_hours() if self._order_service else False,
@@ -338,6 +358,17 @@ class AutomationEngine:
     def get_trades_log(self) -> list[dict]:
         """Get all trades executed today."""
         return self._trades_today
+
+    def _get_active_signal_count(self) -> int:
+        """Get count of active (non-closed) signals from DB."""
+        try:
+            from app.database.connection import get_session, ActiveSignal
+            session = get_session()
+            count = session.query(ActiveSignal).filter_by(status="active").count()
+            session.close()
+            return count
+        except Exception:
+            return 0
 
     async def trigger_test_signal(self, instrument_key: str) -> dict:
         """Force a test signal for debugging."""

@@ -85,6 +85,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     await refreshPositions();
     await refreshTrades();
     await refreshSignals();
+    await refreshActiveSignals();
+    await refreshWatchlist();
     await checkAuth();
     await refreshStatus();
     await loadSettingsIntoUI();
@@ -112,10 +114,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     
     // Interval updates
     setInterval(updateClock, 1000);
-    setInterval(refreshAccountSummary, 60000); // Every minute
-    setInterval(refreshPositions, 30000); // Every 30 seconds
-    setInterval(refreshMarketStatus, 60000); // Every minute
-    setInterval(refreshOrderBook, 30000); // Every 30 seconds
+    setInterval(refreshAccountSummary, 60000);
+    setInterval(refreshPositions, 30000);
+    setInterval(refreshMarketStatus, 60000);
+    setInterval(refreshOrderBook, 30000);
+    setInterval(refreshActiveSignals, 15000); // Every 15 seconds
 });
 
 function setupEventListeners() {
@@ -141,6 +144,39 @@ function setupEventListeners() {
     document.getElementById("strategy-selector")?.addEventListener("change", () => {
         renderDynamicStrategyForm();
         refreshOverlay();
+    });
+
+    // Watchlist search
+    const wlSearch = document.getElementById("watchlist-search");
+    let wlSearchTimer;
+    wlSearch?.addEventListener("input", (e) => {
+        clearTimeout(wlSearchTimer);
+        const query = e.target.value.trim();
+        const results = document.getElementById("watchlist-search-results");
+        if (query.length < 2) {
+            results.innerHTML = "";
+            return;
+        }
+        wlSearchTimer = setTimeout(async () => {
+            try {
+                const data = await api.searchInstruments(query);
+                const instruments = data.instruments || [];
+                results.innerHTML = "";
+                instruments.slice(0, 5).forEach(inst => {
+                    const item = document.createElement("div");
+                    item.className = "wl-search-item";
+                    item.innerHTML = `<span style="font-weight:600; color:var(--primary); font-size:0.8rem;">${inst.trading_symbol || inst.symbol}</span> <span style="font-size:0.7rem; color:var(--text-muted);">${inst.name || ''}</span>`;
+                    item.onclick = async () => {
+                        await api.addToWatchlist(inst.instrument_key);
+                        showToast(`Added ${inst.trading_symbol || inst.symbol} to watchlist`, 'success');
+                        wlSearch.value = "";
+                        results.innerHTML = "";
+                        refreshWatchlist();
+                    };
+                    results.appendChild(item);
+                });
+            } catch (e) { console.error(e); }
+        }, 300);
     });
 }
 
@@ -182,6 +218,7 @@ function handleWsMessage(msg) {
                 addLog(`🎯 Signal: ${msg.data.action} on ${msg.data.instrument}`, 'info');
                 showToast(`New Signal: ${msg.data.action} on ${msg.data.instrument}`);
                 refreshSignals();
+                refreshActiveSignals();
                 break;
             case 'trade_executed':
                 addLog(`💰 Trade: ${msg.data.action} @ ${msg.data.price}`, 'success');
@@ -666,6 +703,166 @@ function subscribeToPositions() {
         }
     });
 }
+
+// ── Watchlist Management ──────────────────────────────────────
+
+async function refreshWatchlist() {
+    try {
+        const data = await api.getWatchlist();
+        const container = document.getElementById("watchlist-items");
+        if (!container) return;
+        
+        const items = data.data || [];
+        if (items.length === 0) {
+            container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">No instruments in watchlist</div>`;
+            return;
+        }
+
+        container.innerHTML = "";
+        items.forEach(item => {
+            const div = document.createElement("div");
+            div.className = "watchlist-item";
+            div.innerHTML = `
+                <div style="flex: 1; min-width: 0;">
+                    <div class="instrument-name" style="font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${item.symbol || item.instrument_key}</div>
+                    <div style="display: flex; gap: 3px; flex-wrap: wrap; margin-top: 3px;">
+                        ${(item.timeframes || ['15m']).map(tf => `<span class="badge" style="font-size: 0.6rem; padding: 1px 4px;">${tf}</span>`).join('')}
+                    </div>
+                </div>
+                <div style="display: flex; gap: 4px; align-items: center; flex-shrink: 0;">
+                    <button class="btn btn-outline" style="width: auto; padding: 2px 6px; font-size: 0.6rem;" onclick="event.stopPropagation(); selectInstrument('${item.instrument_key}', '${(item.symbol || item.name || '').replace(/'/g, '\\\'')}')" title="View Chart">📈</button>
+                    <button class="btn btn-outline" style="width: auto; padding: 2px 6px; font-size: 0.6rem; color: var(--danger);" onclick="event.stopPropagation(); removeFromWatchlist('${item.instrument_key}')" title="Remove">✕</button>
+                </div>
+            `;
+            container.appendChild(div);
+        });
+    } catch (e) {
+        console.error("Failed to refresh watchlist", e);
+    }
+}
+
+window.addCurrentToWatchlist = async () => {
+    if (!currentInstrumentKey) {
+        showToast('No instrument selected', 'warning');
+        return;
+    }
+    try {
+        await api.addToWatchlist(currentInstrumentKey);
+        showToast(`Added ${currentInstrumentName} to watchlist`, 'success');
+        refreshWatchlist();
+    } catch (e) {
+        showToast('Failed to add to watchlist', 'error');
+    }
+};
+
+window.removeFromWatchlist = async (key) => {
+    try {
+        await api.removeFromWatchlist(key);
+        showToast('Removed from watchlist', 'info');
+        refreshWatchlist();
+    } catch (e) {
+        showToast('Failed to remove', 'error');
+    }
+};
+
+window.importWatchlistCSV = () => {
+    document.getElementById('watchlist-csv-input')?.click();
+};
+
+window.handleWatchlistCSVImport = async (input) => {
+    if (!input.files || !input.files[0]) return;
+    try {
+        const res = await api.importWatchlist(input.files[0]);
+        showToast(`Imported: ${res.added} added, ${res.skipped} skipped`, 'success');
+        refreshWatchlist();
+    } catch (e) {
+        showToast('CSV import failed', 'error');
+    }
+    input.value = ''; // Reset input
+};
+
+window.exportWatchlistCSV = async () => {
+    try {
+        const response = await api.exportWatchlist();
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'watchlist.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast('Watchlist exported', 'success');
+    } catch (e) {
+        showToast('Export failed', 'error');
+    }
+};
+
+// ── Active Signals ────────────────────────────────────────────
+
+async function refreshActiveSignals() {
+    try {
+        const data = await api.getActiveSignals();
+        const list = document.getElementById("active-signals-body");
+        if (!list) return;
+        list.innerHTML = "";
+        
+        const signals = data.data || [];
+        if (signals.length === 0) {
+            list.innerHTML = `<tr><td colspan="11" style="text-align:center; padding:20px; color:var(--text-muted)">No active signals</td></tr>`;
+            return;
+        }
+        
+        signals.forEach(s => {
+            const row = document.createElement("tr");
+            if (s.status === 'active') row.classList.add('active-signal-row');
+            
+            const time = s.created_at ? new Date(s.created_at).toLocaleTimeString('en-IN', { hour12: false }) : '--';
+            const statusBadge = s.status === 'active' 
+                ? '<span class="badge" style="background:rgba(0,208,132,0.15); color:#00d084;">ACTIVE</span>'
+                : '<span class="badge" style="background:rgba(139,139,158,0.15); color:#8b8b9e;">CLOSED</span>';
+            
+            row.innerHTML = `
+                <td class="text-muted" style="font-size:0.7rem">${time}</td>
+                <td style="font-size:0.75rem">${s.strategy_name}</td>
+                <td class="mono" style="font-size:0.75rem">${s.instrument_key}</td>
+                <td><span class="badge" style="font-size:0.6rem; padding:1px 4px;">${s.timeframe || '15m'}</span></td>
+                <td><span class="badge ${s.action.toLowerCase()}">${s.action}</span></td>
+                <td class="mono">₹${formatPrice(s.price)}</td>
+                <td class="mono text-muted" style="font-size:0.75rem">${s.stop_loss ? '₹' + formatPrice(s.stop_loss) : '-'}</td>
+                <td class="mono text-muted" style="font-size:0.75rem">${s.take_profit ? '₹' + formatPrice(s.take_profit) : '-'}</td>
+                <td>${s.confidence_score || 0}</td>
+                <td>${statusBadge}</td>
+                <td>
+                    ${s.status === 'active' ? `<button class="btn btn-outline" style="width:auto; padding:2px 6px; font-size:0.65rem;" onclick="closeActiveSignal(${s.id})">Close</button>` : ''}
+                    <button class="btn btn-outline" style="width:auto; padding:2px 6px; font-size:0.65rem; color:var(--danger);" onclick="deleteActiveSignal(${s.id})">✕</button>
+                </td>
+            `;
+            list.appendChild(row);
+        });
+    } catch (e) {
+        console.error("Failed to refresh active signals", e);
+    }
+}
+
+window.closeActiveSignal = async (id) => {
+    try {
+        await api.closeActiveSignal(id);
+        showToast('Signal closed', 'info');
+        refreshActiveSignals();
+    } catch (e) {
+        showToast('Failed to close signal', 'error');
+    }
+};
+
+window.deleteActiveSignal = async (id) => {
+    try {
+        await api.deleteActiveSignal(id);
+        showToast('Signal deleted', 'info');
+        refreshActiveSignals();
+    } catch (e) {
+        showToast('Failed to delete signal', 'error');
+    }
+};
 
 
 
