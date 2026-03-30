@@ -13,7 +13,7 @@ let currentInstrumentName = localStorage.getItem("currentInstrumentName") || "Ni
 let currentInterval = localStorage.getItem("currentInterval") || "15minute";
 let engineActive = false;
 let dynamicSchemas = {};
-const IST_OFFSET = 0; // Standardize to UTC seconds
+const IST_OFFSET = 0; // Standardize to UTC seconds 
 
 let globalSearchResults = [];
 let selectedSearchIndex = -1;
@@ -330,6 +330,7 @@ async function fetchHistoricalCandles() {
         if (data && data.candles) {
             const valid = data.candles
                 .filter(c => c && c.time && c.open != null && c.high != null && c.low != null && c.close != null)
+                .map(c => ({...c, time: c.time}))
                 .sort((a, b) => a.time - b.time);
             
             const unique = [];

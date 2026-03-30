@@ -165,7 +165,7 @@ def get_engine():
 
         _engine = create_engine(
             db_url,
-            echo=settings.DEBUG,
+            echo=False,
             connect_args={"check_same_thread": False} if "sqlite" in db_url else {},
         )
         logger.info(f"Database engine created: {db_url}")

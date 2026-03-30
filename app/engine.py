@@ -193,6 +193,9 @@ class AutomationEngine:
                             tf_overrides[w.instrument_key] = w.timeframes
                     session.close()
 
+                total_scans = sum(len(tf_overrides.get(t, [config.timeframe])) for t in target_instruments)
+                logger.info(f"🔍 Scanning {len(target_instruments)} instruments ({total_scans} timeframe combinations)...")
+
                 for target in target_instruments:
                     # Get timeframes for this instrument (custom or default)
                     timeframes_to_scan = tf_overrides.get(target, [config.timeframe])

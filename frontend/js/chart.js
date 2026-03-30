@@ -44,7 +44,19 @@ export class ChartManager {
                 borderColor: 'rgba(255, 255, 255, 0.1)',
                 timeVisible: true,
                 secondsVisible: false,
+                tickMarkFormatter: (time, tickMarkType, locale) => {
+                    if (time.year) return `${time.year}-${String(time.month).padStart(2, '0')}-${String(time.day).padStart(2, '0')}`;
+                    const d = new Date(time * 1000);
+                    return d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute:'2-digit', hour12: false });
+                }
             },
+            localization: {
+                timeFormatter: time => {
+                    if (time.year) return `${time.year}-${String(time.month).padStart(2, '0')}-${String(time.day).padStart(2, '0')}`;
+                    const d = new Date(time * 1000);
+                    return d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute:'2-digit', hour12: false }) + " IST";
+                }
+            }
         });
 
         this.candleSeries = this.chart.addCandlestickSeries({
