@@ -28,6 +28,21 @@ class MarketDataService:
         self.config = configuration
         self.settings = get_settings()
         self.api_version = self.settings.API_VERSION
+        
+        # Reuse API Clients
+        self.api_client = upstox_client.ApiClient(self.config)
+        self.history_api = upstox_client.HistoryApi(self.api_client)
+        self.quote_api = upstox_client.MarketQuoteApi(self.api_client)
+        self.portfolio_api = upstox_client.PortfolioApi(self.api_client)
+        self.user_api = upstox_client.UserApi(self.api_client)
+        self.instruments_api = upstox_client.InstrumentsApi(self.api_client)
+        self.timing_api = upstox_client.MarketHolidaysAndTimingsApi(self.api_client)
+        self.options_api = upstox_client.OptionsApi(self.api_client)
+        self.charge_api = upstox_client.ChargeApi(self.api_client)
+
+        # Candle Cache: (instrument_key, interval) -> {"expiry": datetime, "candles": list[dict]}
+        self._candle_cache = {}
+        self._cache_ttl = 55 # seconds (just under 1 min)
 
     # ── Historical Candles ──────────────────────────────────────
 
@@ -42,7 +57,6 @@ class MarketDataService:
         Fetch historical OHLCV candle data and merge with today's intraday data.
         Automatically resamples 1minute data if a custom timeframe (e.g. 15minute, 5minute) forms.
         """
-        api = upstox_client.HistoryApi(upstox_client.ApiClient(self.config))
         
         # Map UI timeframes (1m, 5m, 15m, 1H, 1D) to Upstox APIs strict interval modes
         tf_map = {
@@ -64,6 +78,15 @@ class MarketDataService:
         
         fetch_interval, needs_resample, resample_rule = tf_map.get(interval, ("1minute", False, None))
 
+        # Check Cache
+        cache_key = (instrument_key, interval)
+        now = datetime.now()
+        if cache_key in self._candle_cache:
+            entry = self._candle_cache[cache_key]
+            if now < entry["expiry"]:
+                logger.debug(f"💎 Cache Hit: {instrument_key} ({interval})")
+                return entry["candles"]
+
         try:
             candles_dict = {}
             
@@ -76,7 +99,7 @@ class MarketDataService:
                 to_date = datetime.now().strftime('%Y-%m-%d')
 
             try:
-                res1 = api.get_historical_candle_data1(
+                res1 = self.history_api.get_historical_candle_data1(
                     instrument_key, fetch_interval, to_date, from_date, self.api_version
                 )
                 data1 = res1.to_dict()
@@ -89,7 +112,7 @@ class MarketDataService:
             # Only for intraday intervals (day/week don't support get_intra_day_candle_data)
             if fetch_interval not in ["day", "week"]:
                 try:
-                    res2 = api.get_intra_day_candle_data(
+                    res2 = self.history_api.get_intra_day_candle_data(
                         instrument_key, fetch_interval, self.api_version
                     )
                     data2 = res2.to_dict()
@@ -126,6 +149,12 @@ class MarketDataService:
                     try:
                         c["time"] = int(pd.to_datetime(c["time"]).timestamp())
                     except: pass
+                
+                # Update Cache for non-resampled
+                self._candle_cache[cache_key] = {
+                    "expiry": datetime.now() + timedelta(seconds=self._cache_ttl),
+                    "candles": transformed
+                }
                 return transformed
                 
             # --- Dynamic Pandas Resampling ---
@@ -154,6 +183,11 @@ class MarketDataService:
                     "volume": int(row["volume"]),
                 })
                 
+            # Update Cache
+            self._candle_cache[cache_key] = {
+                "expiry": datetime.now() + timedelta(seconds=self._cache_ttl),
+                "candles": final_candles
+            }
             return final_candles
 
         except Exception as e:
@@ -168,13 +202,8 @@ class MarketDataService:
 
     # ── Market Quotes ───────────────────────────────────────────
 
-    def get_ltp(self, instrument_key: str) -> float | None:
-        """Get last traded price for an instrument."""
-        api = upstox_client.MarketQuoteApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.ltp(instrument_key, self.api_version)
+            response = self.quote_api.ltp(instrument_key, self.api_version)
             data = response.to_dict().get("data", {})
             # response keyed by instrument_key
             for key, val in data.items():
@@ -185,11 +214,8 @@ class MarketDataService:
 
     def get_full_quote(self, instrument_key: str) -> dict | None:
         """Get full market quote (OHLC, volume, depth, etc.)."""
-        api = upstox_client.MarketQuoteApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_full_market_quote(
+            response = self.quote_api.get_full_market_quote(
                 instrument_key, self.api_version
             )
             return response.to_dict().get("data", {})
@@ -201,11 +227,8 @@ class MarketDataService:
         self, instrument_key: str, interval: str = "1d"
     ) -> dict | None:
         """Get OHLC market quote for a given interval."""
-        api = upstox_client.MarketQuoteApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_market_quote_ohlc(
+            response = self.quote_api.get_market_quote_ohlc(
                 instrument_key, interval, self.api_version
             )
             return response.to_dict().get("data", {})
@@ -217,11 +240,8 @@ class MarketDataService:
 
     def get_positions(self) -> list:
         """Get current positions."""
-        api = upstox_client.PortfolioApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_positions(self.api_version)
+            response = self.portfolio_api.get_positions(self.api_version)
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Failed to fetch positions: {e}")
@@ -229,11 +249,8 @@ class MarketDataService:
 
     def get_holdings(self) -> list:
         """Get current holdings."""
-        api = upstox_client.PortfolioApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_holdings(self.api_version)
+            response = self.portfolio_api.get_holdings(self.api_version)
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Failed to fetch holdings: {e}")
@@ -241,11 +258,8 @@ class MarketDataService:
 
     def get_funds_and_margin(self) -> dict | None:
         """Get available funds and margin."""
-        api = upstox_client.UserApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_user_fund_margin(self.api_version)
+            response = self.user_api.get_user_fund_margin(self.api_version)
             return response.to_dict().get("data", {})
         except Exception as e:
             logger.error(f"Failed to fetch funds: {e}")
@@ -253,11 +267,8 @@ class MarketDataService:
 
     def get_profile(self) -> dict | None:
         """Get user profile."""
-        api = upstox_client.UserApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_profile(self.api_version)
+            response = self.user_api.get_profile(self.api_version)
             return response.to_dict().get("data", {})
         except Exception as e:
             logger.error(f"Failed to fetch profile: {e}")
@@ -276,11 +287,8 @@ class MarketDataService:
             query: Search term, e.g. "Reliance" or "NIFTY"
             page_size: Number of results to return
         """
-        api = upstox_client.InstrumentsApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.search_instrument(query)
+            response = self.instruments_api.search_instrument(query)
             data = response.to_dict()
             
             if isinstance(data, list):
@@ -305,11 +313,8 @@ class MarketDataService:
         Get real-time market status (open/closed) using the SDK.
         Replaces manual market hours checking.
         """
-        api = upstox_client.MarketHolidaysAndTimingsApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_market_status(exchange)
+            response = self.timing_api.get_market_status(exchange)
             return response.to_dict().get("data", {})
         except Exception as e:
             logger.error(f"Market status check failed: {e}")
@@ -317,11 +322,8 @@ class MarketDataService:
 
     def get_holidays(self) -> list:
         """Get list of market holidays."""
-        api = upstox_client.MarketHolidaysAndTimingsApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_holidays()
+            response = self.timing_api.get_holidays()
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Holidays fetch failed: {e}")
@@ -329,11 +331,8 @@ class MarketDataService:
 
     def get_exchange_timings(self, date: str) -> list:
         """Get exchange timings for a specific date (YYYY-MM-DD)."""
-        api = upstox_client.MarketHolidaysAndTimingsApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_exchange_timings(date)
+            response = self.timing_api.get_exchange_timings(date)
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Exchange timings fetch failed: {e}")
@@ -345,11 +344,8 @@ class MarketDataService:
         self, instrument_key: str, expiry_date: str
     ) -> dict | None:
         """Get put/call option chain for an instrument and expiry."""
-        api = upstox_client.OptionsApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_put_call_option_chain(
+            response = self.options_api.get_put_call_option_chain(
                 instrument_key, expiry_date
             )
             return response.to_dict().get("data", {})
@@ -361,16 +357,13 @@ class MarketDataService:
         self, instrument_key: str, expiry_date: str | None = None
     ) -> list:
         """Get available option contracts."""
-        api = upstox_client.OptionsApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
             if expiry_date:
-                response = api.get_option_contracts(
+                response = self.options_api.get_option_contracts(
                     instrument_key, expiry_date
                 )
             else:
-                response = api.get_option_contracts(instrument_key)
+                response = self.options_api.get_option_contracts(instrument_key)
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Option contracts fetch failed: {e}")
@@ -387,11 +380,8 @@ class MarketDataService:
         price: float,
     ) -> dict | None:
         """Calculate brokerage charges for a trade before execution."""
-        api = upstox_client.ChargeApi(
-            upstox_client.ApiClient(self.config)
-        )
         try:
-            response = api.get_brokerage(
+            response = self.charge_api.get_brokerage(
                 instrument_token, quantity, product,
                 transaction_type, price
             )

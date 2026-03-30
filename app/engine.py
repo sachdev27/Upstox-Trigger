@@ -314,14 +314,25 @@ class AutomationEngine:
         }
         interval = tf_to_interval.get(config.timeframe, "15minute")
 
-        # Wait for rate limit to clear before launching synchronous API calls
-        await self.rate_limiter.wait_for_token()
+        # 1. Prepare Fetch Tasks
+        tasks = [
+            asyncio.to_thread(self._market_service.get_intraday_candles, instrument_key, interval)
+        ]
+        
+        has_htf = strategy.params.get("use_htf_filter")
+        if has_htf:
+            htf_tf = strategy.params.get("htf_timeframe", "1D")
+            htf_interval = "day" if htf_tf in ["1D", "D", "W", "1W"] else "60minute" if htf_tf in ["1H", "60m"] else "day"
+            tasks.append(asyncio.to_thread(self._market_service.get_historical_candles, instrument_key, htf_interval))
 
-        # Fetch historical candles
-        candles = await asyncio.to_thread(
-            self._market_service.get_intraday_candles,
-            instrument_key, interval
-        )
+        # 2. Wait for Rate Limit (consume tokens for all tasks in this evaluation)
+        for _ in range(len(tasks)):
+            await self.rate_limiter.wait_for_token()
+
+        # 3. Execute Fetching Concurrently
+        results = await asyncio.gather(*tasks)
+        candles = results[0]
+        htf_candles = results[1] if (has_htf and len(results) > 1) else None
 
         if not candles or len(candles) < 100:
             logger.debug(
@@ -329,7 +340,7 @@ class AutomationEngine:
             )
             return None
 
-        # Build DataFrame
+        # Build DataFrames
         df = pd.DataFrame(candles)
         if "datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["datetime"])
@@ -337,26 +348,14 @@ class AutomationEngine:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Fetch HTF candles if requested by strategy
         htf_df = None
-        if strategy.params.get("use_htf_filter"):
-            htf_tf = strategy.params.get("htf_timeframe", "1D")
-            # Map simplified TF to Upstox API intervals
-            htf_interval = "day" if htf_tf in ["1D", "D", "W", "1W"] else "60minute" if htf_tf in ["1H", "60m"] else "day"
-            
-            # Wait for rate limit again before HTF fetch
-            await self.rate_limiter.wait_for_token()
-            htf_candles = await asyncio.to_thread(
-                self._market_service.get_historical_candles,
-                instrument_key, htf_interval
-            )
-            if htf_candles:
-                htf_df = pd.DataFrame(htf_candles)
-                if "datetime" in htf_df.columns:
-                    htf_df["datetime"] = pd.to_datetime(htf_df["datetime"])
-                for col in ["open", "high", "low", "close", "volume"]:
-                    if col in htf_df.columns:
-                        htf_df[col] = pd.to_numeric(htf_df[col], errors="coerce")
+        if htf_candles:
+            htf_df = pd.DataFrame(htf_candles)
+            if "datetime" in htf_df.columns:
+                htf_df["datetime"] = pd.to_datetime(htf_df["datetime"])
+            for col in ["open", "high", "low", "close", "volume"]:
+                if col in htf_df.columns:
+                    htf_df[col] = pd.to_numeric(htf_df[col], errors="coerce")
 
         # Evaluate strategy
         if hasattr(strategy, 'get_dashboard_state'):

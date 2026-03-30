@@ -25,6 +25,28 @@ class ScalpPro(BaseStrategy):
             "tp_atr_multiplier": 1.5,
         }
 
+    def _get_indicators(self, df: pd.DataFrame) -> dict:
+        """Calculate and cache indicators for the current dataframe to avoid redundant math."""
+        if len(df) == 0: return {}
+        
+        # Identity check: length + last timestamp
+        df_id = (len(df), df["time"].iloc[-1] if "time" in df.columns else 0)
+        if hasattr(self, "_last_df_id") and self._last_df_id == df_id:
+            return self._indicator_cache
+
+        p = self.params
+        res = {
+            "fast": ema(df["close"], p["fast_ema"]),
+            "slow": ema(df["close"], p["slow_ema"]),
+            "rsi": rsi(df["close"], p["rsi_period"]),
+            "vwap": vwap(df) if p["use_vwap_filter"] else None,
+            "atr": atr(df, p["atr_period"]),
+            "close": df["close"]
+        }
+        self._last_df_id = df_id
+        self._indicator_cache = res
+        return res
+
     def get_dashboard_state(
         self, df: pd.DataFrame, htf_df: pd.DataFrame | None = None
     ) -> dict:
@@ -33,21 +55,19 @@ class ScalpPro(BaseStrategy):
         if len(df) < p["slow_ema"]:
             return {}
 
-        fast_line = ema(df["close"], p["fast_ema"])
-        slow_line = ema(df["close"], p["slow_ema"])
-        rsi_line = rsi(df["close"], p["rsi_period"])
-        vwap_line = vwap(df) if p["use_vwap_filter"] else pd.Series(0, index=df.index)
-        atr_val = atr(df, p["atr_period"]).iloc[-1]
-
-        # Determine current state
-        close = df["close"].iloc[-1]
-        vwap_val = vwap_line.iloc[-1]
+        ind = self._get_indicators(df)
         
-        trend = "BULLISH" if fast_line.iloc[-1] > slow_line.iloc[-1] else "BEARISH"
+        # Determine current state
+        close = ind["close"].iloc[-1]
+        fast_curr = ind["fast"].iloc[-1]
+        slow_curr = ind["slow"].iloc[-1]
+        
+        trend = "BULLISH" if fast_curr > slow_curr else "BEARISH"
         
         if not p["use_vwap_filter"]:
             vwap_state = "PASS"
         else:
+            vwap_val = ind["vwap"].iloc[-1]
             if trend == "BULLISH" and close > vwap_val:
                 vwap_state = "PASS (Above)"
             elif trend == "BEARISH" and close < vwap_val:
@@ -58,10 +78,9 @@ class ScalpPro(BaseStrategy):
         return {
             "EMA Trend": trend,
             "VWAP Filter": vwap_state,
-            "RSI Value": round(rsi_line.iloc[-1], 2),
-            "ATR": round(atr_val, 2),
+            "RSI Value": round(ind["rsi"].iloc[-1], 2),
+            "ATR": round(ind["atr"].iloc[-1], 2),
         }
-
 
     def on_candle(
         self,
@@ -72,14 +91,12 @@ class ScalpPro(BaseStrategy):
         if len(df) < p["slow_ema"]:
             return None
 
-        # Calculate indicators
-        fast_line = ema(df["close"], p["fast_ema"])
-        slow_line = ema(df["close"], p["slow_ema"])
+        ind = self._get_indicators(df)
         
-        fast_curr = fast_line.iloc[-1]
-        fast_prev = fast_line.iloc[-2]
-        slow_curr = slow_line.iloc[-1]
-        slow_prev = slow_line.iloc[-2]
+        fast_curr = ind["fast"].iloc[-1]
+        fast_prev = ind["fast"].iloc[-2]
+        slow_curr = ind["slow"].iloc[-1]
+        slow_prev = ind["slow"].iloc[-2]
 
         # EMA Crossovers
         buy_cross = fast_curr > slow_curr and fast_prev <= slow_prev
@@ -88,22 +105,19 @@ class ScalpPro(BaseStrategy):
         if not buy_cross and not sell_cross:
             return None
 
-        rsi_line = rsi(df["close"], p["rsi_period"])
-        vwap_line = vwap(df) if p["use_vwap_filter"] else None
-        close = df["close"].iloc[-1]
+        close = ind["close"].iloc[-1]
         
         # Long conditions
         if buy_cross:
             # Price must be > VWAP for longs
-            if p["use_vwap_filter"] and close < vwap_line.iloc[-1]:
+            if p["use_vwap_filter"] and close < ind["vwap"].iloc[-1]:
                 return None
             # RSI must exceed threshold
-            if rsi_line.iloc[-1] < p["rsi_buy_thresh"]:
+            if ind["rsi"].iloc[-1] < p["rsi_buy_thresh"]:
                 return None
                 
-            atr_val = atr(df, p["atr_period"]).iloc[-1]
-            sl_dist = atr_val * p["sl_atr_multiplier"]
-            tp_dist = atr_val * p["tp_atr_multiplier"]
+            sl_dist = ind["atr"].iloc[-1] * p["sl_atr_multiplier"]
+            tp_dist = ind["atr"].iloc[-1] * p["tp_atr_multiplier"]
             
             return TradeSignal(
                 strategy_name=self.config.name,
@@ -118,15 +132,14 @@ class ScalpPro(BaseStrategy):
         # Short conditions
         if sell_cross:
             # Price must be < VWAP for shorts
-            if p["use_vwap_filter"] and close > vwap_line.iloc[-1]:
+            if p["use_vwap_filter"] and close > ind["vwap"].iloc[-1]:
                 return None
             # RSI must be below threshold
-            if rsi_line.iloc[-1] > p["rsi_sell_thresh"]:
+            if ind["rsi"].iloc[-1] > p["rsi_sell_thresh"]:
                 return None
                 
-            atr_val = atr(df, p["atr_period"]).iloc[-1]
-            sl_dist = atr_val * p["sl_atr_multiplier"]
-            tp_dist = atr_val * p["tp_atr_multiplier"]
+            sl_dist = ind["atr"].iloc[-1] * p["sl_atr_multiplier"]
+            tp_dist = ind["atr"].iloc[-1] * p["tp_atr_multiplier"]
             
             return TradeSignal(
                 strategy_name=self.config.name,
