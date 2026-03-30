@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     TRADING_SIDE: str = "BOTH"
     MAX_OPEN_TRADES: int = 3
 
+    # ── Strategy Persistence ────────────────────────────────────
+    ACTIVE_STRATEGY_CLASS: str = "SuperTrendPro"
+    ACTIVE_STRATEGY_NAME: str = "SuperTrend Pro v6.3"
+
     # ── Notifications ───────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""

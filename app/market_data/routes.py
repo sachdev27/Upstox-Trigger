@@ -200,6 +200,24 @@ async def get_strategy_overlay(
         p_atr = strategy.params.get("atr_period", 10)
         p_mult = strategy.params.get("atr_multiplier", 3.0)
         st_df = supertrend(df, period=p_atr, multiplier=p_mult, use_rma=True)
+        trend = st_df["trend"]
+        
+        # Only evaluate full strategy logic at points where the primary trend flips!
+        # This keeps the API response blazing fast (O(1) in the number of flips).
+        import numpy as np
+        flips = (trend != trend.shift(1)) & (trend.shift(1).notna())
+        flip_indices = np.where(flips)[0]
+        
+        valid_signals = {}
+        for idx in flip_indices:
+            if idx < 100: continue
+            window = df.iloc[:idx+1]
+            try:
+                sig = strategy.on_candle(window, htf_df=None)
+                if sig:
+                    valid_signals[df.iloc[idx]["time"]] = sig.action.value
+            except Exception:
+                pass
         
         overlay = []
         for i in range(len(df)):
@@ -207,13 +225,58 @@ async def get_strategy_overlay(
             s = st_df.iloc[i]
             overlay.append({
                 "time": c["time"],
-                "trend": int(s["trend"]),
+                "trend": int(s["trend"]) if pd.notna(s["trend"]) else 1,
                 "supertrend": None if pd.isna(s["supertrend"]) else float(s["supertrend"]),
                 "upper": None if pd.isna(s["upper_band"]) else float(s["upper_band"]),
-                "lower": None if pd.isna(s["lower_band"]) else float(s["lower_band"])
+                "lower": None if pd.isna(s["lower_band"]) else float(s["lower_band"]),
+                "signal": valid_signals.get(c["time"], None)
             })
             
         return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
+        
+    elif strategy_class == "ScalpPro":
+        from app.strategies.scalp_pro import ScalpPro
+        from app.strategies.indicators import ema
+        import numpy as np
+        
+        strategy = ScalpPro(config)
+        strategy.params.update(parsed_params)
+        metrics = strategy.get_dashboard_state(df)
+        
+        fast_line = ema(df["close"], strategy.params.get("fast_ema", 9))
+        slow_line = ema(df["close"], strategy.params.get("slow_ema", 21))
+        
+        trend = np.where(fast_line > slow_line, 1, -1)
+        trend = pd.Series(trend, index=df.index)
+        
+        flips = (trend != trend.shift(1)) & (trend.shift(1).notna())
+        flip_indices = np.where(flips)[0]
+        
+        valid_signals = {}
+        for idx in flip_indices:
+            if idx < 100: continue
+            window = df.iloc[:idx+1]
+            try:
+                sig = strategy.on_candle(window, htf_df=None)
+                if sig:
+                    valid_signals[df.iloc[idx]["time"]] = sig.action.value
+            except Exception:
+                pass
+                
+        overlay = []
+        for i in range(len(df)):
+            c = df.iloc[i]
+            overlay.append({
+                "time": c["time"],
+                "trend": int(trend.iloc[i]),
+                "supertrend": float(fast_line.iloc[i]) if pd.notna(fast_line.iloc[i]) else None,
+                "upper": float(slow_line.iloc[i]) if pd.notna(slow_line.iloc[i]) else None,
+                "lower": None,
+                "signal": valid_signals.get(c["time"], None)
+            })
+            
+        return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
+
     else:
         return {"status": "error", "message": f"Strategy class {strategy_class} native graphics overlay not yet supported.", "overlay": []}
 

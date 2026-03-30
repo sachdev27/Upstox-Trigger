@@ -62,11 +62,11 @@ export const api = {
     async runCycle() {
         return fetch(`${API_BASE}/engine/run-cycle`, { method: 'POST' }).then(r => r.json());
     },
-    async setAutoMode(enabled) {
+    async updateConfig(config) {
         return fetch(`${API_BASE}/engine/config`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ auto_mode: enabled })
+            body: JSON.stringify(config)
         }).then(r => r.json());
     },
     async getPositions() {

@@ -7,10 +7,55 @@ This is the brain that runs the 24/7 automation loop.
 
 import asyncio
 import logging
+import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import pandas as pd
+
+class UpstoxRateLimiter:
+    """
+    Enforces Upstox Historical API Limits:
+    - 50 requests per second (using 45 for safety)
+    - 500 requests per minute (using 450 for safety)
+    - 2000 requests per 30 minutes (using 1900 for safety)
+    """
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.history_sec = deque()
+        self.history_min = deque()
+        self.history_30min = deque()
+
+    async def wait_for_token(self):
+        async with self.lock:
+            while True:
+                now = time.monotonic()
+                
+                # Cleanup old requests
+                while self.history_sec and now - self.history_sec[0] > 1.0:
+                    self.history_sec.popleft()
+                while self.history_min and now - self.history_min[0] > 60.0:
+                    self.history_min.popleft()
+                while self.history_30min and now - self.history_30min[0] > 1800.0:
+                    self.history_30min.popleft()
+
+                # Check limits
+                if len(self.history_sec) >= 45:
+                    await asyncio.sleep(1.0 - (now - self.history_sec[0]) + 0.01)
+                    continue
+                if len(self.history_min) >= 450:
+                    await asyncio.sleep(60.0 - (now - self.history_min[0]) + 0.1)
+                    continue
+                if len(self.history_30min) >= 1900:
+                    await asyncio.sleep(1800.0 - (now - self.history_30min[0]) + 1.0)
+                    continue
+
+                # Consume token
+                self.history_sec.append(now)
+                self.history_min.append(now)
+                self.history_30min.append(now)
+                break
 
 from app.config import get_settings
 from app.auth.service import get_auth_service
@@ -19,6 +64,7 @@ from app.orders.service import OrderService
 from app.orders.models import TradeSignal
 from app.strategies.base import BaseStrategy, StrategyConfig
 from app.strategies.supertrend_pro import SuperTrendPro
+from app.strategies.scalp_pro import ScalpPro
 from app.database.connection import get_session, TradeLog
 
 from app.engine_pipeline import (
@@ -33,6 +79,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # Strategy class registry
 STRATEGY_CLASSES = {
     "SuperTrendPro": SuperTrendPro,
+    "ScalpPro": ScalpPro,
 }
 
 
@@ -80,6 +127,9 @@ class AutomationEngine:
             BroadcastProcessor()
         ]
 
+        # Rate Limiter for Upstox API
+        self.rate_limiter = UpstoxRateLimiter()
+
         # Load config from DB-backed settings
         self.sync_from_settings()
 
@@ -98,6 +148,27 @@ class AutomationEngine:
 
     def initialize(self):
         """Initialize all services and load strategies."""
+        if self._is_initialized:
+            return
+        
+        logger.info("🚀 Initializing Automation Engine...")
+        self.sync_from_settings()
+
+        # Auto-load last active strategy if none present
+        if not self._active_strategies:
+            last_class = self.settings.ACTIVE_STRATEGY_CLASS
+            last_name = self.settings.ACTIVE_STRATEGY_NAME
+            if last_class and last_name:
+                logger.info(f"🔄 Auto-loading last active strategy: {last_name}")
+                try:
+                    self.load_strategy(
+                        strategy_class_name=last_class,
+                        name=last_name,
+                        instruments=[self.settings.NIFTY], # Default if none
+                        timeframe="15m" # Default if none
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to auto-load strategy: {e}")
         try:
             # Refresh config from DB
             self.sync_from_settings()
@@ -156,6 +227,15 @@ class AutomationEngine:
 
     # ── Main Cycle ──────────────────────────────────────────────
 
+    async def _process_instrument_tf(self, strategy: BaseStrategy, tf_config: StrategyConfig, target: str):
+        """Helper to evaluate a single instrument and timeframe configuration."""
+        try:
+            signal = await self._evaluate_instrument(strategy, tf_config, target)
+            if signal:
+                await self._handle_signal(signal, tf_config)
+        except Exception as e:
+            logger.error(f"Error evaluating {target} ({tf_config.timeframe}) with {tf_config.name}: {e}")
+
     async def run_cycle(self):
         """
         Execute one strategy evaluation cycle.
@@ -196,30 +276,26 @@ class AutomationEngine:
                 total_scans = sum(len(tf_overrides.get(t, [config.timeframe])) for t in target_instruments)
                 logger.info(f"🔍 Scanning {len(target_instruments)} instruments ({total_scans} timeframe combinations)...")
 
+                tasks = []
                 for target in target_instruments:
                     # Get timeframes for this instrument (custom or default)
                     timeframes_to_scan = tf_overrides.get(target, [config.timeframe])
                     
                     for tf in timeframes_to_scan:
-                        try:
-                            # Create a shallow copy of config with this TF
-                            tf_config = StrategyConfig(
-                                name=config.name,
-                                enabled=config.enabled,
-                                instruments=config.instruments,
-                                timeframe=tf,
-                                params=config.params,
-                                paper_trading=config.paper_trading,
-                            )
-                            signal = await self._evaluate_instrument(
-                                strategy, tf_config, target
-                            )
-                            if signal:
-                                await self._handle_signal(signal, tf_config)
-                        except Exception as e:
-                            logger.error(
-                                f"Error evaluating {target} ({tf}) with {config.name}: {e}"
-                            )
+                        # Create a shallow copy of config with this TF
+                        tf_config = StrategyConfig(
+                            name=config.name,
+                            enabled=config.enabled,
+                            instruments=config.instruments,
+                            timeframe=tf,
+                            params=config.params,
+                            paper_trading=config.paper_trading,
+                        )
+                        tasks.append(self._process_instrument_tf(strategy, tf_config, target))
+                
+                if tasks:
+                    # Run all evaluations for this strategy/instrument group concurrently
+                    await asyncio.gather(*tasks)
 
     async def _evaluate_instrument(
         self,
@@ -232,11 +308,18 @@ class AutomationEngine:
         tf_to_interval = {
             "1m": "1minute", "5m": "5minute", "15m": "15minute",
             "30m": "30minute", "1H": "60minute", "4H": "day", "1D": "day",
+            # Fallbacks for literal UI interval strings
+            "1minute": "1minute", "5minute": "5minute", "15minute": "15minute",
+            "30minute": "30minute", "1hour": "60minute", "day": "day"
         }
         interval = tf_to_interval.get(config.timeframe, "15minute")
 
+        # Wait for rate limit to clear before launching synchronous API calls
+        await self.rate_limiter.wait_for_token()
+
         # Fetch historical candles
-        candles = self._market_service.get_intraday_candles(
+        candles = await asyncio.to_thread(
+            self._market_service.get_intraday_candles,
             instrument_key, interval
         )
 
@@ -261,7 +344,10 @@ class AutomationEngine:
             # Map simplified TF to Upstox API intervals
             htf_interval = "day" if htf_tf in ["1D", "D", "W", "1W"] else "60minute" if htf_tf in ["1H", "60m"] else "day"
             
-            htf_candles = self._market_service.get_historical_candles(
+            # Wait for rate limit again before HTF fetch
+            await self.rate_limiter.wait_for_token()
+            htf_candles = await asyncio.to_thread(
+                self._market_service.get_historical_candles,
                 instrument_key, htf_interval
             )
             if htf_candles:
@@ -273,6 +359,9 @@ class AutomationEngine:
                         htf_df[col] = pd.to_numeric(htf_df[col], errors="coerce")
 
         # Evaluate strategy
+        if hasattr(strategy, 'get_dashboard_state'):
+            strategy.latest_metrics = strategy.get_dashboard_state(df, htf_df=htf_df)
+            
         signal = strategy.on_candle(df, htf_df=htf_df)
         if signal:
             signal.instrument_key = instrument_key
@@ -300,7 +389,8 @@ class AutomationEngine:
                         "instrument": instrument_key,
                         "action": signal.action.value,
                         "price": signal.price,
-                        "confidence": signal.confidence_score
+                        "confidence": signal.confidence_score,
+                        "latest_metrics": getattr(strategy, "latest_metrics", {})
                     }
                 }))
 
@@ -325,6 +415,8 @@ class AutomationEngine:
             "initialized": self._is_initialized,
             "running": self._is_running,
             "auto_mode": self.auto_mode,
+            "active_strategy_class": self.settings.ACTIVE_STRATEGY_CLASS,
+            "active_strategy_name": self.settings.ACTIVE_STRATEGY_NAME,
             "paper_trading": self.paper_trading,
             "trading_side": self.trading_side,
             "risk_controls": {

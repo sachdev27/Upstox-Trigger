@@ -119,6 +119,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setInterval(refreshMarketStatus, 60000);
     setInterval(refreshOrderBook, 30000);
     setInterval(refreshActiveSignals, 15000); // Every 15 seconds
+    setInterval(refreshOverlay, 30000); // Refresh strategy indicators/HUD every 30s
 });
 
 function setupEventListeners() {
@@ -219,6 +220,10 @@ function handleWsMessage(msg) {
                 showToast(`New Signal: ${msg.data.action} on ${msg.data.instrument}`);
                 refreshSignals();
                 refreshActiveSignals();
+                if (msg.data.latest_metrics) {
+                    renderStrategyHUD({ latest_metrics: msg.data.latest_metrics });
+                }
+                refreshOverlay(); // Still refresh overlay for markers and latest indicators on chart
                 break;
             case 'trade_executed':
                 addLog(`💰 Trade: ${msg.data.action} @ ${msg.data.price}`, 'success');
@@ -1033,10 +1038,10 @@ window.saveSandboxSettings = async () => {
 };
 
 window.saveRiskConfig = async () => {
-    const capital = document.getElementById('setting-capital').value;
-    const risk = document.getElementById('setting-risk-pct').value;
-    const maxLoss = document.getElementById('setting-max-loss-pct').value;
-    const maxTrades = document.getElementById('setting-max-trades').value;
+    const capital = document.getElementById('risk-capital').value;
+    const risk = document.getElementById('risk-pct').value;
+    const maxLoss = document.getElementById('risk-maxloss').value;
+    const maxTrades = document.getElementById('risk-maxtrades').value;
     const side = document.getElementById('setting-trading-side').value;
     
     const payload = {
@@ -1048,11 +1053,41 @@ window.saveRiskConfig = async () => {
     };
     
     try {
-        await api.setAutoMode(payload); // Using setAutoMode which is actually updateConfig
+        await api.updateConfig(payload); 
         showToast("Risk Configuration Saved", "success");
         refreshStatus();
     } catch (e) {
         showToast("Failed to save risk config", "error");
+    }
+};
+
+window.toggleSandboxMode = async (enabled) => {
+    try {
+        await api.updateConfig({ use_sandbox: enabled });
+        showToast(`Sandbox Mode ${enabled ? 'Enabled' : 'Disabled'}`, 'info');
+        refreshStatus();
+    } catch (e) {
+        showToast("Failed to toggle Sandbox Mode", "error");
+    }
+};
+
+window.togglePaperMode = async (enabled) => {
+    try {
+        await api.updateConfig({ paper_trading: enabled });
+        showToast(`Paper Trading ${enabled ? 'Enabled' : 'Disabled'}`, 'info');
+        refreshStatus();
+    } catch (e) {
+        showToast("Failed to toggle Paper Mode", "error");
+    }
+};
+
+window.updateTradingSide = async (side) => {
+    try {
+        await api.updateConfig({ trading_side: side });
+        showToast(`Trading Side updated to ${side}`, 'info');
+        refreshStatus();
+    } catch (e) {
+        showToast("Failed to update Trading Side", "error");
     }
 };
 
@@ -1102,9 +1137,10 @@ async function loadSettingsIntoUI() {
         if (document.getElementById('setting-api-key')) document.getElementById('setting-api-key').value = settings.API_KEY || '';
         if (document.getElementById('setting-redirect-uri')) document.getElementById('setting-redirect-uri').value = settings.REDIRECT_URI || '';
         
-        // Sandbox
+        // Sandbox & Modes
         if (document.getElementById('setting-sandbox-key')) document.getElementById('setting-sandbox-key').value = settings.SANDBOX_API_KEY || '';
         if (document.getElementById('toggle-sandboxmode')) document.getElementById('toggle-sandboxmode').checked = settings.USE_SANDBOX || false;
+        if (document.getElementById('toggle-papermode')) document.getElementById('toggle-papermode').checked = settings.PAPER_TRADING ?? true;
         
         // Risk
         if (document.getElementById('risk-capital')) document.getElementById('risk-capital').value = settings.TRADING_CAPITAL || 100000;
@@ -1165,7 +1201,11 @@ window.toggleAutoMode = async (enabled) => {
 
 async function fetchStrategySchemas() {
     try {
-        const data = await api.getStrategySchemas();
+        const [data, status] = await Promise.all([
+            api.getStrategySchemas(),
+            api.getStatus()
+        ]);
+        
         const selector = document.getElementById("strategy-selector");
         if (!selector) return;
         selector.innerHTML = "";
@@ -1179,18 +1219,30 @@ async function fetchStrategySchemas() {
             selector.appendChild(opt);
         });
         
-        // Default select first strategy
+        // Select matching strategy from engine status or default to index 0
+        const targetClass = status.active_strategy_class;
+        let selectedIdx = 0;
+        
+        if (targetClass) {
+            for (let i = 0; i < selector.options.length; i++) {
+                if (selector.options[i].dataset.class === targetClass) {
+                    selectedIdx = i;
+                    break;
+                }
+            }
+        }
+        
         if (selector.options.length > 0) {
-            selector.selectedIndex = 0;
-            renderDynamicStrategyForm();
-            refreshOverlay(); // Initial overlay trigger
+            selector.selectedIndex = selectedIdx;
+            window.renderDynamicStrategyForm();
+            refreshOverlay(); 
         }
     } catch(e) {
         console.error("Failed to load strategy schemas", e);
     }
 }
 
-function renderDynamicStrategyForm() {
+window.renderDynamicStrategyForm = () => {
     const selector = document.getElementById("strategy-selector");
     if (!selector) return;
     const sid = selector.value;
@@ -1263,10 +1315,17 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
             }
             
             if (res.overlay && res.overlay.length > 0) {
-                const stData = res.overlay.filter(pt => pt.supertrend !== null).map(pt => ({
+                const primarySeries = res.overlay.filter(pt => pt.supertrend !== null).map(pt => ({
                     time: Math.floor(pt.time),
                     value: pt.supertrend,
                     color: pt.trend === 1 ? '#00d084' : '#ff4757'
+                }));
+                
+                // Secondary series (e.g. Slow EMA for ScalpPro)
+                const secondarySeries = res.overlay.filter(pt => pt.upper !== null).map(pt => ({
+                    time: Math.floor(pt.time),
+                    value: pt.upper,
+                    color: '#FF9800' // Distinct color for secondary line
                 }));
                 
                 const markers = [];
@@ -1274,17 +1333,18 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
                 res.overlay.forEach(pt => {
                     const ds = pt.time;
                     if (lastTrend !== null && pt.trend !== lastTrend) {
+                        const isVerifiedSignal = pt.signal === 'BUY' || pt.signal === 'SELL';
                         markers.push({
                             time: Math.floor(ds),
                             position: pt.trend === 1 ? 'belowBar' : 'aboveBar',
-                            color: pt.trend === 1 ? '#00d084' : '#ff4757',
+                            color: pt.trend === 1 ? (isVerifiedSignal ? '#00ffaa' : 'rgba(0, 208, 132, 0.4)') : (isVerifiedSignal ? '#ff3366' : 'rgba(255, 71, 87, 0.4)'),
                             shape: pt.trend === 1 ? 'arrowUp' : 'arrowDown',
-                            text: pt.trend === 1 ? 'BUY' : 'SELL'
+                            text: isVerifiedSignal ? pt.signal : 'ST Flip'
                         });
                     }
                     lastTrend = pt.trend;
                 });
-                chart.setOverlayData(stData);
+                chart.setOverlayData(primarySeries, secondarySeries);
                 chart.setMarkers(markers);
             }
         } else {
@@ -1360,6 +1420,14 @@ function renderStrategyHUD(strategy) {
     
     if (m.bars_in_trend !== undefined) addRow("Bars held", m.bars_in_trend, bgRow, bgRow);
     
+    // Catch-all for any other metrics (Generic support for new strategies like ScalpPro)
+    const handledKeys = ['tf_profile', 'tf_mode', 'exit_mode', 'trend', 'hard_gates', 'soft_filters', 'bars_in_trend'];
+    Object.keys(m).forEach(key => {
+        if (!handledKeys.includes(key)) {
+            addRow(key, m[key], bgRow, bgRow);
+        }
+    });
+
     html += `</div>`;
     document.getElementById("strategy-hud-container").innerHTML = html;
 }

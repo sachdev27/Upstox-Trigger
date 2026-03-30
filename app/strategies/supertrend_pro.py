@@ -111,6 +111,8 @@ class SuperTrendPro(BaseStrategy):
         tf_map = {
             "1m": 1, "5m": 5, "15m": 15, "30m": 30,
             "1H": 60, "4H": 240, "1D": 1440, "1W": 10080,
+            "1minute": 1, "5minute": 5, "15minute": 15, "30minute": 30,
+            "1hour": 60, "day": 1440
         }
         return tf_map.get(timeframe, 15)
 

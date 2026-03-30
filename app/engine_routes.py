@@ -29,6 +29,11 @@ async def load_strategy(
     paper_trading: bool = True,
 ):
     """Load a strategy into the engine."""
+    # Persist selection to settings
+    settings = get_settings()
+    settings.save_to_db("ACTIVE_STRATEGY_CLASS", strategy_class, category="STRATEGY")
+    settings.save_to_db("ACTIVE_STRATEGY_NAME", name, category="STRATEGY")
+
     engine = get_engine()
     instrument_list = [i.strip() for i in instruments.split(",")]
     engine.load_strategy(
@@ -75,6 +80,7 @@ async def update_engine_config(config: dict):
         "max_open_trades": ("MAX_OPEN_TRADES", "ENGINE"),
         "paper_trading": ("PAPER_TRADING", "ENGINE"),
         "trading_side": ("TRADING_SIDE", "ENGINE"),
+        "use_sandbox": ("USE_SANDBOX", "ENGINE"),
         "auto_mode": (None, None),  # In-memory only
     }
 

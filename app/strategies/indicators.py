@@ -282,3 +282,60 @@ def consecutive_confirming_bars(
                 counts[i] = counts[i - 1]
 
     return pd.Series(counts, index=trend.index)
+
+
+# ── EMA (Exponential Moving Average) ───────────────────────────
+
+def ema(series: pd.Series, period: int) -> pd.Series:
+    """Exponential Moving Average."""
+    return series.ewm(span=period, adjust=False).mean()
+
+
+# ── RSI (Relative Strength Index) ──────────────────────────────
+
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Relative Strength Index (Wilder's Smoothing)."""
+    delta = series.diff()
+    up = np.where(delta > 0, delta, 0)
+    down = np.where(delta < 0, -delta, 0)
+    
+    alpha = 1.0 / period
+    rs_up = pd.Series(up, index=series.index).ewm(alpha=alpha, adjust=False).mean()
+    rs_down = pd.Series(down, index=series.index).ewm(alpha=alpha, adjust=False).mean()
+    
+    rs = rs_up / rs_down
+    return 100 - (100 / (1 + rs))
+
+
+# ── VWAP (Anchored Daily) ──────────────────────────────────────
+
+def vwap(df: pd.DataFrame) -> pd.Series:
+    """
+    Volume Weighted Average Price (anchored daily).
+    Requires a 'time' or 'datetime' column, fallback to index if it's datetime.
+    """
+    ts = None
+    if "time" in df.columns:
+        ts = pd.to_datetime(df["time"], errors="coerce")
+    elif "datetime" in df.columns:
+        ts = pd.to_datetime(df["datetime"], errors="coerce")
+    else:
+        ts = pd.to_datetime(df.index, errors="coerce")
+        
+    # Check if empty or failed parsing
+    if ts is None or ts.isna().all():
+        # Fallback to cumulative entirely if no valid date found
+        typical_price = (df["high"] + df["low"] + df["close"]) / 3
+        return (typical_price * df["volume"]).cumsum() / df["volume"].cumsum()
+
+    date_grp = ts.dt.date
+    typical_price = (df["high"] + df["low"] + df["close"]) / 3
+    vol = df["volume"]
+    
+    pv = typical_price * vol
+    
+    # Cumulative sum grouped by day
+    cum_pv = pv.groupby(date_grp).cumsum()
+    cum_vol = vol.groupby(date_grp).cumsum()
+    
+    return cum_pv / cum_vol
