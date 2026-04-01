@@ -38,6 +38,9 @@ export const api = {
     async getTrades() {
         return fetch(`${API_BASE}/orders/trades`).then(r => r.json());
     },
+    async getPaperTrades(limit = 100) {
+        return fetch(`${API_BASE}/orders/trades/paper?limit=${limit}`).then(r => r.json());
+    },
     async getOrderBook() {
         return fetch(`${API_BASE}/orders/book`).then(r => r.json());
     },

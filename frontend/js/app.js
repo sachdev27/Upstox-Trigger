@@ -224,12 +224,22 @@ function handleWsMessage(msg) {
                 }
                 refreshOverlay(); // Still refresh overlay for markers and latest indicators on chart
                 break;
-            case 'trade_executed':
-                addLog(`💰 Trade: ${msg.data.action} @ ${msg.data.price}`, 'success');
-                showToast(`Trade Executed: ${msg.data.action}`, 'success');
+            case 'trade_executed': {
+                const td = msg.data;
+                const modeTag = td.type === 'paper' ? '📋 Paper' : '🔴 Live';
+                const actionTag = td.action === 'BUY' ? '🟢 BUY' : '🔴 SELL';
+                const symbol = td.instrument?.split('|')[1] || td.instrument || 'Unknown';
+                addLog(`💰 ${modeTag} ${actionTag} ${symbol} @ ₹${formatPrice(td.price)}`, 'success');
+                showToast(`${actionTag} ${symbol} @ ₹${formatPrice(td.price)} (${modeTag})`, 'success');
+                // Refresh all order-related panels
                 refreshTrades();
                 refreshPositions();
+                refreshOrderBook();
+                refreshActiveSignals();
+                // Auto-switch bottom panel to Trade History so user sees the new trade
+                switchBottomTab('trades');
                 break;
+            }
         }
     }
 }
@@ -494,25 +504,50 @@ async function refreshPositions() {
 
 async function refreshTrades() {
     try {
-        const data = await api.getTrades();
         const list = document.getElementById("trades-body");
         if (!list) return;
-        list.innerHTML = "";
 
-        const trades = data.data || [];
-        if (trades.length === 0) {
-            list.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted)">No trades today</td></tr>`;
+        // Paper trades come from DB; live trades from Upstox API — fetch both and merge.
+        const [paperRes, liveRes] = await Promise.allSettled([
+            api.getPaperTrades(),
+            api.getTrades(),
+        ]);
+
+        const paperTrades = (paperRes.status === 'fulfilled' ? paperRes.value.data : null) || [];
+        const liveTrades  = (liveRes.status  === 'fulfilled' ? liveRes.value.data  : null) || [];
+
+        // Normalise paper trade rows to the same display shape as live Upstox rows
+        const normPaper = paperTrades.map(t => ({
+            order_timestamp: t.timestamp,
+            tradingsymbol: t.instrument_key?.split('|')[1] || t.instrument_key,
+            transaction_type: t.action,
+            quantity: t.quantity,
+            average_price: t.price,
+            status: t.status,
+            _source: 'paper',
+        }));
+
+        // Merge: live trades first, then paper (live trades supersede on real account)
+        const merged = [...liveTrades, ...normPaper];
+
+        list.innerHTML = "";
+        if (merged.length === 0) {
+            list.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--text-muted)">No trades today</td></tr>`;
             return;
         }
 
-        trades.reverse().forEach(t => {
+        merged.forEach(t => {
             const row = document.createElement("tr");
+            const isPaper = t._source === 'paper';
+            const sideClass = t.transaction_type === 'BUY' ? 'buy' : 'sell';
+            const timeStr = t.order_timestamp ? new Date(t.order_timestamp).toLocaleTimeString() : '-';
             row.innerHTML = `
-                <td class="text-muted" style="font-size:0.7rem">${new Date(t.order_timestamp).toLocaleTimeString()}</td>
+                <td class="text-muted" style="font-size:0.7rem">${timeStr}</td>
                 <td class="mono" style="font-size:0.75rem">${t.tradingsymbol}</td>
-                <td><span class="badge ${t.transaction_type.toLowerCase()}">${t.transaction_type}</span></td>
+                <td><span class="badge ${sideClass}">${t.transaction_type}</span></td>
                 <td>${t.quantity}</td>
                 <td class="mono">₹${formatPrice(t.average_price)}</td>
+                <td class="text-muted" style="font-size:0.7rem">${isPaper ? '📋 Paper' : '🔴 Live'}</td>
             `;
             list.appendChild(row);
         });

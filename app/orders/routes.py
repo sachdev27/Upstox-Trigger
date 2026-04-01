@@ -55,6 +55,40 @@ async def get_trades():
     return {"data": svc.get_trade_history()}
 
 
+@router.get("/trades/paper")
+async def get_paper_trades(limit: int = 100):
+    """Get paper trade log from the database (all modes)."""
+    from app.database.connection import get_session, TradeLog as TradeLogModel
+    session = get_session()
+    try:
+        rows = (
+            session.query(TradeLogModel)
+            .order_by(TradeLogModel.timestamp.desc())
+            .limit(limit)
+            .all()
+        )
+        return {
+            "data": [
+                {
+                    "id": r.id,
+                    "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                    "strategy_name": r.strategy_name,
+                    "instrument_key": r.instrument_key,
+                    "action": r.action,
+                    "quantity": r.quantity,
+                    "price": r.price,
+                    "stop_loss": r.stop_loss,
+                    "take_profit": r.take_profit,
+                    "status": r.status,
+                    "pnl": r.pnl,
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        session.close()
+
+
 
 @router.get("/status/market-hours")
 async def check_market_hours():
