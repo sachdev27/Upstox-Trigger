@@ -45,6 +45,120 @@ class RiskGuardProcessor(SignalProcessor):
             return False
         return True
 
+
+class OptionChainInsightProcessor(SignalProcessor):
+    """
+    Enrich signals with real-time option chain analysis (PCR, OI, IV, Max-Pain).
+
+    Runs BEFORE ATMResolver so the underlying index chain is analyzed
+    before the signal is converted to a specific option contract.
+
+    Behaviour:
+    - Fetches option chain for the signal's underlying (index or equity)
+    - Computes directional_score (-100 to +100)
+    - Adds OC insights to signal.metadata["oc_analysis"]
+    - Adjusts confidence_score: boost if aligned, penalty if contradicted
+    - Blocks the signal entirely if strategy param "oc_block_contradictions" is set
+      and the chain strongly contradicts the trade direction.
+    """
+
+    # Cache chain analysis for 30s to avoid redundant API calls within the same cycle
+    _cache: dict[str, tuple[float, dict]] = {}
+    _cache_ttl = 30.0
+
+    async def process(self, signal: 'TradeSignal', config: 'StrategyConfig', engine: 'AutomationEngine') -> bool:
+        p = config.params or {}
+        if not p.get("use_oc_insight", False):
+            return True  # Feature disabled — pass through
+
+        if not engine._market_service:
+            return True  # No market service — skip silently
+
+        # Determine which underlying to analyze
+        underlying = signal.instrument_key
+        # If it's already an option contract, try to find the underlying
+        if "FO" in underlying:
+            underlying = signal.metadata.get("underlying", underlying)
+
+        # Only analyze indices (equities don't have liquid enough chains for real-time insight)
+        if "INDEX" not in underlying:
+            return True
+
+        import time
+        from app.market_data.option_analysis import analyze_option_chain
+
+        # Check cache
+        now = time.monotonic()
+        cached = self._cache.get(underlying)
+        if cached and (now - cached[0]) < self._cache_ttl:
+            analysis = cached[1]
+        else:
+            try:
+                chain_data = await engine._market_service.get_detailed_option_chain(underlying)
+                if chain_data.get("status") != "success" or not chain_data.get("chain"):
+                    logger.debug(f"OC Insight: no chain data for {underlying}")
+                    return True
+
+                analysis = analyze_option_chain(
+                    chain_data["chain"],
+                    float(chain_data.get("spot_price") or signal.price or 0),
+                )
+                self._cache[underlying] = (now, analysis)
+            except Exception as e:
+                logger.warning(f"OC Insight fetch failed for {underlying}: {e}")
+                return True  # Don't block on failure
+
+        # Attach analysis to signal metadata
+        signal.metadata["oc_analysis"] = {
+            "sentiment": analysis["sentiment"],
+            "directional_score": analysis["directional_score"],
+            "pcr_oi": analysis["pcr"]["pcr_oi"],
+            "max_pain": analysis["max_pain"]["max_pain_strike"],
+            "immediate_support": analysis["oi_concentration"]["immediate_support"],
+            "immediate_resistance": analysis["oi_concentration"]["immediate_resistance"],
+            "iv_skew_bias": analysis["iv_skew"]["skew_bias"],
+            "oi_bias": analysis["oi_buildup"]["oi_bias"],
+            "signals": analysis["signals"],
+        }
+
+        ds = analysis["directional_score"]
+        is_buy = signal.action.value == "BUY"
+
+        # ── Confidence adjustment ────────────────────────────────
+        oc_boost = int(p.get("oc_confidence_boost", 10))     # points added when aligned
+        oc_penalty = int(p.get("oc_confidence_penalty", 15))  # points removed when contradicted
+
+        if (is_buy and ds >= 30) or (not is_buy and ds <= -30):
+            # OC aligns with signal direction → boost
+            signal.confidence_score = min(100, signal.confidence_score + oc_boost)
+            logger.info(
+                f"📊 OC Insight ALIGNED: {analysis['sentiment']} (score={ds}) "
+                f"→ confidence boosted to {signal.confidence_score}"
+            )
+        elif (is_buy and ds <= -30) or (not is_buy and ds >= 30):
+            # OC contradicts signal direction → penalize
+            signal.confidence_score = max(0, signal.confidence_score - oc_penalty)
+            logger.info(
+                f"📊 OC Insight CONTRADICTS: {analysis['sentiment']} (score={ds}) "
+                f"→ confidence reduced to {signal.confidence_score}"
+            )
+
+            # Block if configured and contradiction is strong
+            block_threshold = int(p.get("oc_block_threshold", 60))
+            if p.get("oc_block_contradictions", False) and abs(ds) >= block_threshold:
+                logger.warning(
+                    f"🚫 OC BLOCK: {signal.action.value} {signal.instrument_key} "
+                    f"blocked by option chain sentiment ({analysis['sentiment']}, score={ds})"
+                )
+                return False
+        else:
+            logger.info(
+                f"📊 OC Insight NEUTRAL: score={ds} — no adjustment"
+            )
+
+        return True
+
+
 class ATMResolverProcessor(SignalProcessor):
     """Resolves index instruments to their closest ATM option contract."""
     async def process(self, signal: 'TradeSignal', config: 'StrategyConfig', engine: 'AutomationEngine') -> bool:
@@ -160,12 +274,14 @@ class ExecutionProcessor(SignalProcessor):
 
         return {
             "entry_price":        entry,
+            "entry_side":         signal.action.value,  # "BUY" or "SELL"
             "stop_loss":          sl,
             "take_profit":        tp3 if swarm_count == 1 else tp,  # single lot always goes to tp3
             "quantity":           exec_qty,
             "quantity_remaining": exec_qty,
             "is_paper":           is_paper,
             "highest_price":      entry,
+            "lowest_price":       entry,
             "trailing_enabled":   bool((config.params or {}).get("enable_trailing_sl", False)),
             "trail_distance":     trail_distance,
             "strategy_name":      signal.strategy_name or config.name,

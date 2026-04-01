@@ -109,6 +109,15 @@ class SuperTrendPro(BaseStrategy):
 
             # Autonomous management controls
             "enable_trailing_sl": True,
+
+            # ── Option Chain Insight (OC) ─────────────────────────
+            # Real-time option chain analysis (PCR, OI, IV, Max-Pain)
+            # enriches signals with market sentiment from derivatives data.
+            "use_oc_insight":           False,  # enable OC analysis in pipeline
+            "oc_confidence_boost":      10,     # points added when OC aligns with signal
+            "oc_confidence_penalty":    15,     # points removed when OC contradicts
+            "oc_block_contradictions":  False,  # block signal if OC strongly disagrees
+            "oc_block_threshold":       60,     # directional_score threshold for block
         }
 
     # ── Auto TF Adaptation (Section 0) ──────────────────────────
@@ -241,10 +250,12 @@ class SuperTrendPro(BaseStrategy):
                 if sell_signal and htf_trend != -1: return None
             else:
                 import logging as _log
-                _log.getLogger(__name__).warning(
-                    "HTF filter is enabled (use_htf_filter=True) but no HTF data was provided. "
-                    "The H3 gate is being BYPASSED. Ensure htf_df is passed to on_candle()."
-                )
+                if not getattr(self, "_htf_missing_warned", False):
+                    _log.getLogger(__name__).warning(
+                        "HTF filter is enabled (use_htf_filter=True) but no HTF data was provided. "
+                        "The H3 gate is being BYPASSED. Ensure htf_df is passed to on_candle()."
+                    )
+                    self._htf_missing_warned = True
 
         # ── Section 4: Soft Score Filters ───────────────────────
         soft_score = 0

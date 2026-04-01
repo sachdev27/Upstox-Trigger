@@ -33,6 +33,9 @@ export const api = {
         if (expiry) url += `&expiry_date=${expiry}`;
         return fetch(url).then(r => r.json());
     },
+    async getOptionChainAnalysis(instrumentKey) {
+        return fetch(`${API_BASE}/market/option-chain/analysis?instrument_key=${encodeURIComponent(instrumentKey)}`).then(r => r.json());
+    },
 
     // Orders
     async getTrades() {

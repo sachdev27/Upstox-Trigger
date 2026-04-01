@@ -23,6 +23,12 @@ class ScalpPro(BaseStrategy):
             "use_vwap_filter": True,
             "atr_period": 14,
 
+            # ── HFT Pullback Controls ────────────────────────────
+            # In scalping, strict VWAP hard-block can reject good pullback entries.
+            # Allow a small ATR-based VWAP tolerance ONLY when trend strength is high.
+            "vwap_pullback_tolerance_atr": 0.15,   # 0 disables tolerance (strict VWAP)
+            "vwap_pullback_adx_min": 25,           # require strong trend for tolerance
+
             # ── Risk (single-exit mode) ──────────────────────────
             "sl_atr_multiplier": 1.0,   # stop-loss distance = sl_atr_mult × ATR
             "tp_atr_multiplier": 2.0,   # take-profit distance = tp_atr_mult × ATR
@@ -80,6 +86,15 @@ class ScalpPro(BaseStrategy):
             # Set to 0 to disable each limit individually.
             "rsi_oversold_max":     28,    # don't SELL below this RSI  (e.g. 25-30)
             "rsi_overbought_min":   72,    # don't BUY  above this RSI  (e.g. 70-75)
+
+            # ── Option Chain Insight (OC) ─────────────────────────
+            # Real-time option chain analysis (PCR, OI, IV, Max-Pain)
+            # enriches signals with market sentiment from derivatives data.
+            "use_oc_insight":           False,  # enable OC analysis in pipeline
+            "oc_confidence_boost":      10,     # points added when OC aligns with signal
+            "oc_confidence_penalty":    15,     # points removed when OC contradicts
+            "oc_block_contradictions":  False,  # block signal if OC strongly disagrees
+            "oc_block_threshold":       60,     # directional_score threshold for block
         }
 
     @staticmethod
@@ -205,15 +220,34 @@ class ScalpPro(BaseStrategy):
 
         trend = "BULLISH" if fast_curr > slow_curr else "BEARISH"
 
-        # VWAP alignment
+        # ADX status — computed first because VWAP pullback tolerance depends on trend strength
+        adx_thresh = float(p.get("adx_threshold", 0))
+        adx_now = None
+        adx_label  = "DISABLED"
+        if adx_thresh > 0 and ind.get("adx") is not None:
+            adx_now = float(ind["adx"].iloc[-1])
+            status  = "TRENDING" if adx_now >= adx_thresh else "RANGING \u26a0"
+            adx_label = f"{status} ({adx_now:.1f})"
+
+        # VWAP alignment with optional pullback tolerance for strong-trend scalping
         if not p["use_vwap_filter"]:
             vwap_state = "PASS"
         else:
             vwap_now = float(ind["vwap"].iloc[-1])
+            atr_now = max(float(ind["atr"].iloc[-1]), 1e-9)
+            tol_atr = float(p.get("vwap_pullback_tolerance_atr", 0.0))
+            tol_abs = tol_atr * atr_now
+            adx_req = float(p.get("vwap_pullback_adx_min", 25))
+            strong_adx = (adx_now is not None and adx_now >= adx_req)
+
             if trend == "BULLISH" and close > vwap_now:
                 vwap_state = "PASS (Above)"
             elif trend == "BEARISH" and close < vwap_now:
                 vwap_state = "PASS (Below)"
+            elif trend == "BULLISH" and tol_abs > 0 and strong_adx and close >= (vwap_now - tol_abs):
+                vwap_state = f"PASS (Pullback <= {tol_atr:.2f} ATR)"
+            elif trend == "BEARISH" and tol_abs > 0 and strong_adx and close <= (vwap_now + tol_abs):
+                vwap_state = f"PASS (Pullback <= {tol_atr:.2f} ATR)"
             else:
                 vwap_state = "FAIL"
 
@@ -231,18 +265,14 @@ class ScalpPro(BaseStrategy):
         else:
             rsi_zone = f"NEUTRAL ({rsi_val:.1f})"
 
-        # ADX status — only when the gate is active
-        adx_thresh = float(p.get("adx_threshold", 0))
-        adx_label  = "DISABLED"
-        if adx_thresh > 0 and ind.get("adx") is not None:
-            adx_now   = float(ind["adx"].iloc[-1])
-            status    = "TRENDING" if adx_now >= adx_thresh else "RANGING \u26a0"
-            adx_label = f"{status} ({adx_now:.1f})"
-
         # Block-reason list for transparency
         blocks: list = []
         if vwap_state == "FAIL":
-            reason = "Price below VWAP (long blocked)" if trend == "BULLISH" else "Price above VWAP (short blocked)"
+            reason = (
+                "Price below VWAP pullback tolerance (long blocked)"
+                if trend == "BULLISH"
+                else "Price above VWAP pullback tolerance (short blocked)"
+            )
             blocks.append(reason)
         if trend == "BEARISH" and rsi_val <= oversold_max:
             blocks.append(f"RSI {rsi_val:.1f} too oversold to short")
@@ -321,9 +351,16 @@ class ScalpPro(BaseStrategy):
 
         # Long conditions
         if buy_cross:
-            # Price must be > VWAP for longs
-            if p["use_vwap_filter"] and close < float(ind["vwap"].iloc[-1]):
-                return None
+            # VWAP gate with optional strong-trend pullback tolerance for scalping.
+            if p["use_vwap_filter"]:
+                vwap_now = float(ind["vwap"].iloc[-1])
+                atr_now = max(float(ind["atr"].iloc[-1]), 1e-9)
+                tol_atr = float(p.get("vwap_pullback_tolerance_atr", 0.0))
+                tol_abs = tol_atr * atr_now
+                adx_req = float(p.get("vwap_pullback_adx_min", 25))
+                allow_pullback = (tol_abs > 0 and adx_now >= adx_req and close >= (vwap_now - tol_abs))
+                if close < vwap_now and not allow_pullback:
+                    return None
             # RSI must exceed momentum threshold
             if rsi_val < p["rsi_buy_thresh"]:
                 return None
@@ -369,9 +406,16 @@ class ScalpPro(BaseStrategy):
 
         # Short conditions
         if sell_cross:
-            # Price must be < VWAP for shorts
-            if p["use_vwap_filter"] and close > float(ind["vwap"].iloc[-1]):
-                return None
+            # VWAP gate with optional strong-trend pullback tolerance for scalping.
+            if p["use_vwap_filter"]:
+                vwap_now = float(ind["vwap"].iloc[-1])
+                atr_now = max(float(ind["atr"].iloc[-1]), 1e-9)
+                tol_atr = float(p.get("vwap_pullback_tolerance_atr", 0.0))
+                tol_abs = tol_atr * atr_now
+                adx_req = float(p.get("vwap_pullback_adx_min", 25))
+                allow_pullback = (tol_abs > 0 and adx_now >= adx_req and close <= (vwap_now + tol_abs))
+                if close > vwap_now and not allow_pullback:
+                    return None
             # RSI must be below momentum threshold
             if rsi_val > p["rsi_sell_thresh"]:
                 return None

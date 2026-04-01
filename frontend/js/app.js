@@ -23,7 +23,11 @@ const pendingUpdates = new Map(); // Batching Queue: key -> last_tick_data
 let isFlushing = false;
 let overlayRefreshInFlight = false;
 let lastOverlayRefreshAt = 0;
-const OVERLAY_REFRESH_MS = 5000;
+const OVERLAY_REFRESH_MS = 10000;
+
+// Bottom-panel row caches for delta rendering (key -> serialized row state)
+const tradeRowCache = new Map();
+const signalRowCache = new Map();
 
 async function scheduleOverlayRefresh(force = false) {
     if (!currentInstrumentKey) return;
@@ -139,6 +143,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     setInterval(refreshOrderBook, 30000);
     setInterval(refreshActiveSignals, 15000); // Every 15 seconds
     setInterval(() => scheduleOverlayRefresh(false), OVERLAY_REFRESH_MS); // Near-real-time strategy HUD/overlay
+    setInterval(refreshOcInsight, 60000); // OC insight every 60s
+
+    // Initial OC insight fetch
+    refreshOcInsight();
 });
 
 function setupEventListeners() {
@@ -419,6 +427,10 @@ async function selectInstrument(key, name) {
     chart.clear();
     await fetchHistoricalCandles();
     await scheduleOverlayRefresh(true);
+
+    // Refresh OC insight for index instruments
+    _lastOcKey = null; // force re-fetch on instrument change
+    refreshOcInsight();
 }
 
 async function placeManualOrder(side) {
@@ -536,41 +548,103 @@ async function refreshTrades() {
         const paperTrades = (paperRes.status === 'fulfilled' ? paperRes.value.data : null) || [];
         const liveTrades  = (liveRes.status  === 'fulfilled' ? liveRes.value.data  : null) || [];
 
-        // Normalise paper trade rows to the same display shape as live Upstox rows
+        // Normalize both sources to explicit UI fields that match table headers exactly:
+        // Time | Action | Instrument | Price | SL | TP | Mode
         const normPaper = paperTrades.map(t => ({
-            order_timestamp: t.timestamp,
-            tradingsymbol: t.instrument_key?.split('|')[1] || t.instrument_key,
-            transaction_type: t.action,
-            quantity: t.quantity,
-            average_price: t.price,
-            status: t.status,
-            _source: 'paper',
+            time: t.timestamp,
+            action: (t.action || '-').toUpperCase(),
+            instrument: t.instrument_key?.split('|')[1] || t.instrument_key || '-',
+            price: t.price,
+            stop_loss: t.stop_loss,
+            take_profit: t.take_profit,
+            mode: '📋 Paper',
         }));
 
-        // Merge: live trades first, then paper (live trades supersede on real account)
-        const merged = [...liveTrades, ...normPaper];
+        const normLive = liveTrades.map(t => ({
+            time: t.order_timestamp,
+            action: (t.transaction_type || t.side || '-').toUpperCase(),
+            instrument: t.tradingsymbol || t.instrument_key?.split('|')[1] || t.instrument_token || '-',
+            price: t.average_price ?? t.price,
+            stop_loss: null,
+            take_profit: null,
+            mode: '🔴 Live',
+        }));
 
-        list.innerHTML = "";
+        const merged = [...normLive, ...normPaper].sort((a, b) => {
+            const ta = new Date(a.time || 0).getTime();
+            const tb = new Date(b.time || 0).getTime();
+            return (isNaN(tb) ? 0 : tb) - (isNaN(ta) ? 0 : ta);
+        });
+
+        const nextKeys = new Set();
         if (merged.length === 0) {
-            list.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--text-muted)">No trades today</td></tr>`;
+            list.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--text-muted)">No trades today</td></tr>`;
+            tradeRowCache.clear();
             return;
         }
 
-        merged.forEach(t => {
-            const row = document.createElement("tr");
-            const isPaper = t._source === 'paper';
-            const sideClass = t.transaction_type === 'BUY' ? 'buy' : 'sell';
-            const timeStr = t.order_timestamp ? new Date(t.order_timestamp).toLocaleTimeString() : '-';
-            row.innerHTML = `
+        // Remove empty-state row if present
+        if (list.children.length === 1 && list.children[0].children.length === 1) {
+            list.innerHTML = "";
+        }
+
+        const existingRows = new Map();
+        Array.from(list.querySelectorAll("tr[data-row-key]")).forEach(r => existingRows.set(r.dataset.rowKey, r));
+
+        const rows = [];
+        merged.forEach((t, idx) => {
+            const rowKey = `${t.mode}|${t.time || '-'}|${t.action || '-'}|${t.instrument || '-'}|${idx}`;
+            nextKeys.add(rowKey);
+            const sideClass = t.action === 'BUY' ? 'buy' : (t.action.includes('SELL') ? 'sell' : '');
+            const parsedTs = t.time ? new Date(t.time) : null;
+            const timeStr = parsedTs && !isNaN(parsedTs.getTime())
+                ? parsedTs.toLocaleTimeString('en-IN', { hour12: false })
+                : (t.time || '-');
+
+            const slTxt = t.stop_loss != null && Number.isFinite(Number(t.stop_loss))
+                ? `₹${formatPrice(Number(t.stop_loss))}`
+                : '-';
+            const tpTxt = t.take_profit != null && Number.isFinite(Number(t.take_profit))
+                ? `₹${formatPrice(Number(t.take_profit))}`
+                : '-';
+
+            const rowHtml = `
                 <td class="text-muted" style="font-size:0.7rem">${timeStr}</td>
-                <td class="mono" style="font-size:0.75rem">${t.tradingsymbol}</td>
-                <td><span class="badge ${sideClass}">${t.transaction_type}</span></td>
-                <td>${t.quantity}</td>
-                <td class="mono">₹${formatPrice(t.average_price)}</td>
-                <td class="text-muted" style="font-size:0.7rem">${isPaper ? '📋 Paper' : '🔴 Live'}</td>
+                <td><span class="badge ${sideClass}">${t.action || '-'}</span></td>
+                <td class="mono" style="font-size:0.75rem">${t.instrument || '-'}</td>
+                <td class="mono">${t.price != null ? `₹${formatPrice(Number(t.price))}` : '-'}</td>
+                <td class="mono text-muted" style="font-size:0.75rem">${slTxt}</td>
+                <td class="mono text-muted" style="font-size:0.75rem">${tpTxt}</td>
+                <td class="text-muted" style="font-size:0.7rem">${t.mode}</td>
             `;
-            list.appendChild(row);
+
+            const prevSerialized = tradeRowCache.get(rowKey);
+            if (prevSerialized !== rowHtml || !existingRows.get(rowKey)) {
+                let row = existingRows.get(rowKey);
+                if (!row) {
+                    row = document.createElement("tr");
+                    row.dataset.rowKey = rowKey;
+                }
+                row.innerHTML = rowHtml;
+                existingRows.set(rowKey, row);
+                tradeRowCache.set(rowKey, rowHtml);
+            }
+            rows.push(existingRows.get(rowKey));
         });
+
+        // Remove stale rows no longer in current data
+        for (const [key, row] of existingRows.entries()) {
+            if (!nextKeys.has(key)) {
+                row.remove();
+                tradeRowCache.delete(key);
+            }
+        }
+
+        // Keep visual order in sync with merged (newest first)
+        const frag = document.createDocumentFragment();
+        rows.forEach(r => r && frag.appendChild(r));
+        list.innerHTML = "";
+        list.appendChild(frag);
     } catch (e) {
         console.error("Failed to refresh trades", e);
     }
@@ -581,25 +655,73 @@ async function refreshSignals() {
         const data = await api.getSignals();
         const list = document.getElementById("signals-body");
         if (!list) return;
-        list.innerHTML = "";
+        const nextKeys = new Set();
 
         const signals = data.data || [];
         if (signals.length === 0) {
             list.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted)">No signals Generated</td></tr>`;
+            signalRowCache.clear();
             return;
         }
 
-        signals.reverse().forEach(s => {
-            const row = document.createElement("tr");
-            row.innerHTML = `
-                <td class="text-muted" style="font-size:0.7rem">${s.timestamp}</td>
-                <td class="mono" style="font-size:0.75rem">${s.instrument_key}</td>
-                <td><span class="badge ${s.action.toLowerCase()}">${s.action}</span></td>
-                <td class="mono">₹${formatPrice(s.price)}</td>
-                <td>${s.strategy_name}</td>
+        if (list.children.length === 1 && list.children[0].children.length === 1) {
+            list.innerHTML = "";
+        }
+
+        const existingRows = new Map();
+        Array.from(list.querySelectorAll("tr[data-row-key]")).forEach(r => existingRows.set(r.dataset.rowKey, r));
+
+        const rows = [];
+
+        signals
+            .slice()
+            .sort((a, b) => {
+                const ta = new Date(a.timestamp || 0).getTime();
+                const tb = new Date(b.timestamp || 0).getTime();
+                return (isNaN(tb) ? 0 : tb) - (isNaN(ta) ? 0 : ta);
+            })
+            .forEach((s, idx) => {
+            const action = (s.action || '-').toUpperCase();
+            const sideClass = action === 'BUY' ? 'buy' : (action.includes('SELL') ? 'sell' : '');
+            const instrument = s.instrument_key || s.instrument || '-';
+            const score = Number.isFinite(Number(s.confidence_score))
+                ? Number(s.confidence_score)
+                : (Number.isFinite(Number(s.confidence)) ? Number(s.confidence) : null);
+            const rowKey = `${s.timestamp || '-'}|${action}|${instrument}|${idx}`;
+            nextKeys.add(rowKey);
+            const rowHtml = `
+                <td class="text-muted" style="font-size:0.7rem">${s.timestamp || '-'}</td>
+                <td><span class="badge ${sideClass}">${action}</span></td>
+                <td class="mono" style="font-size:0.75rem">${instrument}</td>
+                <td class="mono">${s.price != null ? `₹${formatPrice(Number(s.price))}` : '-'}</td>
+                <td>${score != null ? score : '<span class="text-muted">Signal only</span>'}</td>
             `;
-            list.appendChild(row);
+
+            const prevSerialized = signalRowCache.get(rowKey);
+            if (prevSerialized !== rowHtml || !existingRows.get(rowKey)) {
+                let row = existingRows.get(rowKey);
+                if (!row) {
+                    row = document.createElement("tr");
+                    row.dataset.rowKey = rowKey;
+                }
+                row.innerHTML = rowHtml;
+                existingRows.set(rowKey, row);
+                signalRowCache.set(rowKey, rowHtml);
+            }
+            rows.push(existingRows.get(rowKey));
         });
+
+        for (const [key, row] of existingRows.entries()) {
+            if (!nextKeys.has(key)) {
+                row.remove();
+                signalRowCache.delete(key);
+            }
+        }
+
+        const frag = document.createDocumentFragment();
+        rows.forEach(r => r && frag.appendChild(r));
+        list.innerHTML = "";
+        list.appendChild(frag);
     } catch (e) {
         console.error("Failed to refresh signals", e);
     }
@@ -678,6 +800,11 @@ function updateEngineStatus(status) {
     if (autoToggle) autoToggle.checked = status.auto_mode;
 
     document.getElementById("auto-mode-card")?.classList.toggle("active", status.auto_mode);
+
+    // Render OC insight from engine cache if available
+    if (status.oc_insight) {
+        renderOcInsight(status.oc_insight);
+    }
 }
 
 async function checkAuth() {
@@ -1352,9 +1479,11 @@ function getDynamicParams() {
 async function refreshOverlay() {
     if (!currentInstrumentKey) return;
     const selector = document.getElementById("strategy-selector");
-    let cls = selector?.options[selector.selectedIndex]?.dataset?.class;
-    // Fallback to default strategy if selector isn't populated yet
-    if (!cls) cls = "SuperTrendPro";
+    // Do not fallback to an arbitrary strategy class before schemas are loaded,
+    // otherwise we trigger expensive wrong overlays and noisy warnings.
+    if (!selector || selector.options.length === 0) return;
+    const cls = selector.options[selector.selectedIndex]?.dataset?.class;
+    if (!cls) return;
 
     // Show loading state in the HUD
     const hud = document.getElementById("strategy-hud-container");
@@ -1492,6 +1621,118 @@ function renderStrategyHUD(strategy) {
     html += `</div>`;
     document.getElementById("strategy-hud-container").innerHTML = html;
 }
+
+// ── OC Insight Panel ────────────────────────────────────────────
+
+let _lastOcKey = null;
+
+async function refreshOcInsight() {
+    const container = document.getElementById("oc-insight-container");
+    if (!container || !currentInstrumentKey) return;
+
+    // Use the current instrument if it's an index, otherwise default to Nifty 50
+    const ocKey = currentInstrumentKey.includes("INDEX")
+        ? currentInstrumentKey
+        : "NSE_INDEX|Nifty 50";
+
+    // Avoid redundant fetches for the same key
+    if (_lastOcKey === ocKey) return;
+
+    container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--accent-primary); font-size: 0.75rem;">⏳ Loading OC analysis...</div>`;
+
+    try {
+        const res = await api.getOptionChainAnalysis(ocKey);
+        if (res.status !== "success" || !res.analysis) {
+            container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.75rem;">${res.message || 'No data'}</div>`;
+            return;
+        }
+        _lastOcKey = ocKey;
+        renderOcInsight(res.analysis);
+    } catch (e) {
+        container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--accent-danger); font-size: 0.75rem;">Failed to load OC analysis</div>`;
+    }
+}
+
+function renderOcInsight(a) {
+    const container = document.getElementById("oc-insight-container");
+    if (!container || !a) return;
+
+    const ds = a.directional_score || 0;
+    const sentiment = a.sentiment || "NEUTRAL";
+
+    const sentColor = sentiment === "BULLISH" ? "#4caf50" : sentiment === "BEARISH" ? "#ff5252" : "#ff9800";
+    const barPct = Math.abs(ds);
+    const barColor = ds >= 0 ? "#4caf50" : "#ff5252";
+
+    const pcr = a.pcr || {};
+    const mp = a.max_pain || {};
+    const oi = a.oi_concentration || {};
+    const iv = a.iv_skew || {};
+    const oib = a.oi_buildup || {};
+
+    const bgRow = "background: #2a2e39; color: white;";
+    const bgHdr = "background: #1e222d; color: white;";
+    const cGrn = "color: #4caf50;";
+    const cRed = "color: #ff5252;";
+    const cYlw = "color: #ff9800;";
+    const biasColor = (b) => b === "BULLISH" ? cGrn : b === "BEARISH" ? cRed : cYlw;
+
+    let html = `
+    <div style="padding: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span style="font-size: 0.8rem; font-weight: 600; ${biasColor(sentiment)}">${sentiment}</span>
+            <span style="font-size: 0.7rem; color: var(--text-muted);">Score: <b style="${biasColor(sentiment)}">${ds > 0 ? '+' : ''}${ds}</b></span>
+        </div>
+        <div style="height: 4px; background: #404040; border-radius: 2px; margin-bottom: 8px; position: relative;">
+            <div style="position: absolute; left: 50%; top: 0; width: 1px; height: 100%; background: #666;"></div>
+            <div style="height: 100%; width: ${barPct}%; background: ${barColor}; border-radius: 2px; margin-left: ${ds >= 0 ? '50%' : (50 - barPct) + '%'};"></div>
+        </div>
+    </div>`;
+
+    html += `<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #404040; font-family: monospace; font-size: 0.7rem;">`;
+
+    const addRow = (label, val, valStyle = bgRow) => {
+        html += `<div style="padding: 3px 6px; ${bgHdr}">${label}</div>`;
+        html += `<div style="padding: 3px 6px; ${valStyle}">${val}</div>`;
+    };
+
+    // PCR
+    const pcrVal = (pcr.pcr_oi || 0).toFixed(2);
+    const pcrStyle = pcr.pcr_oi > 1.0 ? `background:rgba(76,175,80,0.15);${cGrn}` : pcr.pcr_oi < 0.8 ? `background:rgba(244,67,54,0.15);${cRed}` : bgRow;
+    addRow("PCR (OI)", pcrVal, pcrStyle);
+
+    // Max Pain
+    addRow("Max Pain", mp.max_pain_strike ? mp.max_pain_strike.toLocaleString() : '-', bgRow);
+
+    // Spot
+    if (a.spot_price) addRow("Spot", a.spot_price.toLocaleString(), bgRow);
+
+    // Support / Resistance
+    if (oi.immediate_support) addRow("Support", oi.immediate_support.toLocaleString(), `background:rgba(76,175,80,0.15);${cGrn}`);
+    if (oi.immediate_resistance) addRow("Resistance", oi.immediate_resistance.toLocaleString(), `background:rgba(244,67,54,0.15);${cRed}`);
+
+    // IV Skew
+    const skewVal = `${iv.skew_bias || 'N/A'} (${(iv.iv_skew || 0).toFixed(1)})`;
+    addRow("IV Skew", skewVal, `${biasColor(iv.skew_bias)} background: #2a2e39;`);
+
+    // OI Buildup
+    addRow("OI Bias", oib.oi_bias || 'N/A', `${biasColor(oib.oi_bias)} background: #2a2e39;`);
+
+    html += `</div>`;
+
+    // Signal explanations (compact)
+    if (a.signals && a.signals.length > 0) {
+        html += `<div style="padding: 6px 8px; font-size: 0.65rem; color: var(--text-muted); border-top: 1px solid #404040; max-height: 80px; overflow-y: auto;">`;
+        a.signals.forEach(s => {
+            const icon = s.includes('BULLISH') || s.includes('bullish') || s.includes('support') ? '🟢' : s.includes('BEARISH') || s.includes('bearish') || s.includes('resistance') ? '🔴' : '⚪';
+            html += `<div style="margin-bottom: 2px;">${icon} ${s}</div>`;
+        });
+        html += `</div>`;
+    }
+
+    container.innerHTML = html;
+}
+
 window.switchMainView = (view) => {
     // Hide all
     const views = ['tvchart', 'option-chain-container', 'watchlist-view-container', 'settings-view-container'];

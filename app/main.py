@@ -85,6 +85,14 @@ async def lifespan(app: FastAPI):
             await broadcast_to_clients({"type": "status", "data": engine.get_status()})
 
     scheduler.on("candle_check", _scheduled_run_cycle)
+
+    async def _scheduled_square_off():
+        """Called at market close (3:30 PM IST) to force-exit all open positions."""
+        logger.info("🏁 [MARKET CLOSE] Squaring off all open positions...")
+        await engine.square_off_all()
+        await broadcast_to_clients({"type": "status", "data": engine.get_status()})
+
+    scheduler.on("market_close", _scheduled_square_off)
     scheduler.start()
     app.state.scheduler = scheduler
 

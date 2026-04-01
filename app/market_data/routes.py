@@ -324,3 +324,46 @@ async def get_detailed_option_chain(
         import logging
         logging.getLogger(__name__).error(f"Option chain route failed: {e}")
         return {"status": "error", "message": str(e), "chain": [], "available_expiries": []}
+
+
+@router.get("/option-chain/analysis")
+async def get_option_chain_analysis(
+    instrument_key: str = Query(..., description="e.g. NSE_INDEX|Nifty 50"),
+    expiry_date: str | None = Query(None),
+):
+    """
+    Real-time option chain analytics: PCR, OI concentration, Max-Pain, IV Skew.
+
+    Returns sentiment, directional score (-100 to +100), support/resistance levels,
+    and human-readable signal explanations.
+    """
+    try:
+        from app.market_data.option_analysis import analyze_option_chain
+
+        if "nifty 50" in instrument_key.lower():
+            instrument_key = "NSE_INDEX|Nifty 50"
+        elif "bank nifty" in instrument_key.lower() or "nifty bank" in instrument_key.lower():
+            instrument_key = "NSE_INDEX|Nifty Bank"
+
+        svc = _get_market_service()
+        chain_data = await svc.get_detailed_option_chain(instrument_key, expiry_date)
+
+        if chain_data.get("status") != "success" or not chain_data.get("chain"):
+            return {"status": "error", "message": "No chain data available"}
+
+        analysis = analyze_option_chain(
+            chain_data["chain"],
+            float(chain_data.get("spot_price") or 0),
+        )
+
+        return {
+            "status": "success",
+            "instrument_key": instrument_key,
+            "expiry_date": chain_data.get("expiry_date"),
+            "analysis": analysis,
+        }
+
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Option chain analysis failed: {e}")
+        return {"status": "error", "message": str(e)}

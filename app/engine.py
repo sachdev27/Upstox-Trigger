@@ -68,7 +68,7 @@ from app.strategies.scalp_pro import ScalpPro
 from app.database.connection import get_session, TradeLog
 
 from app.engine_pipeline import (
-    RiskGuardProcessor, ATMResolverProcessor,
+    RiskGuardProcessor, OptionChainInsightProcessor, ATMResolverProcessor,
     ExecutionProcessor, AlerterProcessor, BroadcastProcessor
 )
 
@@ -189,6 +189,7 @@ class AutomationEngine:
         # --- Signal Processing Pipeline ---
         self._pipeline = [
             RiskGuardProcessor(),
+            OptionChainInsightProcessor(),
             ATMResolverProcessor(),
             ExecutionProcessor(),
             AlerterProcessor(),
@@ -318,6 +319,15 @@ class AutomationEngine:
         Execute one strategy evaluation cycle.
         Called by the scheduler on each candle close or manually.
         """
+        cycle_t0 = time.perf_counter()
+        perf: dict[str, float] = {
+            "setup_ms": 0.0,
+            "eval_ms": 0.0,
+            "rank_ms": 0.0,
+            "execute_ms": 0.0,
+            "manage_pos_ms": 0.0,
+        }
+
         if not self._is_initialized:
             logger.warning("Engine not initialized — skipping cycle.")
             return
@@ -327,7 +337,9 @@ class AutomationEngine:
 
         # Autonomous position supervision on every cycle tick.
         if self._managed_positions:
+            _t = time.perf_counter()
             await self._manage_open_positions()
+            perf["manage_pos_ms"] += (time.perf_counter() - _t) * 1000.0
 
         now = datetime.now(IST)
         logger.info(f"🔄 Running cycle at {now.strftime('%H:%M:%S')}")
@@ -384,11 +396,14 @@ class AutomationEngine:
 
                 if tasks:
                     # Run all evaluations for this strategy/instrument group concurrently.
+                    _t_eval = time.perf_counter()
                     candidates = [c for c in await asyncio.gather(*tasks) if c is not None]
+                    perf["eval_ms"] += (time.perf_counter() - _t_eval) * 1000.0
                     if not candidates:
                         continue
 
                     # Keep the highest-scored candidate per instrument to avoid overtrading duplicates.
+                    _t_rank = time.perf_counter()
                     by_instrument: dict[str, tuple[TradeSignal, StrategyConfig]] = {}
                     for signal, tf_config in candidates:
                         existing = by_instrument.get(signal.instrument_key)
@@ -404,6 +419,7 @@ class AutomationEngine:
                     eligible = [c for c in unique_candidates if int(c[0].confidence_score or 0) >= min_score]
                     eligible.sort(key=lambda c: int(c[0].confidence_score or 0), reverse=True)
                     selected = eligible[:top_n]
+                    perf["rank_ms"] += (time.perf_counter() - _t_rank) * 1000.0
 
                     skipped = len(unique_candidates) - len(selected)
                     if skipped > 0:
@@ -413,7 +429,25 @@ class AutomationEngine:
                         )
 
                     for signal, tf_config in selected:
+                        _t_exec = time.perf_counter()
                         await self._handle_signal(signal, tf_config)
+                        perf["execute_ms"] += (time.perf_counter() - _t_exec) * 1000.0
+
+        total_ms = (time.perf_counter() - cycle_t0) * 1000.0
+        perf["setup_ms"] = max(
+            0.0,
+            total_ms - perf["eval_ms"] - perf["rank_ms"] - perf["execute_ms"] - perf["manage_pos_ms"],
+        )
+
+        logger.info(
+            "⚡ Cycle Perf total=%.1fms setup=%.1f eval=%.1f rank=%.1f exec=%.1f pos=%.1f",
+            total_ms,
+            perf["setup_ms"],
+            perf["eval_ms"],
+            perf["rank_ms"],
+            perf["execute_ms"],
+            perf["manage_pos_ms"],
+        )
 
     async def _manage_open_positions(self):
         """
@@ -438,6 +472,8 @@ class AutomationEngine:
                 ltp = float(ltp)
 
                 entry           = float(pos.get("entry_price", 0.0))
+                entry_side      = pos.get("entry_side", "BUY")  # "BUY" (long) or "SELL" (short)
+                is_long         = entry_side == "BUY"
                 stop_loss       = float(pos.get("stop_loss") or 0.0)
                 take_profit     = float(pos.get("take_profit") or 0.0)
                 qty_remaining   = int(pos.get("quantity_remaining", pos.get("quantity") or 1))
@@ -445,19 +481,29 @@ class AutomationEngine:
                 is_paper        = bool(pos.get("is_paper", True))
                 strat_name      = pos.get("strategy_name", "")
 
-                # ── Trailing SL ──────────────────────────────────
-                highest = float(pos.get("highest_price") or entry)
-                if ltp > highest:
-                    highest = ltp
-                    pos["highest_price"] = highest
-
+                # ── Trailing SL (direction-aware) ────────────────
                 trailing_enabled = bool(pos.get("trailing_enabled", False))
                 trail_distance   = float(pos.get("trail_distance") or 0.0)
                 effective_sl     = stop_loss
-                if trailing_enabled and trail_distance > 0 and highest > entry:
-                    tr_sl = highest - trail_distance
-                    effective_sl = max(effective_sl, tr_sl)
-                    pos["effective_sl"] = effective_sl   # persist updated trail
+
+                if is_long:
+                    highest = float(pos.get("highest_price") or entry)
+                    if ltp > highest:
+                        highest = ltp
+                        pos["highest_price"] = highest
+                    if trailing_enabled and trail_distance > 0 and highest > entry:
+                        tr_sl = highest - trail_distance
+                        effective_sl = max(effective_sl, tr_sl)
+                else:
+                    lowest = float(pos.get("lowest_price") or entry)
+                    if ltp < lowest:
+                        lowest = ltp
+                        pos["lowest_price"] = lowest
+                    if trailing_enabled and trail_distance > 0 and lowest < entry:
+                        tr_sl = lowest + trail_distance
+                        effective_sl = min(effective_sl, tr_sl) if effective_sl > 0 else tr_sl
+
+                pos["effective_sl"] = effective_sl
 
                 # ── Partial Booking Levels ───────────────────────
                 partial_enabled = bool(pos.get("partial_tp_enabled", False))
@@ -468,8 +514,9 @@ class AutomationEngine:
                 tp1_booked = bool(pos.get("tp1_booked", False))
                 tp2_booked = bool(pos.get("tp2_booked", False))
 
-                # ── Check TP1 partial exit ───────────────────────
-                if partial_enabled and tp1 > 0 and not tp1_booked and ltp >= tp1:
+                # ── Check TP1 partial exit (direction-aware) ────
+                tp1_hit = (ltp >= tp1) if is_long else (ltp <= tp1)
+                if partial_enabled and tp1 > 0 and not tp1_booked and tp1_hit:
                     book_qty = max(1, round(qty_original * tp1_pct / 100))
                     book_qty = min(book_qty, qty_remaining)
                     if book_qty > 0:
@@ -485,8 +532,9 @@ class AutomationEngine:
                         effective_sl = entry
                         logger.info(f"📈 TP1 partial exit: sold {book_qty} of {instrument_key} @ {ltp:.2f}")
 
-                # ── Check TP2 partial exit ───────────────────────
-                if partial_enabled and tp2 > 0 and tp1_booked and not tp2_booked and ltp >= tp2:
+                # ── Check TP2 partial exit (direction-aware) ────
+                tp2_hit = (ltp >= tp2) if is_long else (ltp <= tp2)
+                if partial_enabled and tp2 > 0 and tp1_booked and not tp2_booked and tp2_hit:
                     book_qty = max(1, round(qty_original * tp2_pct / 100))
                     book_qty = min(book_qty, qty_remaining)
                     if book_qty > 0:
@@ -505,8 +553,8 @@ class AutomationEngine:
                     self._close_active_signal_record(instrument_key)
                     continue
 
-                hit_tp = take_profit > 0 and ltp >= take_profit
-                hit_sl = effective_sl > 0 and ltp <= effective_sl
+                hit_tp = take_profit > 0 and ((ltp >= take_profit) if is_long else (ltp <= take_profit))
+                hit_sl = effective_sl > 0 and ((ltp <= effective_sl) if is_long else (ltp >= effective_sl))
 
                 if not (hit_tp or hit_sl):
                     continue
@@ -517,31 +565,33 @@ class AutomationEngine:
                     f"LTP={ltp:.2f} qty={qty_remaining}"
                 )
 
-                # Live order
+                # Live order (exit side is opposite of entry side)
+                from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
+                exit_side = TransactionType.SELL if is_long else TransactionType.BUY
                 if not is_paper and self._order_service:
-                    from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
                     await asyncio.to_thread(
                         self._order_service.place_order,
                         OrderRequest(
                             instrument_token=instrument_key,
                             quantity=max(1, qty_remaining),
-                            transaction_type=TransactionType.SELL,
+                            transaction_type=exit_side,
                             order_type=OrderType.MARKET,
                             product=ProductType.INTRADAY,
                             tag=f"auto-exit-{strat_name}",
                         )
                     )
 
-                pnl = (ltp - entry) * max(1, qty_remaining)
+                pnl_per_unit = (ltp - entry) if is_long else (entry - ltp)
+                pnl = pnl_per_unit * max(1, qty_remaining)
                 # Add PnL from any partial exits already recorded
                 pnl += float(pos.get("partial_pnl", 0.0))
-                self._daily_pnl += (ltp - entry) * max(1, qty_remaining)
+                self._daily_pnl += pnl_per_unit * max(1, qty_remaining)
                 self._trades_today.append({
                     "timestamp": datetime.now(IST).isoformat(),
                     "type": "paper" if is_paper else "live",
                     "strategy": strat_name,
                     "instrument": instrument_key,
-                    "action": "SELL",
+                    "action": exit_side.value,
                     "price": ltp,
                     "reason": exit_reason,
                     "pnl": pnl,
@@ -556,7 +606,7 @@ class AutomationEngine:
                             "type": "paper" if is_paper else "live",
                             "strategy": strat_name,
                             "instrument": instrument_key,
-                            "action": "SELL",
+                            "action": exit_side.value,
                             "price": ltp,
                             "exit_reason": exit_reason,
                             "pnl": pnl,
@@ -579,17 +629,19 @@ class AutomationEngine:
         """Place partial exit order (paper log or live) and record PnL."""
         entry = float(pos.get("entry_price", 0.0))
         strat_name = pos.get("strategy_name", "")
+        is_long = pos.get("entry_side", "BUY") == "BUY"
 
-        # Live market order
+        # Live market order (exit side is opposite of entry)
+        from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
+        exit_side = TransactionType.SELL if is_long else TransactionType.BUY
         if not is_paper and self._order_service:
             try:
-                from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
                 await asyncio.to_thread(
                     self._order_service.place_order,
                     OrderRequest(
                         instrument_token=instrument_key,
                         quantity=max(1, qty),
-                        transaction_type=TransactionType.SELL,
+                        transaction_type=exit_side,
                         order_type=OrderType.MARKET,
                         product=ProductType.INTRADAY,
                         tag=f"partial-{label.lower()}-{strat_name}",
@@ -598,7 +650,7 @@ class AutomationEngine:
             except Exception as e:
                 logger.error(f"Partial exit order failed ({label}): {e}")
 
-        partial_pnl = (ltp - entry) * qty
+        partial_pnl = ((ltp - entry) if is_long else (entry - ltp)) * qty
         pos["partial_pnl"] = float(pos.get("partial_pnl", 0.0)) + partial_pnl
         self._daily_pnl += partial_pnl
 
@@ -776,6 +828,98 @@ class AutomationEngine:
                 logger.error(f"Error in pipeline processor {processor.__class__.__name__}: {e}")
                 break
 
+    # ── Market Close Square-Off ────────────────────────────────
+
+    async def square_off_all(self):
+        """
+        Force-exit all managed positions at market price.
+        Called by the scheduler at market_close (3:30 PM IST).
+        """
+        if not self._managed_positions:
+            logger.info("🏁 Market close: no open positions to square off.")
+            return
+
+        logger.warning(
+            f"🏁 MARKET CLOSE: Force-squaring off {len(self._managed_positions)} position(s)..."
+        )
+        from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
+
+        for instrument_key, pos in list(self._managed_positions.items()):
+            try:
+                qty_remaining = int(pos.get("quantity_remaining", pos.get("quantity") or 1))
+                is_paper = bool(pos.get("is_paper", True))
+                strat_name = pos.get("strategy_name", "")
+                entry = float(pos.get("entry_price", 0.0))
+                is_long = pos.get("entry_side", "BUY") == "BUY"
+                exit_side = TransactionType.SELL if is_long else TransactionType.BUY
+
+                ltp = None
+                if self._market_service:
+                    try:
+                        ltp = await asyncio.to_thread(self._market_service.get_ltp, instrument_key)
+                        ltp = float(ltp) if ltp else None
+                    except Exception:
+                        pass
+
+                # Place live exit order
+                if not is_paper and self._order_service and qty_remaining > 0:
+                    try:
+                        await asyncio.to_thread(
+                            self._order_service.place_order,
+                            OrderRequest(
+                                instrument_token=instrument_key,
+                                quantity=max(1, qty_remaining),
+                                transaction_type=exit_side,
+                                order_type=OrderType.MARKET,
+                                product=ProductType.INTRADAY,
+                                tag=f"squareoff-{strat_name}",
+                            )
+                        )
+                    except Exception as e:
+                        logger.error(f"Square-off order failed for {instrument_key}: {e}")
+
+                exit_price = ltp or entry
+                pnl_per_unit = (exit_price - entry) if is_long else (entry - exit_price)
+                pnl = pnl_per_unit * max(1, qty_remaining) + float(pos.get("partial_pnl", 0.0))
+                self._daily_pnl += pnl_per_unit * max(1, qty_remaining)
+
+                self._trades_today.append({
+                    "timestamp": datetime.now(IST).isoformat(),
+                    "type": "paper" if is_paper else "live",
+                    "strategy": strat_name,
+                    "instrument": instrument_key,
+                    "action": exit_side.value,
+                    "price": exit_price,
+                    "reason": "SQUARE_OFF",
+                    "pnl": pnl,
+                })
+
+                self._close_active_signal_record(instrument_key)
+
+                if self.broadcast_callback:
+                    asyncio.create_task(self.broadcast_callback({
+                        "type": "trade_executed",
+                        "data": {
+                            "type": "paper" if is_paper else "live",
+                            "strategy": strat_name,
+                            "instrument": instrument_key,
+                            "action": exit_side.value,
+                            "price": exit_price,
+                            "exit_reason": "SQUARE_OFF",
+                            "pnl": pnl,
+                        }
+                    }))
+
+                logger.info(
+                    f"🏁 Squared off {instrument_key}: {exit_side.value} "
+                    f"qty={qty_remaining} @ {exit_price:.2f} PnL={pnl:.2f}"
+                )
+            except Exception as e:
+                logger.error(f"Square-off error for {instrument_key}: {e}")
+
+        self._managed_positions.clear()
+        logger.info("🏁 All positions squared off.")
+
     # ── Status & Reporting ──────────────────────────────────────
 
     def get_status(self) -> dict:
@@ -796,6 +940,7 @@ class AutomationEngine:
             },
             "daily_pnl": self._daily_pnl,
             "strategy_hud": (self._active_strategies[0][1].latest_metrics if self._active_strategies and hasattr(self._active_strategies[0][1], 'latest_metrics') else {}) or {},
+            "oc_insight": self._get_latest_oc_insight(),
             "active_strategies": [
                 {
                     "name": config.name,
@@ -833,6 +978,16 @@ class AutomationEngine:
             return count
         except Exception:
             return 0
+
+    def _get_latest_oc_insight(self) -> dict | None:
+        """Return the latest cached OC analysis from the pipeline processor."""
+        for proc in self._pipeline:
+            if hasattr(proc, '_cache') and isinstance(proc, OptionChainInsightProcessor):
+                # Return the most recent cached analysis
+                if proc._cache:
+                    _, analysis = next(iter(proc._cache.values()))
+                    return analysis
+        return None
 
     async def trigger_test_signal(self, instrument_key: str) -> dict:
         """Force a test signal for debugging."""
