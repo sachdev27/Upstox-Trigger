@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
 
     # Start the scheduler
     from app.scheduler.service import SchedulerService
-    
+
     scheduler = SchedulerService()
     engine.broadcast_callback = broadcast_to_clients
 
@@ -93,18 +93,11 @@ async def lifespan(app: FastAPI):
     # --- Live Market Data & Portfolio Streamer ---
     from app.market_data.streamer import MarketDataStreamer, PortfolioStreamer
     from app.auth.service import get_auth_service
-    from app.database.connection import get_session, MarketTick
-    
+    from app.database.connection import get_session
+
     auth_service = get_auth_service()
     # Market streamers MUST use Live configuration (Sandbox doesn't support market data)
     streamer = MarketDataStreamer(auth_service.get_configuration(use_sandbox=False))
-    
-    # Always subscribe to core indices for the status bar
-    try:
-        streamer.start(["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"])
-        logger.info("📡 Core indices (Nifty/Bank Nifty) subscribed on startup (V3).")
-    except Exception as e:
-        logger.error(f"Failed to subscribe to core indices on startup: {e}")
 
     async def _handle_market_tick(data):
         """
@@ -113,10 +106,10 @@ async def lifespan(app: FastAPI):
         """
         if not data:
             return
-            
+
         if not isinstance(data, dict):
             return
-            
+
         # SDK V3 usually passes a dict with 'feeds'
         feeds = data.get("feeds", {})
         if not feeds:
@@ -133,37 +126,37 @@ async def lifespan(app: FastAPI):
                 # Stock: feed['fullFeed']['marketFF']['ltpc']['ltp']
                 # Index: feed['fullFeed']['indexFF']['ltpc']['ltp']
                 # LTQ: feed['ltpc']['ltp'] (some modes)
-                
+
                 # 1. Fast inner extraction
                 inner = feed.get("fullFeed") or feed.get("ff") or feed
                 if "marketFF" in inner: inner = inner["marketFF"]
                 elif "indexFF" in inner: inner = inner["indexFF"]
-                
+
                 # 2. Direct extraction with early exit
                 ltpc = inner.get("ltpc", {})
                 ltp = ltpc.get("ltp")
                 if not ltp:
                     continue
-                
+
                 # 3. Optimized metadata extraction
                 greeks = inner.get("optionGreeks", {})
                 volume = inner.get("vtt", 0)
                 iv = inner.get("iv", greeks.get("iv", 0.0))
-                
+
                 ds = datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp() # IST timestamp
                 # 4. Packed Array Transport (Binary-lite)
                 # Format: ["t", key, ltp, v, iv, delta, theta, ts]
                 msg = [
-                    "t", 
-                    instrument_key, 
-                    float(ltp), 
-                    int(volume), 
+                    "t",
+                    instrument_key,
+                    float(ltp),
+                    int(volume),
                     round(float(iv or 0.0) * 100, 2),
                     round(float(greeks.get("delta") or 0.0), 4),
                     round(float(greeks.get("theta") or 0.0), 2),
                     int(ds)
                 ]
-                
+
                 target_clients = instrument_subscriptions.get(instrument_key, set())
                 for client_ws in list(target_clients):
                     try:
@@ -181,34 +174,34 @@ async def lifespan(app: FastAPI):
         asyncio.run_coroutine_threadsafe(_handle_market_tick(message), loop)
 
     streamer.on_tick = sync_on_tick
-    
-    # Initialize market data streamer (dynamic subscriptions started from frontend)
+
+    # Start market data streamer with core indices; additional subscriptions added dynamically
     try:
-        streamer.start([])
+        streamer.start(["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"])
         app.state.market_streamer = streamer
-        logger.info("📡 Market Data Streamer started (Ready for dynamic subscriptions)")
+        logger.info("📡 Market Data Streamer started with core indices (Nifty/Bank Nifty).")
     except Exception as e:
         logger.error(f"❌ Failed to start market streamer: {e}")
 
     # Start Portfolio Streamer
     # Portfolio streamers MUST use Live configuration for notifications
     portfolio_streamer = PortfolioStreamer(auth_service.get_configuration(use_sandbox=False))
-    
+
     def sync_portfolio_update(message):
         # Broadcast portfolio updates to all WS clients
         asyncio.run_coroutine_threadsafe(
-            broadcast_to_clients({"type": "portfolio_update", "data": message}), 
+            broadcast_to_clients({"type": "portfolio_update", "data": message}),
             loop
         )
-        
+
     portfolio_streamer.on_update = sync_portfolio_update
-    
+
     try:
         portfolio_streamer.start(order_update=True, position_update=True, holding_update=True)
         app.state.portfolio_streamer = portfolio_streamer
         logger.info("📡 Portfolio Data Streamer started.")
     except Exception as e:
-        logger.error(f"❌ Failed to start market streamer: {e}")
+        logger.error(f"❌ Failed to start portfolio streamer: {e}")
 
     # --- Heartbeat & Periodic Status ---
     async def _periodic_updates():
@@ -216,7 +209,7 @@ async def lifespan(app: FastAPI):
             try:
                 # Send a heartbeat every 10 seconds to keep WS alive and show it's working
                 await broadcast_to_clients({
-                    "type": "heartbeat", 
+                    "type": "heartbeat",
                     "data": {"timestamp": datetime.now().isoformat()}
                 })
                 # Refresh status too
@@ -227,12 +220,15 @@ async def lifespan(app: FastAPI):
                 pass
             await asyncio.sleep(10)
 
-    asyncio.create_task(_periodic_updates())
+    _heartbeat_task = asyncio.create_task(_periodic_updates())
+    app.state.heartbeat_task = _heartbeat_task
 
     yield
-    
+
     # Shutdown
     logger.info("🛑 Shutting down...")
+    if hasattr(app.state, "heartbeat_task") and not app.state.heartbeat_task.done():
+        app.state.heartbeat_task.cancel()
     scheduler.stop()
     if hasattr(app.state, "market_streamer"):
         app.state.market_streamer.stop()
@@ -252,10 +248,12 @@ app = FastAPI(
 )
 
 # CORS — allow frontend to connect
+# Note: allow_credentials=True is incompatible with allow_origins=["*"] per CORS spec.
+# For production, replace "*" with your actual frontend origin (e.g. "http://localhost:3000").
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -303,23 +301,23 @@ async def websocket_endpoint(ws: WebSocket):
                 msg = json.loads(data)
                 action = msg.get("action")
                 key = msg.get("instrument_key")
-                
+
                 if action == "get_status":
                     from app.engine import get_engine
                     status = get_engine().get_status()
                     await ws.send_json({"type": "status", "data": status})
-                
+
                 elif action == "subscribe" and key:
                     keys_to_sub = [k.strip() for k in key.split(',') if k.strip()]
                     for k in keys_to_sub:
                         if k not in instrument_subscriptions:
                             instrument_subscriptions[k] = set()
                         instrument_subscriptions[k].add(ws)
-                        
+
                         if ws not in client_subscriptions:
                             client_subscriptions[ws] = set()
                         client_subscriptions[ws].add(k)
-                        
+
                         if len(instrument_subscriptions[k]) == 1:
                             if hasattr(app.state, "market_streamer") and app.state.market_streamer:
                                 try:
@@ -328,7 +326,7 @@ async def websocket_endpoint(ws: WebSocket):
                                     logger.info(f"📡 SDK Subscription started (FULL mode) for: {k}")
                                 except Exception as e:
                                     logger.error(f"Failed to subscribe to {k}: {e}")
-                
+
                 elif action == "unsubscribe" and key:
                     keys_to_unsub = [k.strip() for k in key.split(',') if k.strip()]
                     for k in keys_to_unsub:
@@ -336,7 +334,7 @@ async def websocket_endpoint(ws: WebSocket):
                             instrument_subscriptions[k].discard(ws)
                             if ws in client_subscriptions:
                                 client_subscriptions[ws].discard(k)
-                                
+
                             if len(instrument_subscriptions[k]) == 0:
                                 del instrument_subscriptions[k]
                                 if hasattr(app.state, "market_streamer") and app.state.market_streamer:
@@ -345,7 +343,7 @@ async def websocket_endpoint(ws: WebSocket):
                                         logger.info(f"🛑 SDK Subscription stopped for: {k}")
                                     except Exception as e:
                                         logger.error(f"Failed to unsubscribe from {k}: {e}")
-                                
+
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect:
@@ -362,7 +360,7 @@ async def websocket_endpoint(ws: WebSocket):
                             logger.info(f"🛑 SDK Subscription stopped for: {key} (Client disconnected)")
                         except Exception as e:
                             logger.error(f"Failed to unsubscribe from {key} during disconnect: {e}")
-        
+
         ws_clients.discard(ws)
         logger.info(f"WebSocket client disconnected. Total: {len(ws_clients)}")
 
@@ -402,7 +400,7 @@ async def root_callback(code: str):
     """
     from app.auth.service import get_auth_service
     from fastapi.responses import RedirectResponse
-    
+
     auth = get_auth_service()
     token = auth.handle_callback(code)
     return RedirectResponse(url="/dashboard")

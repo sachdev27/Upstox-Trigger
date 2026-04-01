@@ -150,12 +150,12 @@ class SuperTrendPro(BaseStrategy):
     def _get_indicators(self, df: pd.DataFrame, htf_df: pd.DataFrame | None = None) -> dict:
         """Calculate and cache all indicators once per cycle."""
         if len(df) == 0: return {}
-        
+
         # Identity check: length + last timestamp
         df_id = (len(df), df["time"].iloc[-1] if "time" in df.columns else 0)
         # Also check htf_df if present
         htf_id = (len(htf_df), htf_df["time"].iloc[-1] if "time" in htf_df.columns else 0) if htf_df is not None else None
-        
+
         if hasattr(self, "_last_eval_id") and self._last_eval_id == (df_id, htf_id):
             return self._indicator_cache
 
@@ -167,14 +167,14 @@ class SuperTrendPro(BaseStrategy):
             "roc_vals": roc(df["close"], p["roc_lookback"]).abs(),
             "squeeze": bb_squeeze(df["close"], p["bb_length"], p["bb_multiplier"], p["squeeze_lookback"])
         }
-        
+
         # Section 2: Slow ST
         if p["use_dual_st"]:
             res["st_slow"] = supertrend(df, p["slow_atr_period"], p["slow_atr_multiplier"], p["use_rma"])
-            
+
         # Section 3: Consec Bars
         res["consec_bars"] = consecutive_confirming_bars(res["st_primary"]["trend"], df["close"])
-        
+
         # Section 4b: HTF
         if p["use_htf_filter"] and htf_df is not None and len(htf_df) > 30:
             res["st_htf"] = supertrend(htf_df, p["htf_atr_period"], p["htf_atr_multiplier"])
@@ -198,9 +198,6 @@ class SuperTrendPro(BaseStrategy):
         """
         if len(df) < 100:
             return None
-
-        # Snapshot evaluation state for UI
-        self.latest_metrics = self.get_dashboard_state(df, htf_df)
 
         p = self.params
         tf_mins = self._tf_minutes(self.config.timeframe)
@@ -229,10 +226,17 @@ class SuperTrendPro(BaseStrategy):
                 return None
 
         # ── Section 4b: H3 — HTF Trend Filter ──────────────────
-        if p["use_htf_filter"] and ind["st_htf"] is not None:
-            htf_trend = ind["st_htf"]["trend"].iloc[-1]
-            if buy_signal and htf_trend != 1: return None
-            if sell_signal and htf_trend != -1: return None
+        if p["use_htf_filter"]:
+            if ind["st_htf"] is not None:
+                htf_trend = ind["st_htf"]["trend"].iloc[-1]
+                if buy_signal and htf_trend != 1: return None
+                if sell_signal and htf_trend != -1: return None
+            else:
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "HTF filter is enabled (use_htf_filter=True) but no HTF data was provided. "
+                    "The H3 gate is being BYPASSED. Ensure htf_df is passed to on_candle()."
+                )
 
         # ── Section 4: Soft Score Filters ───────────────────────
         soft_score = 0

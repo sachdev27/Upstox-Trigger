@@ -41,7 +41,7 @@ class SettingsUpdate(BaseModel):
 
 # Keys that should be masked in the UI
 _SECRET_KEYS = {
-    "API_KEY", "API_SECRET", "SANDBOX_API_KEY", "SANDBOX_API_SECRET", 
+    "API_KEY", "API_SECRET", "SANDBOX_API_KEY", "SANDBOX_API_SECRET",
     "SANDBOX_ACCESS_TOKEN", "ACCESS_TOKEN", "SMTP_PASSWORD", "TELEGRAM_BOT_TOKEN"
 }
 
@@ -52,7 +52,7 @@ _CATEGORY_MAP = {
     "TRADING_CAPITAL": "ENGINE", "PAPER_TRADING": "ENGINE", "TRADING_SIDE": "ENGINE", "MAX_OPEN_TRADES": "ENGINE",
     "USE_SANDBOX": "ENGINE", "SANDBOX_API_KEY": "API", "SANDBOX_API_SECRET": "API", "SANDBOX_ACCESS_TOKEN": "API",
     "TELEGRAM_BOT_TOKEN": "NOTIFICATIONS", "TELEGRAM_CHAT_ID": "NOTIFICATIONS",
-    "SMTP_SERVER": "NOTIFICATIONS", "SMTP_PORT": "NOTIFICATIONS", "SMTP_USER": "NOTIFICATIONS", 
+    "SMTP_SERVER": "NOTIFICATIONS", "SMTP_PORT": "NOTIFICATIONS", "SMTP_USER": "NOTIFICATIONS",
     "SMTP_PASSWORD": "NOTIFICATIONS", "EMAIL_RECIPIENT": "NOTIFICATIONS", "NOTIFICATION_CHANNELS": "NOTIFICATIONS",
 }
 
@@ -105,7 +105,7 @@ async def update_settings(updates: SettingsUpdate = Body(...)):
     updated_keys = []
 
     # Map the Pydantic model to a dict, excluding None values
-    update_data = updates.dict(exclude_none=True)
+    update_data = updates.model_dump(exclude_none=True)
 
     for key, value in update_data.items():
         # Skip masked placeholder values (user didn't change them)

@@ -205,10 +205,11 @@ class OrderService:
 
     def _check_risk_limits(self):
         """Raise if risk limits are breached."""
-        if self._daily_pnl < -(self.settings.MAX_DAILY_LOSS_PCT):
+        max_loss_abs = self.settings.TRADING_CAPITAL * (self.settings.MAX_DAILY_LOSS_PCT / 100)
+        if self._daily_pnl < -max_loss_abs:
             raise RuntimeError(
-                f"Daily loss limit breached: {self._daily_pnl:.2f}% "
-                f"(limit: {self.settings.MAX_DAILY_LOSS_PCT}%)"
+                f"Daily loss limit breached: {self._daily_pnl:.2f} "
+                f"(limit: -{max_loss_abs:.2f}, {self.settings.MAX_DAILY_LOSS_PCT}% of capital)"
             )
 
     def _calculate_position_size(
@@ -225,8 +226,14 @@ class OrderService:
         if risk_per_unit == 0:
             return 1
 
-        # rough equity estimate — in production, fetch from API
-        equity = 100_000  # TODO: fetch from get_funds_and_margin
+        # Fetch live equity; fall back to configured trading capital
+        equity = self.settings.TRADING_CAPITAL
+        funds = self.get_funds_and_margin()
+        if funds:
+            available = funds.get("available_margin") or funds.get("used_margin") or equity
+            if available and float(available) > 0:
+                equity = float(available)
+
         risk_amount = equity * (self.settings.MAX_RISK_PER_TRADE_PCT / 100)
         qty = int(risk_amount / risk_per_unit)
         return max(1, qty)

@@ -31,7 +31,7 @@ class UpstoxRateLimiter:
         async with self.lock:
             while True:
                 now = time.monotonic()
-                
+
                 # Cleanup old requests
                 while self.history_sec and now - self.history_sec[0] > 1.0:
                     self.history_sec.popleft()
@@ -82,6 +82,15 @@ STRATEGY_CLASSES = {
     "ScalpPro": ScalpPro,
 }
 
+# Nifty 200 instrument keys (used when instrument == "NIFTY200")
+# Kept here to avoid coupling the engine to monitoring routes.
+NIFTY200_KEYS = [
+    "NSE_EQ|INE002A01018", "NSE_EQ|INE040A01034", "NSE_EQ|INE009A01021",
+    "NSE_EQ|INE062A01020", "NSE_EQ|INE030A01027", "NSE_EQ|INE467B01029",
+    "NSE_EQ|INE075A01022", "NSE_EQ|INE154A01025", "NSE_EQ|INE238A01034",
+    "NSE_EQ|INE081A01012",
+]
+
 
 class AutomationEngine:
     """
@@ -106,7 +115,7 @@ class AutomationEngine:
         self._is_initialized: bool = False
         self._is_running: bool = False
         self.auto_mode: bool = False
-        
+
         # WebSocket broadcast callback (set by main.py)
         self.broadcast_callback = None
 
@@ -150,7 +159,7 @@ class AutomationEngine:
         """Initialize all services and load strategies."""
         if self._is_initialized:
             return
-        
+
         logger.info("🚀 Initializing Automation Engine...")
         self.sync_from_settings()
 
@@ -189,7 +198,7 @@ class AutomationEngine:
             except Exception as e:
                 logger.error(f"⚠️ Order Service initialization failed: {e}")
                 self._order_service = None
-            
+
             self._is_initialized = True
             logger.info(f"✅ Automation engine initialized ({'SANDBOX' if self.settings.USE_SANDBOX else 'LIVE'} mode).")
         except Exception as e:
@@ -260,18 +269,19 @@ class AutomationEngine:
                 target_instruments = [instrument]
                 tf_overrides = {}  # instrument_key -> [timeframes]
                 if instrument == "NIFTY200":
-                    from app.monitoring.routes import get_nifty200_list
-                    target_instruments = get_nifty200_list()
+                    target_instruments = list(NIFTY200_KEYS)
                 elif instrument == "CUSTOM_WATCHLIST":
                     from app.database.connection import get_session, Watchlist
                     session = get_session()
-                    wl_items = session.query(Watchlist).all()
-                    target_instruments = [w.instrument_key for w in wl_items]
-                    # Build TF override map from watchlist
-                    for w in wl_items:
-                        if w.timeframes:
-                            tf_overrides[w.instrument_key] = w.timeframes
-                    session.close()
+                    try:
+                        wl_items = session.query(Watchlist).all()
+                        target_instruments = [w.instrument_key for w in wl_items]
+                        # Build TF override map from watchlist
+                        for w in wl_items:
+                            if w.timeframes:
+                                tf_overrides[w.instrument_key] = w.timeframes
+                    finally:
+                        session.close()
 
                 total_scans = sum(len(tf_overrides.get(t, [config.timeframe])) for t in target_instruments)
                 logger.info(f"🔍 Scanning {len(target_instruments)} instruments ({total_scans} timeframe combinations)...")
@@ -280,7 +290,7 @@ class AutomationEngine:
                 for target in target_instruments:
                     # Get timeframes for this instrument (custom or default)
                     timeframes_to_scan = tf_overrides.get(target, [config.timeframe])
-                    
+
                     for tf in timeframes_to_scan:
                         # Create a shallow copy of config with this TF
                         tf_config = StrategyConfig(
@@ -292,7 +302,7 @@ class AutomationEngine:
                             paper_trading=config.paper_trading,
                         )
                         tasks.append(self._process_instrument_tf(strategy, tf_config, target))
-                
+
                 if tasks:
                     # Run all evaluations for this strategy/instrument group concurrently
                     await asyncio.gather(*tasks)
@@ -318,7 +328,7 @@ class AutomationEngine:
         tasks = [
             asyncio.to_thread(self._market_service.get_intraday_candles, instrument_key, interval)
         ]
-        
+
         has_htf = strategy.params.get("use_htf_filter")
         if has_htf:
             htf_tf = strategy.params.get("htf_timeframe", "1D")
@@ -357,11 +367,10 @@ class AutomationEngine:
                 if col in htf_df.columns:
                     htf_df[col] = pd.to_numeric(htf_df[col], errors="coerce")
 
-        # Evaluate strategy
+        # Evaluate strategy — on_candle runs first, then update dashboard metrics
+        signal = strategy.on_candle(df, htf_df=htf_df)
         if hasattr(strategy, 'get_dashboard_state'):
             strategy.latest_metrics = strategy.get_dashboard_state(df, htf_df=htf_df)
-            
-        signal = strategy.on_candle(df, htf_df=htf_df)
         if signal:
             signal.instrument_key = instrument_key
             self._signals_log.append({
@@ -377,7 +386,7 @@ class AutomationEngine:
             logger.info(
                 f"🎯 SIGNAL: {signal.action.value} {instrument_key} @ {signal.price:.2f}"
             )
-            
+
             # Broadcast signal to UI
             if self.broadcast_callback:
                 asyncio.create_task(self.broadcast_callback({
@@ -467,7 +476,7 @@ class AutomationEngine:
     async def trigger_test_signal(self, instrument_key: str) -> dict:
         """Force a test signal for debugging."""
         logger.info(f"🧪 [TEST] Triggering manual signal for {instrument_key}")
-        
+
         # Create a fake signal
         from app.orders.models import TransactionType
         signal = TradeSignal(
@@ -479,10 +488,10 @@ class AutomationEngine:
             take_profit=25300.0,
             confidence_score=5,
         )
-        
+
         # Use a dummy strategy config
         dummy_config = StrategyConfig(name="Test", enabled=True, instruments=[instrument_key], timeframe="1m", paper_trading=True)
-        
+
         await self._handle_signal(signal, dummy_config)
         return {"action": signal.action.value, "instrument": instrument_key}
 

@@ -28,7 +28,7 @@ class ScalpPro(BaseStrategy):
     def _get_indicators(self, df: pd.DataFrame) -> dict:
         """Calculate and cache indicators for the current dataframe to avoid redundant math."""
         if len(df) == 0: return {}
-        
+
         # Identity check: length + last timestamp
         df_id = (len(df), df["time"].iloc[-1] if "time" in df.columns else 0)
         if hasattr(self, "_last_df_id") and self._last_df_id == df_id:
@@ -56,14 +56,14 @@ class ScalpPro(BaseStrategy):
             return {}
 
         ind = self._get_indicators(df)
-        
+
         # Determine current state
         close = ind["close"].iloc[-1]
         fast_curr = ind["fast"].iloc[-1]
         slow_curr = ind["slow"].iloc[-1]
-        
+
         trend = "BULLISH" if fast_curr > slow_curr else "BEARISH"
-        
+
         if not p["use_vwap_filter"]:
             vwap_state = "PASS"
         else:
@@ -74,7 +74,7 @@ class ScalpPro(BaseStrategy):
                 vwap_state = "PASS (Below)"
             else:
                 vwap_state = "FAIL"
-        
+
         return {
             "EMA Trend": trend,
             "VWAP Filter": vwap_state,
@@ -92,7 +92,7 @@ class ScalpPro(BaseStrategy):
             return None
 
         ind = self._get_indicators(df)
-        
+
         fast_curr = ind["fast"].iloc[-1]
         fast_prev = ind["fast"].iloc[-2]
         slow_curr = ind["slow"].iloc[-1]
@@ -106,7 +106,7 @@ class ScalpPro(BaseStrategy):
             return None
 
         close = ind["close"].iloc[-1]
-        
+
         # Long conditions
         if buy_cross:
             # Price must be > VWAP for longs
@@ -115,10 +115,10 @@ class ScalpPro(BaseStrategy):
             # RSI must exceed threshold
             if ind["rsi"].iloc[-1] < p["rsi_buy_thresh"]:
                 return None
-                
+
             sl_dist = ind["atr"].iloc[-1] * p["sl_atr_multiplier"]
             tp_dist = ind["atr"].iloc[-1] * p["tp_atr_multiplier"]
-            
+
             return TradeSignal(
                 strategy_name=self.config.name,
                 instrument_key="",  # injected by engine
@@ -137,10 +137,10 @@ class ScalpPro(BaseStrategy):
             # RSI must be below threshold
             if ind["rsi"].iloc[-1] > p["rsi_sell_thresh"]:
                 return None
-                
+
             sl_dist = ind["atr"].iloc[-1] * p["sl_atr_multiplier"]
             tp_dist = ind["atr"].iloc[-1] * p["tp_atr_multiplier"]
-            
+
             return TradeSignal(
                 strategy_name=self.config.name,
                 instrument_key="",
@@ -150,32 +150,38 @@ class ScalpPro(BaseStrategy):
                 take_profit=close - tp_dist,
                 confidence_score=5,
             )
-            
+
         return None
 
     def compute_exit(
         self,
-        position,  # type: ignore (avoiding circular import)
-        df: pd.DataFrame
-    ) -> TransactionType | None:
+        entry_price: float,
+        position_side: str,  # "LONG" or "SHORT"
+        current_price: float,
+        df: pd.DataFrame,
+    ) -> dict:
         """
         Dynamic exit logic if SL/TP are not hit first.
         For ScalpPro, we exit early if the fast EMA strongly crosses against us.
+        Returns dict with stop_loss, take_profit, trailing_stop keys.
         """
         p = self.params
         if len(df) < p["slow_ema"]:
-            return None
+            return {"stop_loss": None, "take_profit": None, "trailing_stop": None}
 
-        fast_line = ema(df["close"], p["fast_ema"])
-        slow_line = ema(df["close"], p["slow_ema"])
-        
-        fast_curr = fast_line.iloc[-1]
-        slow_curr = slow_line.iloc[-1]
+        atr_val = atr(df, p["atr_period"]).iloc[-1]
+        sl_dist = atr_val * p["sl_atr_multiplier"]
+        tp_dist = atr_val * p["tp_atr_multiplier"]
 
-        if position.type == TransactionType.BUY and fast_curr < slow_curr:
-            return TransactionType.SELL  # Exit Long
-
-        if position.type == TransactionType.SELL and fast_curr > slow_curr:
-            return TransactionType.BUY   # Exit Short
-
-        return None
+        if position_side == "LONG":
+            return {
+                "stop_loss": entry_price - sl_dist,
+                "take_profit": entry_price + tp_dist,
+                "trailing_stop": None,
+            }
+        else:
+            return {
+                "stop_loss": entry_price + sl_dist,
+                "take_profit": entry_price - tp_dist,
+                "trailing_stop": None,
+            }

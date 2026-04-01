@@ -55,7 +55,7 @@ class ATMResolverProcessor(SignalProcessor):
                 if chain_data["status"] == "success" and chain_data["chain"]:
                     matrix = chain_data["chain"]
                     closest = min(matrix, key=lambda x: abs(x["strike_price"] - signal.price))
-                    
+
                     # Logic for CE/PE
                     side = "ce" if signal.action.value == "BUY" else "pe"
                     opt = closest.get(side)
@@ -75,7 +75,7 @@ class ExecutionProcessor(SignalProcessor):
     async def process(self, signal: 'TradeSignal', config: 'StrategyConfig', engine: 'AutomationEngine') -> bool:
         is_paper = engine.paper_trading or config.paper_trading
         trade_instrument = signal.instrument_key
-        
+
         if is_paper:
             logger.info(f"📝 [PAPER] {signal.action.value} {trade_instrument} @ {signal.price:.2f}")
             engine._trades_today.append({
@@ -94,23 +94,28 @@ class ExecutionProcessor(SignalProcessor):
             # DB Log
             try:
                 session = get_session()
-                log = TradeLog(
-                    timestamp=datetime.now(IST),
-                    strategy_name=signal.strategy_name or config.name,
-                    instrument_key=trade_instrument,
-                    action=signal.action.value,
-                    quantity=signal.quantity,
-                    price=signal.price,
-                    stop_loss=signal.stop_loss,
-                    take_profit=signal.take_profit,
-                    status="paper",
-                    metadata_json={"underlying": signal.metadata.get("underlying", signal.instrument_key), **(signal.metadata or {})}
-                )
-                session.add(log)
-                session.commit()
-                session.close()
+                try:
+                    log = TradeLog(
+                        timestamp=datetime.now(IST),
+                        strategy_name=signal.strategy_name or config.name,
+                        instrument_key=trade_instrument,
+                        action=signal.action.value,
+                        quantity=signal.quantity,
+                        price=signal.price,
+                        stop_loss=signal.stop_loss,
+                        take_profit=signal.take_profit,
+                        status="paper",
+                        metadata_json={"underlying": signal.metadata.get("underlying", signal.instrument_key), **(signal.metadata or {})}
+                    )
+                    session.add(log)
+                    session.commit()
+                except Exception as e:
+                    logger.error(f"DB log failed: {e}")
+                    session.rollback()
+                finally:
+                    session.close()
             except Exception as e:
-                logger.error(f"DB log failed: {e}")
+                logger.error(f"DB session creation failed: {e}")
         else:
             # Live execution logic
             try:
@@ -137,23 +142,28 @@ class AlerterProcessor(SignalProcessor):
         try:
             from app.database.connection import ActiveSignal
             session = get_session()
-            active_sig = ActiveSignal(
-                strategy_name=signal.strategy_name or config.name,
-                instrument_key=signal.instrument_key,
-                timeframe=config.timeframe,
-                action=signal.action.value,
-                price=signal.price,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
-                confidence_score=signal.confidence_score,
-                status="active",
-                metadata_json=signal.metadata or {},
-            )
-            session.add(active_sig)
-            session.commit()
-            session.close()
+            try:
+                active_sig = ActiveSignal(
+                    strategy_name=signal.strategy_name or config.name,
+                    instrument_key=signal.instrument_key,
+                    timeframe=config.timeframe,
+                    action=signal.action.value,
+                    price=signal.price,
+                    stop_loss=signal.stop_loss,
+                    take_profit=signal.take_profit,
+                    confidence_score=signal.confidence_score,
+                    status="active",
+                    metadata_json=signal.metadata or {},
+                )
+                session.add(active_sig)
+                session.commit()
+            except Exception as e:
+                logger.error(f"Failed to persist ActiveSignal: {e}")
+                session.rollback()
+            finally:
+                session.close()
         except Exception as e:
-            logger.error(f"Failed to persist ActiveSignal: {e}")
+            logger.error(f"DB session creation failed for ActiveSignal: {e}")
 
         # 2. Resolve instrument name from watchlist
         instrument_name = signal.instrument_key
@@ -161,11 +171,13 @@ class AlerterProcessor(SignalProcessor):
         try:
             from app.database.connection import Watchlist
             wl_session = get_session()
-            wl_item = wl_session.query(Watchlist).filter_by(instrument_key=signal.instrument_key).first()
-            if wl_item:
-                instrument_name = wl_item.name or wl_item.symbol or instrument_name
-                instrument_symbol = wl_item.symbol or instrument_symbol
-            wl_session.close()
+            try:
+                wl_item = wl_session.query(Watchlist).filter_by(instrument_key=signal.instrument_key).first()
+                if wl_item:
+                    instrument_name = wl_item.name or wl_item.symbol or instrument_name
+                    instrument_symbol = wl_item.symbol or instrument_symbol
+            finally:
+                wl_session.close()
         except Exception:
             pass
 
@@ -174,9 +186,9 @@ class AlerterProcessor(SignalProcessor):
         is_paper = engine.paper_trading or config.paper_trading
         mode_str = "📋 PAPER" if is_paper else "🔴 LIVE"
         action_emoji = "🟢" if signal.action.value == "BUY" else "🔴"
-        
+
         subject = f"🎯 {signal.action.value} Signal: {instrument_symbol} ({instrument_name})"
-        
+
         body = (
             f"{'━' * 40}\n"
             f"  {action_emoji} {signal.action.value} SIGNAL — {mode_str}\n"
@@ -197,7 +209,7 @@ class AlerterProcessor(SignalProcessor):
             f"   Time:        {datetime.now(IST).strftime('%d-%b-%Y %H:%M:%S IST')}\n"
             f"{'━' * 40}\n"
         )
-        
+
         asyncio.create_task(manager.send_alert(subject, body))
         return True
 
