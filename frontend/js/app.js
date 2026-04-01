@@ -949,21 +949,19 @@ window.setChartTimeframe = (interval) => {
     currentInterval = interval;
     localStorage.setItem("currentInterval", interval);
 
-    // Update timeframe buttons
-    document.querySelectorAll('[onclick^="setChartTimeframe"]').forEach(btn => {
-        btn.classList.remove('btn-primary');
-        btn.classList.add('btn-outline');
-    });
+    // Update timeframe buttons exactly by ID
+    const allIntervals = ['1minute', '5minute', '15minute', '30minute', '1hour', 'day'];
     
-    // This is a bit hacky because buttons don't have IDs in index.html,
-    // let's just find the one with the matching text or re-render based on interval.
-    // Actually, I'll add IDs to them in index.html for reliability if possible, 
-    // but for now I'll just use the event target logic or iterate.
-    const btns = document.querySelectorAll('[onclick^="setChartTimeframe"]');
-    btns.forEach(b => {
-        if (b.getAttribute('onclick').includes(interval)) {
-            b.classList.remove('btn-outline');
-            b.classList.add('btn-primary');
+    allIntervals.forEach(t => {
+        const btn = document.getElementById(`tf-${t}`);
+        if (btn) {
+            if (t === interval) {
+                btn.classList.remove('btn-outline');
+                btn.classList.add('btn-primary');
+            } else {
+                btn.classList.remove('btn-primary');
+                btn.classList.add('btn-outline');
+            }
         }
     });
 

@@ -202,6 +202,8 @@ class MarketDataService:
 
     # ── Market Quotes ───────────────────────────────────────────
 
+    def get_ltp(self, instrument_key: str) -> float | None:
+        """Get last traded price."""
         try:
             response = self.quote_api.ltp(instrument_key, self.api_version)
             data = response.to_dict().get("data", {})
