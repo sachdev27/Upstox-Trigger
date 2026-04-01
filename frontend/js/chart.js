@@ -8,6 +8,7 @@ export class ChartManager {
         this.chart = null;
         this.candleSeries = null;
         this.supertrendSeries = null;
+        this.secondarySeries = null;
         this.resizeObserver = null;
         this.lastBar = null;
         
@@ -45,6 +46,15 @@ export class ChartManager {
                 timeVisible: true,
                 secondsVisible: false,
             },
+            localization: {
+                timeFormatter: time => {
+                    if (time.year) return `${time.year}-${String(time.month).padStart(2, '0')}-${String(time.day).padStart(2, '0')}`;
+                    const d = new Date(time * 1000);
+                    const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                    const timeStr = d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute:'2-digit', hour12: false });
+                    return `${dateStr}  ${timeStr} IST`;
+                }
+            }
         });
 
         this.candleSeries = this.chart.addCandlestickSeries({
@@ -59,8 +69,17 @@ export class ChartManager {
             lineWidth: 2,
             lineType: LightweightCharts.LineType.Step,
             crosshairMarkerVisible: false,
-            color: '#2196F3', // Default Blue, overwritten by data points
+            color: '#2196F3',
             priceLineVisible: false,
+        });
+
+        this.secondarySeries = this.chart.addLineSeries({
+            lineWidth: 1.5,
+            lineType: LightweightCharts.LineType.Step,
+            crosshairMarkerVisible: false,
+            color: '#FF9800', 
+            priceLineVisible: false,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
         });
 
         this.resizeObserver = new ResizeObserver(entries => {
@@ -110,8 +129,9 @@ export class ChartManager {
         }
     }
 
-    setOverlayData(data) {
-        if (this.supertrendSeries) this.supertrendSeries.setData(data);
+    setOverlayData(data, secondaryData) {
+        if (this.supertrendSeries) this.supertrendSeries.setData(data || []);
+        if (this.secondarySeries) this.secondarySeries.setData(secondaryData || []);
     }
 
     setMarkers(markers) {
@@ -124,6 +144,7 @@ export class ChartManager {
             this.candleSeries.setMarkers([]);
         }
         if (this.supertrendSeries) this.supertrendSeries.setData([]);
+        if (this.secondarySeries) this.secondarySeries.setData([]);
         this.lastBar = null;
     }
 }

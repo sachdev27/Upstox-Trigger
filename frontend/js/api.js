@@ -62,11 +62,11 @@ export const api = {
     async runCycle() {
         return fetch(`${API_BASE}/engine/run-cycle`, { method: 'POST' }).then(r => r.json());
     },
-    async setAutoMode(enabled) {
+    async updateConfig(config) {
         return fetch(`${API_BASE}/engine/config`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ auto_mode: enabled })
+            body: JSON.stringify(config)
         }).then(r => r.json());
     },
     async getPositions() {
@@ -106,5 +106,58 @@ export const api = {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(settings)
         }).then(r => r.json());
-    }
+    },
+    async testNotification(channel = "email") {
+        return fetch(`${API_BASE}/notifications/test?channel=${channel}`, {
+            method: 'POST'
+        }).then(r => r.json());
+    },
+
+    // Watchlist
+    async getWatchlist() {
+        return fetch(`${API_BASE}/monitoring/watchlist`).then(r => r.json());
+    },
+    async addToWatchlist(instrumentKey, timeframes = "15m") {
+        return fetch(`${API_BASE}/monitoring/watchlist?instrument_key=${encodeURIComponent(instrumentKey)}&timeframes=${encodeURIComponent(timeframes)}`, {
+            method: 'POST'
+        }).then(r => r.json());
+    },
+    async removeFromWatchlist(instrumentKey) {
+        return fetch(`${API_BASE}/monitoring/watchlist/${encodeURIComponent(instrumentKey)}`, {
+            method: 'DELETE'
+        }).then(r => r.json());
+    },
+    async updateWatchlistTimeframes(itemId, timeframes) {
+        return fetch(`${API_BASE}/monitoring/watchlist/${itemId}/timeframes?timeframes=${encodeURIComponent(timeframes)}`, {
+            method: 'PUT'
+        }).then(r => r.json());
+    },
+    async exportWatchlist() {
+        return fetch(`${API_BASE}/monitoring/watchlist/export`);
+    },
+    async importWatchlist(file) {
+        const formData = new FormData();
+        formData.append('file', file);
+        return fetch(`${API_BASE}/monitoring/watchlist/import`, {
+            method: 'POST',
+            body: formData
+        }).then(r => r.json());
+    },
+
+    // Active Signals
+    async getActiveSignals(status = null) {
+        let url = `${API_BASE}/monitoring/active-signals`;
+        if (status) url += `?status=${status}`;
+        return fetch(url).then(r => r.json());
+    },
+    async closeActiveSignal(id) {
+        return fetch(`${API_BASE}/monitoring/active-signals/${id}/close`, {
+            method: 'POST'
+        }).then(r => r.json());
+    },
+    async deleteActiveSignal(id) {
+        return fetch(`${API_BASE}/monitoring/active-signals/${id}`, {
+            method: 'DELETE'
+        }).then(r => r.json());
+    },
 };

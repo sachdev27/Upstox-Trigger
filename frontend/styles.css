@@ -597,6 +597,42 @@ input:checked + .toggle-slider:before {
 .log-msg.error { color: var(--danger); }
 .log-msg.success { color: var(--success); }
 
+/* ═══ Custom Watchlist TF Picker ═══════════════════════════ */
+.tf-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.2s ease;
+    border: 1px solid transparent;
+}
+
+.tf-active {
+    background: rgba(85, 96, 230, 0.2);
+    color: var(--primary);
+    border-color: rgba(85, 96, 230, 0.4);
+}
+.tf-active:hover {
+    background: rgba(255, 71, 87, 0.15); /* Red tint to imply removal */
+    color: var(--danger);
+    border-color: rgba(255, 71, 87, 0.3);
+}
+
+.tf-inactive {
+    background: transparent;
+    color: var(--text-muted);
+    border-color: var(--border-color);
+}
+.tf-inactive:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
 /* ═══ Settings View ════════════════════════════════════════ */
 .settings-tabs {
     display: flex;
@@ -670,5 +706,42 @@ input:checked + .toggle-slider:before {
 .pulse {
     animation: pulse 0.5s ease-out;
     border-radius: 4px;
+}
+
+/* ═══ Watchlist Panel ═════════════════════════════════════════ */
+.watchlist-item {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: background 0.2s;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+
+.watchlist-item:hover {
+    background: rgba(255,255,255,0.05);
+}
+
+.wl-search-item {
+    padding: 8px 10px;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.15s;
+}
+
+.wl-search-item:hover {
+    background: rgba(92, 111, 255, 0.2);
+}
+
+/* ═══ Active Signal Row ══════════════════════════════════════ */
+.active-signal-row {
+    border-left: 3px solid var(--success);
+    background: rgba(0, 208, 132, 0.03);
+}
+
+.active-signal-row:hover td {
+    background: rgba(0, 208, 132, 0.06) !important;
 }
 

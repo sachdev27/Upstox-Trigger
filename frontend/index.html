@@ -69,6 +69,7 @@
                 <div style="display: flex; gap: 4px; margin-right: 4px;">
                     <button id="btn-view-chart" class="btn btn-primary" style="padding: 2px 8px; font-size: 0.75rem" onclick="switchMainView('chart')">📈 Chart</button>
                     <button id="btn-view-options" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="switchMainView('options')">⛓️ Option Chain</button>
+                    <button id="btn-view-watchlist" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="switchMainView('watchlist')">📋 Watchlist</button>
                     <button id="btn-view-settings-center" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="switchMainView('settings')">⚙️ Settings</button>
                 </div>
             </div>
@@ -105,12 +106,70 @@
                 </table>
             </div>
 
+            <!-- Watchlist + Active Signals View Container (Hidden by default) -->
+            <div id="watchlist-view-container" class="chart-container" style="display: none; height: calc(100% - 28px); overflow-y: auto; background: var(--bg-color);">
+                <div style="display: grid; grid-template-columns: 320px 1fr; height: 100%;">
+                    <!-- Left: Watchlist Management -->
+                    <div style="border-right: 1px solid var(--border-color); display: flex; flex-direction: column; overflow: hidden;">
+                        <div style="padding: 10px 14px; border-bottom: 1px solid var(--border-color); background: var(--bg-card); display: flex; justify-content: space-between; align-items: center;">
+                            <h3 style="margin: 0; font-size: 0.9rem;">📋 Watchlist</h3>
+                            <div style="display: flex; gap: 4px;">
+                                <button class="btn btn-outline" style="padding: 2px 6px; font-size: 0.65rem; width: auto;" onclick="importWatchlistCSV()" title="Import CSV">📥</button>
+                                <button class="btn btn-outline" style="padding: 2px 6px; font-size: 0.65rem; width: auto;" onclick="exportWatchlistCSV()" title="Export CSV">📤</button>
+                            </div>
+                        </div>
+                        <div style="padding: 8px 12px; border-bottom: 1px solid var(--border-color);">
+                            <div style="display: flex; gap: 6px;">
+                                <input type="text" id="watchlist-search" class="form-input" placeholder="Search to add..." style="font-size: 0.8rem; padding: 6px; flex: 1;" autocomplete="off">
+                                <button class="btn btn-primary" style="width: auto; padding: 4px 10px; font-size: 0.8rem; white-space: nowrap;" onclick="addCurrentToWatchlist()">+ Add</button>
+                            </div>
+                            <div id="watchlist-search-results" style="max-height: 150px; overflow-y: auto; margin-top: 4px;"></div>
+                        </div>
+                        <div id="watchlist-items" style="flex: 1; overflow-y: auto;">
+                            <div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">No instruments in watchlist</div>
+                        </div>
+                        <!-- Hidden file input for CSV import -->
+                        <input type="file" id="watchlist-csv-input" accept=".csv" style="display: none;" onchange="handleWatchlistCSVImport(this)">
+                    </div>
+                    <!-- Right: Active Signals -->
+                    <div style="display: flex; flex-direction: column; overflow: hidden;">
+                        <div style="padding: 10px 14px; border-bottom: 1px solid var(--border-color); background: var(--bg-card);">
+                            <h3 style="margin: 0; font-size: 0.9rem;">🟢 Active Signals</h3>
+                        </div>
+                        <div style="flex: 1; overflow-y: auto;">
+                            <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem;">
+                                <thead style="position: sticky; top: 0; z-index: 5; background: var(--bg-dark);">
+                                    <tr>
+                                        <th style="padding: 6px 8px; text-align: left;">Time</th>
+                                        <th style="padding: 6px 8px; text-align: left;">Strategy</th>
+                                        <th style="padding: 6px 8px; text-align: left;">Symbol</th>
+                                        <th style="padding: 6px 8px; text-align: left;">Name</th>
+                                        <th style="padding: 6px 8px; text-align: left;">TF</th>
+                                        <th style="padding: 6px 8px; text-align: left;">Action</th>
+                                        <th style="padding: 6px 8px; text-align: right;">Price</th>
+                                        <th style="padding: 6px 8px; text-align: right;">SL</th>
+                                        <th style="padding: 6px 8px; text-align: right;">TP</th>
+                                        <th style="padding: 6px 8px; text-align: center;">Score</th>
+                                        <th style="padding: 6px 8px; text-align: center;">Status</th>
+                                        <th style="padding: 6px 8px; text-align: center;">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="active-signals-body-main">
+                                    <tr><td colspan="12" style="text-align:center; padding: 30px;" class="text-muted">No active signals</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Settings View Container (Hidden by default) -->
             <div id="settings-view-container" class="chart-container" style="display: none; height: calc(100% - 28px); overflow-y: auto; background: var(--bg-color);">
                 <div class="settings-tabs">
                     <button class="settings-tab active" onclick="switchSettingsTab('general')">General</button>
                     <button class="settings-tab" onclick="switchSettingsTab('strategy')">Strategy Config</button>
                     <button class="settings-tab" onclick="switchSettingsTab('risk')">Risk & Capital</button>
+                    <button class="settings-tab" onclick="switchSettingsTab('notifications')">Notifications</button>
                 </div>
                 
                 <!-- General Settings -->
@@ -222,6 +281,49 @@
                         <button class="btn btn-primary" onclick="saveRiskConfig()">Save Risk Config</button>
                     </div>
                 </div>
+
+                <!-- Notifications Settings -->
+                <div id="set-tab-notifications" class="settings-content">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px;">
+                        <div class="settings-card">
+                            <h4>Email (SMTP) Configuration</h4>
+                            <div class="form-group">
+                                <label class="form-label">Notification Channels</label>
+                                <input type="text" id="setting-notification-channels" class="form-input" placeholder="EMAIL">
+                                <small class="text-muted">Comma-separated: EMAIL, TELEGRAM (coming soon)</small>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">SMTP Server</label>
+                                <input type="text" id="setting-smtp-server" class="form-input" placeholder="smtp.gmail.com">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">SMTP Port</label>
+                                <input type="number" id="setting-smtp-port" class="form-input" placeholder="587">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">SMTP User (Email)</label>
+                                <input type="text" id="setting-smtp-user" class="form-input" placeholder="your-email@gmail.com">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">SMTP Password</label>
+                                <input type="password" id="setting-smtp-password" class="form-input" placeholder="********">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Email Recipient(s)</label>
+                                <input type="text" id="setting-email-recipient" class="form-input" placeholder="recipient@example.com">
+                                <small class="text-muted">Comma-separated list</small>
+                            </div>
+                            <button class="btn btn-primary" onclick="saveNotificationSettings()">Save Notification Settings</button>
+                        </div>
+                        <div class="settings-card">
+                            <h4>Test Notifications</h4>
+                            <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 20px;">
+                                Send a test signal to verify your configuration is working correctly.
+                            </p>
+                            <button class="btn btn-outline" onclick="testNotification('email')">📧 Send Test Email</button>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- Bottom Tabs/Tables -->
@@ -231,6 +333,7 @@
                     <button class="bottom-tab" onclick="switchBottomTab('orderbook')">Order Book</button>
                     <button class="bottom-tab" onclick="switchBottomTab('trades')">Trade History</button>
                     <button class="bottom-tab" onclick="switchBottomTab('signals')">Signals</button>
+                    <button class="bottom-tab" onclick="switchBottomTab('active-signals')">🟢 Active Signals</button>
                     <button class="bottom-tab" onclick="switchBottomTab('activity')">Activity Log</button>
                 </div>
                 
@@ -317,12 +420,37 @@
                         <div class="log-line"><span class="log-time">[System]</span> Terminal initialized.</div>
                     </div>
                 </div>
+
+                <!-- Active Signals Tab -->
+                <div id="tab-active-signals" class="bottom-content">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Strategy</th>
+                                <th>Symbol</th>
+                                <th>Name</th>
+                                <th>TF</th>
+                                <th>Action</th>
+                                <th>Price</th>
+                                <th>SL</th>
+                                <th>TP</th>
+                                <th>Score</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="active-signals-body">
+                            <tr><td colspan="12" style="text-align:center; padding: 20px;" class="text-muted">No active signals</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </main>
 
         <!-- ── Right Panel (Controls) ── -->
         <aside class="panel-right">
-            
+
             <div class="panel-header">Engine Control</div>
             <div class="control-section">
                 

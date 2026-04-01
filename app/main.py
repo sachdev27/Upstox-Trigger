@@ -24,6 +24,8 @@ from app.orders.routes import router as orders_router
 from app.strategies.routes import router as strategies_router
 from app.engine_routes import router as engine_router
 from app.settings_routes import router as config_router
+from app.monitoring.routes import router as monitoring_router
+from app.notifications.routes import router as notification_router
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,10 @@ async def lifespan(app: FastAPI):
         logger.info("🌱 First startup detected — seeding settings from .env...")
         from app.database.seed import seed_settings
         seed_settings()
+
+    # Seed watchlist with Nifty 50 if empty
+    from app.database.seed import seed_watchlist_nifty50
+    seed_watchlist_nifty50()
 
     # Load dynamic settings from DB → overrides .env defaults
     settings.load_from_db()
@@ -128,55 +134,42 @@ async def lifespan(app: FastAPI):
                 # Index: feed['fullFeed']['indexFF']['ltpc']['ltp']
                 # LTQ: feed['ltpc']['ltp'] (some modes)
                 
-                # 1. Try to find the inner feed object
+                # 1. Fast inner extraction
                 inner = feed.get("fullFeed") or feed.get("ff") or feed
                 if "marketFF" in inner: inner = inner["marketFF"]
-                elif "market_ff" in inner: inner = inner["market_ff"]
                 elif "indexFF" in inner: inner = inner["indexFF"]
-                elif "index_ff" in inner: inner = inner["index_ff"]
                 
-                # 2. Extract LTP - check multiple places for ltpc
-                ltpc = inner.get("ltpc") or feed.get("ltpc") or {}
+                # 2. Direct extraction with early exit
+                ltpc = inner.get("ltpc", {})
                 ltp = ltpc.get("ltp")
+                if not ltp:
+                    continue
                 
-                # 3. Extract Greeks - prioritized
-                greeks_data = inner.get("optionGreeks") or inner.get("option_chain_ff", {}).get("optionGreeks") or {}
+                # 3. Optimized metadata extraction
+                greeks = inner.get("optionGreeks", {})
+                volume = inner.get("vtt", 0)
+                iv = inner.get("iv", greeks.get("iv", 0.0))
                 
-                # 4. Extract Volume
-                volume = inner.get("vtt") or inner.get("total_volume_traded") or 0
+                ds = datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp() # IST timestamp
+                # 4. Packed Array Transport (Binary-lite)
+                # Format: ["t", key, ltp, v, iv, delta, theta, ts]
+                msg = [
+                    "t", 
+                    instrument_key, 
+                    float(ltp), 
+                    int(volume), 
+                    round(float(iv or 0.0) * 100, 2),
+                    round(float(greeks.get("delta") or 0.0), 4),
+                    round(float(greeks.get("theta") or 0.0), 2),
+                    int(ds)
+                ]
                 
-                # 5. Extract IV
-                iv = inner.get("iv") or greeks_data.get("iv") or 0.0
-                
-                if ltp:
-                    ds = datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp() # IST timestamp
-                    # Include Greeks if available
-                    msg = {
-                        "type": "market_data",
-                        "data": {
-                            "instrument_key": instrument_key,
-                            "ltp": float(ltp),
-                            "iv": float(iv or 0.0) * 100, # IV usually expressed as percentage in UI
-                            "delta": float(greeks_data.get("delta") or 0.0),
-                            "theta": float(greeks_data.get("theta") or 0.0),
-                            "volume": int(volume or 0),
-                            "candle": {
-                                "time": int(ds),
-                                "open": float(ltp),
-                                "high": float(ltp),
-                                "low": float(ltp),
-                                "close": float(ltp)
-                            }
-                        }
-                    }                    
-                    
-                    target_clients = instrument_subscriptions.get(instrument_key, set())
-                    for client_ws in list(target_clients):
-                        try:
-                            await client_ws.send_json(msg)
-                        except Exception:
-                            # Cleanup dead client will happen in disconnect
-                            pass
+                target_clients = instrument_subscriptions.get(instrument_key, set())
+                for client_ws in list(target_clients):
+                    try:
+                        await client_ws.send_json(msg)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.error(f"Error in _handle_market_tick: {e}")
 
@@ -274,6 +267,8 @@ app.include_router(orders_router)
 app.include_router(strategies_router)
 app.include_router(engine_router)
 app.include_router(config_router)
+app.include_router(monitoring_router)
+app.include_router(notification_router)
 
 # ── Static files (frontend) ────────────────────────────────────
 frontend_dir = BASE_DIR / "frontend"
@@ -326,10 +321,13 @@ async def websocket_endpoint(ws: WebSocket):
                         client_subscriptions[ws].add(k)
                         
                         if len(instrument_subscriptions[k]) == 1:
-                            if hasattr(app.state, "market_streamer"):
-                                # Use mode='full' to get Greeks and Volume as per V3 docs
-                                app.state.market_streamer.subscribe([k], mode="full")
-                                logger.info(f"📡 SDK Subscription started (FULL mode) for: {k}")
+                            if hasattr(app.state, "market_streamer") and app.state.market_streamer:
+                                try:
+                                    # Use mode='full' to get Greeks and Volume as per V3 docs
+                                    app.state.market_streamer.subscribe([k], mode="full")
+                                    logger.info(f"📡 SDK Subscription started (FULL mode) for: {k}")
+                                except Exception as e:
+                                    logger.error(f"Failed to subscribe to {k}: {e}")
                 
                 elif action == "unsubscribe" and key:
                     keys_to_unsub = [k.strip() for k in key.split(',') if k.strip()]
@@ -341,9 +339,12 @@ async def websocket_endpoint(ws: WebSocket):
                                 
                             if len(instrument_subscriptions[k]) == 0:
                                 del instrument_subscriptions[k]
-                                if hasattr(app.state, "market_streamer"):
-                                    app.state.market_streamer.unsubscribe([k])
-                                    logger.info(f"🛑 SDK Subscription stopped for: {k}")
+                                if hasattr(app.state, "market_streamer") and app.state.market_streamer:
+                                    try:
+                                        app.state.market_streamer.unsubscribe([k])
+                                        logger.info(f"🛑 SDK Subscription stopped for: {k}")
+                                    except Exception as e:
+                                        logger.error(f"Failed to unsubscribe from {k}: {e}")
                                 
             except json.JSONDecodeError:
                 pass
@@ -355,9 +356,12 @@ async def websocket_endpoint(ws: WebSocket):
                 instrument_subscriptions[key].discard(ws)
                 if len(instrument_subscriptions[key]) == 0:
                     del instrument_subscriptions[key]
-                    if hasattr(app.state, "market_streamer"):
-                        app.state.market_streamer.unsubscribe([key])
-                        logger.info(f"🛑 SDK Subscription stopped for: {key} (Client disconnected)")
+                    if hasattr(app.state, "market_streamer") and app.state.market_streamer:
+                        try:
+                            app.state.market_streamer.unsubscribe([key])
+                            logger.info(f"🛑 SDK Subscription stopped for: {key} (Client disconnected)")
+                        except Exception as e:
+                            logger.error(f"Failed to unsubscribe from {key} during disconnect: {e}")
         
         ws_clients.discard(ws)
         logger.info(f"WebSocket client disconnected. Total: {len(ws_clients)}")
@@ -410,7 +414,8 @@ async def health():
     from app.auth.service import get_auth_service
 
     auth = get_auth_service()
-    token_valid = not auth._is_token_expired(auth.settings.ACCESS_TOKEN)
+    target_token = auth.settings.SANDBOX_ACCESS_TOKEN if auth.settings.USE_SANDBOX else auth.settings.ACCESS_TOKEN
+    token_valid = not auth._is_token_expired(target_token)
 
     return {
         "status": "healthy",

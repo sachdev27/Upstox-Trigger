@@ -42,6 +42,7 @@ class BaseStrategy(ABC):
         self.config = config
         self.name = config.name
         self.params = {**self.default_params(), **config.params}
+        self.latest_metrics: dict[str, Any] = {}
 
     @abstractmethod
     def on_candle(self, df: pd.DataFrame) -> TradeSignal | None:

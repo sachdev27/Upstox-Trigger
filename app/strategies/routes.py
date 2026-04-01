@@ -5,6 +5,7 @@ Strategy management API routes.
 from fastapi import APIRouter
 
 from app.strategies.supertrend_pro import SuperTrendPro
+from app.strategies.scalp_pro import ScalpPro
 from app.strategies.base import StrategyConfig
 
 router = APIRouter(prefix="/strategies", tags=["Strategies"])
@@ -14,7 +15,7 @@ _strategies: dict[str, dict] = {}
 
 
 def _register_defaults():
-    """Register the built-in SuperTrend Pro strategy."""
+    """Register the built-in strategies."""
     if "supertrend_pro" not in _strategies:
         _strategies["supertrend_pro"] = {
             "name": "SuperTrend Pro v6.3",
@@ -23,6 +24,15 @@ def _register_defaults():
             "instruments": [],
             "timeframe": "15m",
             "params": SuperTrendPro.default_params(),
+        }
+    if "scalp_pro" not in _strategies:
+        _strategies["scalp_pro"] = {
+            "name": "ScalpPro v1.0",
+            "class": "ScalpPro",
+            "enabled": False,
+            "instruments": [],
+            "timeframe": "1m",
+            "params": ScalpPro.default_params(),
         }
 
 
@@ -136,6 +146,9 @@ async def get_dashboard(strategy_id: str, instrument_key: str):
 
     if s["class"] == "SuperTrendPro":
         strategy = SuperTrendPro(config)
+    elif s["class"] == "ScalpPro":
+        from app.strategies.scalp_pro import ScalpPro
+        strategy = ScalpPro(config)
     else:
         return {"error": "Unknown strategy class"}
 

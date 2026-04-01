@@ -7,10 +7,55 @@ This is the brain that runs the 24/7 automation loop.
 
 import asyncio
 import logging
+import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import pandas as pd
+
+class UpstoxRateLimiter:
+    """
+    Enforces Upstox Historical API Limits:
+    - 50 requests per second (using 45 for safety)
+    - 500 requests per minute (using 450 for safety)
+    - 2000 requests per 30 minutes (using 1900 for safety)
+    """
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.history_sec = deque()
+        self.history_min = deque()
+        self.history_30min = deque()
+
+    async def wait_for_token(self):
+        async with self.lock:
+            while True:
+                now = time.monotonic()
+                
+                # Cleanup old requests
+                while self.history_sec and now - self.history_sec[0] > 1.0:
+                    self.history_sec.popleft()
+                while self.history_min and now - self.history_min[0] > 60.0:
+                    self.history_min.popleft()
+                while self.history_30min and now - self.history_30min[0] > 1800.0:
+                    self.history_30min.popleft()
+
+                # Check limits
+                if len(self.history_sec) >= 45:
+                    await asyncio.sleep(1.0 - (now - self.history_sec[0]) + 0.01)
+                    continue
+                if len(self.history_min) >= 450:
+                    await asyncio.sleep(60.0 - (now - self.history_min[0]) + 0.1)
+                    continue
+                if len(self.history_30min) >= 1900:
+                    await asyncio.sleep(1800.0 - (now - self.history_30min[0]) + 1.0)
+                    continue
+
+                # Consume token
+                self.history_sec.append(now)
+                self.history_min.append(now)
+                self.history_30min.append(now)
+                break
 
 from app.config import get_settings
 from app.auth.service import get_auth_service
@@ -19,7 +64,13 @@ from app.orders.service import OrderService
 from app.orders.models import TradeSignal
 from app.strategies.base import BaseStrategy, StrategyConfig
 from app.strategies.supertrend_pro import SuperTrendPro
+from app.strategies.scalp_pro import ScalpPro
 from app.database.connection import get_session, TradeLog
+
+from app.engine_pipeline import (
+    RiskGuardProcessor, ATMResolverProcessor,
+    ExecutionProcessor, AlerterProcessor, BroadcastProcessor
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +79,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # Strategy class registry
 STRATEGY_CLASSES = {
     "SuperTrendPro": SuperTrendPro,
+    "ScalpPro": ScalpPro,
 }
 
 
@@ -58,6 +110,26 @@ class AutomationEngine:
         # WebSocket broadcast callback (set by main.py)
         self.broadcast_callback = None
 
+        # Configuration (synced later)
+        self.paper_trading: bool = True
+        self.trading_side: str = "BOTH"
+        self.trading_capital: float = 100000.0
+        self.risk_per_trade_pct: float = 1.0
+        self.max_daily_loss_pct: float = 3.0
+        self.max_open_trades: int = 3
+
+        # --- Signal Processing Pipeline ---
+        self._pipeline = [
+            RiskGuardProcessor(),
+            ATMResolverProcessor(),
+            ExecutionProcessor(),
+            AlerterProcessor(),
+            BroadcastProcessor()
+        ]
+
+        # Rate Limiter for Upstox API
+        self.rate_limiter = UpstoxRateLimiter()
+
         # Load config from DB-backed settings
         self.sync_from_settings()
 
@@ -76,17 +148,47 @@ class AutomationEngine:
 
     def initialize(self):
         """Initialize all services and load strategies."""
+        if self._is_initialized:
+            return
+        
+        logger.info("🚀 Initializing Automation Engine...")
+        self.sync_from_settings()
+
+        # Auto-load last active strategy if none present
+        if not self._active_strategies:
+            last_class = self.settings.ACTIVE_STRATEGY_CLASS
+            last_name = self.settings.ACTIVE_STRATEGY_NAME
+            if last_class and last_name:
+                logger.info(f"🔄 Auto-loading last active strategy: {last_name}")
+                try:
+                    self.load_strategy(
+                        strategy_class_name=last_class,
+                        name=last_name,
+                        instruments=[self.settings.NIFTY], # Default if none
+                        timeframe="15m" # Default if none
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to auto-load strategy: {e}")
         try:
             # Refresh config from DB
             self.sync_from_settings()
 
-            # 1. Market Data ALWAYS uses Live configuration (Sandbox doesn't support market data)
-            live_config = self._auth.get_configuration(use_sandbox=False)
-            self._market_service = MarketDataService(live_config)
-            
+            try:
+                # 1. Market Data ALWAYS uses Live configuration (Sandbox doesn't support market data)
+                live_config = self._auth.get_configuration(use_sandbox=False)
+                self._market_service = MarketDataService(live_config)
+            except Exception as e:
+                logger.error(f"⚠️ Market Data initialization failed: {e}")
+                logger.info("💡 Please log in with Upstox LIVE to enable strategy feedback.")
+                self._market_service = None
+
             # 2. Order Service moves between Live/Sandbox based on global flag
-            order_config = self._auth.get_configuration(use_sandbox=self.settings.USE_SANDBOX)
-            self._order_service = OrderService(order_config)
+            try:
+                order_config = self._auth.get_configuration(use_sandbox=self.settings.USE_SANDBOX)
+                self._order_service = OrderService(order_config)
+            except Exception as e:
+                logger.error(f"⚠️ Order Service initialization failed: {e}")
+                self._order_service = None
             
             self._is_initialized = True
             logger.info(f"✅ Automation engine initialized ({'SANDBOX' if self.settings.USE_SANDBOX else 'LIVE'} mode).")
@@ -125,6 +227,15 @@ class AutomationEngine:
 
     # ── Main Cycle ──────────────────────────────────────────────
 
+    async def _process_instrument_tf(self, strategy: BaseStrategy, tf_config: StrategyConfig, target: str):
+        """Helper to evaluate a single instrument and timeframe configuration."""
+        try:
+            signal = await self._evaluate_instrument(strategy, tf_config, target)
+            if signal:
+                await self._handle_signal(signal, tf_config)
+        except Exception as e:
+            logger.error(f"Error evaluating {target} ({tf_config.timeframe}) with {tf_config.name}: {e}")
+
     async def run_cycle(self):
         """
         Execute one strategy evaluation cycle.
@@ -145,16 +256,46 @@ class AutomationEngine:
                 continue
 
             for instrument in config.instruments:
-                try:
-                    signal = await self._evaluate_instrument(
-                        strategy, config, instrument
-                    )
-                    if signal:
-                        await self._handle_signal(signal, config)
-                except Exception as e:
-                    logger.error(
-                        f"Error evaluating {instrument} with {config.name}: {e}"
-                    )
+                # Expanded watchlist support
+                target_instruments = [instrument]
+                tf_overrides = {}  # instrument_key -> [timeframes]
+                if instrument == "NIFTY200":
+                    from app.monitoring.routes import get_nifty200_list
+                    target_instruments = get_nifty200_list()
+                elif instrument == "CUSTOM_WATCHLIST":
+                    from app.database.connection import get_session, Watchlist
+                    session = get_session()
+                    wl_items = session.query(Watchlist).all()
+                    target_instruments = [w.instrument_key for w in wl_items]
+                    # Build TF override map from watchlist
+                    for w in wl_items:
+                        if w.timeframes:
+                            tf_overrides[w.instrument_key] = w.timeframes
+                    session.close()
+
+                total_scans = sum(len(tf_overrides.get(t, [config.timeframe])) for t in target_instruments)
+                logger.info(f"🔍 Scanning {len(target_instruments)} instruments ({total_scans} timeframe combinations)...")
+
+                tasks = []
+                for target in target_instruments:
+                    # Get timeframes for this instrument (custom or default)
+                    timeframes_to_scan = tf_overrides.get(target, [config.timeframe])
+                    
+                    for tf in timeframes_to_scan:
+                        # Create a shallow copy of config with this TF
+                        tf_config = StrategyConfig(
+                            name=config.name,
+                            enabled=config.enabled,
+                            instruments=config.instruments,
+                            timeframe=tf,
+                            params=config.params,
+                            paper_trading=config.paper_trading,
+                        )
+                        tasks.append(self._process_instrument_tf(strategy, tf_config, target))
+                
+                if tasks:
+                    # Run all evaluations for this strategy/instrument group concurrently
+                    await asyncio.gather(*tasks)
 
     async def _evaluate_instrument(
         self,
@@ -167,13 +308,31 @@ class AutomationEngine:
         tf_to_interval = {
             "1m": "1minute", "5m": "5minute", "15m": "15minute",
             "30m": "30minute", "1H": "60minute", "4H": "day", "1D": "day",
+            # Fallbacks for literal UI interval strings
+            "1minute": "1minute", "5minute": "5minute", "15minute": "15minute",
+            "30minute": "30minute", "1hour": "60minute", "day": "day"
         }
         interval = tf_to_interval.get(config.timeframe, "15minute")
 
-        # Fetch historical candles
-        candles = self._market_service.get_intraday_candles(
-            instrument_key, interval
-        )
+        # 1. Prepare Fetch Tasks
+        tasks = [
+            asyncio.to_thread(self._market_service.get_intraday_candles, instrument_key, interval)
+        ]
+        
+        has_htf = strategy.params.get("use_htf_filter")
+        if has_htf:
+            htf_tf = strategy.params.get("htf_timeframe", "1D")
+            htf_interval = "day" if htf_tf in ["1D", "D", "W", "1W"] else "60minute" if htf_tf in ["1H", "60m"] else "day"
+            tasks.append(asyncio.to_thread(self._market_service.get_historical_candles, instrument_key, htf_interval))
+
+        # 2. Wait for Rate Limit (consume tokens for all tasks in this evaluation)
+        for _ in range(len(tasks)):
+            await self.rate_limiter.wait_for_token()
+
+        # 3. Execute Fetching Concurrently
+        results = await asyncio.gather(*tasks)
+        candles = results[0]
+        htf_candles = results[1] if (has_htf and len(results) > 1) else None
 
         if not candles or len(candles) < 100:
             logger.debug(
@@ -181,7 +340,7 @@ class AutomationEngine:
             )
             return None
 
-        # Build DataFrame
+        # Build DataFrames
         df = pd.DataFrame(candles)
         if "datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["datetime"])
@@ -189,25 +348,19 @@ class AutomationEngine:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Fetch HTF candles if requested by strategy
         htf_df = None
-        if strategy.params.get("use_htf_filter"):
-            htf_tf = strategy.params.get("htf_timeframe", "1D")
-            # Map simplified TF to Upstox API intervals
-            htf_interval = "day" if htf_tf in ["1D", "D", "W", "1W"] else "60minute" if htf_tf in ["1H", "60m"] else "day"
-            
-            htf_candles = self._market_service.get_historical_candles(
-                instrument_key, htf_interval
-            )
-            if htf_candles:
-                htf_df = pd.DataFrame(htf_candles)
-                if "datetime" in htf_df.columns:
-                    htf_df["datetime"] = pd.to_datetime(htf_df["datetime"])
-                for col in ["open", "high", "low", "close", "volume"]:
-                    if col in htf_df.columns:
-                        htf_df[col] = pd.to_numeric(htf_df[col], errors="coerce")
+        if htf_candles:
+            htf_df = pd.DataFrame(htf_candles)
+            if "datetime" in htf_df.columns:
+                htf_df["datetime"] = pd.to_datetime(htf_df["datetime"])
+            for col in ["open", "high", "low", "close", "volume"]:
+                if col in htf_df.columns:
+                    htf_df[col] = pd.to_numeric(htf_df[col], errors="coerce")
 
         # Evaluate strategy
+        if hasattr(strategy, 'get_dashboard_state'):
+            strategy.latest_metrics = strategy.get_dashboard_state(df, htf_df=htf_df)
+            
         signal = strategy.on_candle(df, htf_df=htf_df)
         if signal:
             signal.instrument_key = instrument_key
@@ -222,7 +375,7 @@ class AutomationEngine:
                 "confidence": signal.confidence_score,
             })
             logger.info(
-                f"@ {signal.price:.2f} (score: {signal.confidence_score})"
+                f"🎯 SIGNAL: {signal.action.value} {instrument_key} @ {signal.price:.2f}"
             )
             
             # Broadcast signal to UI
@@ -235,147 +388,23 @@ class AutomationEngine:
                         "instrument": instrument_key,
                         "action": signal.action.value,
                         "price": signal.price,
-                        "confidence": signal.confidence_score
+                        "confidence": signal.confidence_score,
+                        "latest_metrics": getattr(strategy, "latest_metrics", {})
                     }
                 }))
 
         return signal
 
     async def _handle_signal(self, signal: TradeSignal, config: StrategyConfig):
-        """Handle a validated trade signal — paper trade or execute."""
-        # 1. Trading Side check
-        if self.trading_side == "LONG_ONLY" and signal.action.value == "SELL":
-            logger.info("🚫 SHORT signal skipped (LONG_ONLY mode)")
-            return
-        if self.trading_side == "SHORT_ONLY" and signal.action.value == "BUY":
-            logger.info("🚫 LONG signal skipped (SHORT_ONLY mode)")
-            return
-
-        # 2. Risk check: are we at max daily loss?
-        max_loss_abs = self.trading_capital * (self.max_daily_loss_pct / 100)
-        if self._daily_pnl <= -max_loss_abs:
-            logger.warning(
-                f"🛑 MAX DAILY LOSS HIT ({-self._daily_pnl:.2f} >= {max_loss_abs:.2f}). "
-                f"Blocking {signal.action.value} on {signal.instrument_key}."
-            )
-            self.auto_mode = False
-            return
-
-        # 3. ATM Option Resolution (for Indices)
-        # If the instrument is an index, we trade the ATM option instead of the underlying
-        trade_instrument = signal.instrument_key
-        if ("INDEX" in signal.instrument_key or signal.instrument_key in ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]) and self._market_service:
+        """Handle a validated trade signal via the processing pipeline."""
+        for processor in self._pipeline:
             try:
-                logger.info(f"🔍 Resolving ATM option for {signal.instrument_key} @ {signal.price}")
-                # Use the service directly to avoid circular imports with routes.py
-                chain_data = await self._market_service.get_detailed_option_chain(signal.instrument_key)
-                if chain_data["status"] == "success" and chain_data["chain"]:
-                    # Chain is sorted by strike. Find closest to price.
-                    matrix = chain_data["chain"]
-                    closest = min(matrix, key=lambda x: abs(x["strike_price"] - signal.price))
-                    
-                    if signal.action.value == "BUY":
-                        side = "ce"
-                    else:
-                        side = "pe"
-                        
-                    opt = closest.get(side)
-                    if opt:
-                        trade_instrument = opt["instrument_key"]
-                        logger.info(f"🎯 Resolved ATM {side.upper()}: {trade_instrument} (Strike: {closest['strike_price']})")
-                    else:
-                        logger.warning(f"No {side.upper()} available for ATM strike {closest['strike_price']}")
+                should_continue = await processor.process(signal, config, self)
+                if not should_continue:
+                    break
             except Exception as e:
-                logger.error(f"Option resolution failed: {e}")
-
-        # 4. Use Global Paper Trading override if set
-        is_paper = self.paper_trading or config.paper_trading
-            
-        if is_paper:
-            logger.info(
-                f"📝 [PAPER] {signal.action.value} {trade_instrument} "
-                f"@ {signal.price:.2f} | SL: {signal.stop_loss:.2f} | "
-                f"TP: {signal.take_profit:.2f}"
-            )
-            self._trades_today.append({
-                "timestamp": datetime.now(IST).isoformat(),
-                "type": "paper",
-                "strategy": signal.strategy_name or config.name,
-                "instrument": trade_instrument,
-                "underlying": signal.instrument_key,
-                "action": signal.action.value,
-                "price": signal.price,
-                "stop_loss": signal.stop_loss,
-                "take_profit": signal.take_profit,
-                "score": signal.confidence_score,
-            })
-
-            # Log to database
-            try:
-                session = get_session()
-                log = TradeLog(
-                    timestamp=datetime.now(IST),
-                    strategy_name=signal.strategy_name or config.name,
-                    instrument_key=trade_instrument,
-                    action=signal.action.value,
-                    quantity=0,
-                    price=signal.price,
-                    stop_loss=signal.stop_loss,
-                    take_profit=signal.take_profit,
-                    status="paper",
-                    metadata_json={"underlying": signal.instrument_key, **(signal.metadata or {})}
-                )
-                session.add(log)
-                session.commit()
-                session.close()
-                
-                # Broadcast trade execution to UI
-                if self.broadcast_callback:
-                    asyncio.create_task(self.broadcast_callback({
-                        "type": "trade_executed",
-                        "data": {
-                            "type": "paper",
-                            "strategy": signal.strategy_name or config.name,
-                            "instrument": trade_instrument,
-                            "action": signal.action.value,
-                            "price": signal.price
-                        }
-                    }))
-            except Exception as e:
-                logger.error(f"DB log failed: {e}")
-
-        else:
-            # Live execution logic
-            try:
-                # Update signal with resolved instrument
-                signal.instrument_key = trade_instrument
-                result = self._order_service.place_signal(signal)
-                logger.info(f"💰 [LIVE] Order placed: {result}")
-                self._trades_today.append({
-                    "timestamp": datetime.now(IST).isoformat(),
-                    "type": "live",
-                    "strategy": signal.strategy_name or config.name,
-                    "instrument": trade_instrument,
-                    "underlying": signal.instrument_key,
-                    "action": signal.action.value,
-                    "price": signal.price,
-                    "order_result": result,
-                })
-                
-                # Broadcast trade execution to UI
-                if self.broadcast_callback:
-                    asyncio.create_task(self.broadcast_callback({
-                        "type": "trade_executed",
-                        "data": {
-                            "type": "live",
-                            "strategy": signal.strategy_name or config.name,
-                            "instrument": trade_instrument,
-                            "action": signal.action.value,
-                            "price": signal.price
-                        }
-                    }))
-            except Exception as e:
-                logger.error(f"❌ Order execution failed: {e}")
+                logger.error(f"Error in pipeline processor {processor.__class__.__name__}: {e}")
+                break
 
     # ── Status & Reporting ──────────────────────────────────────
 
@@ -385,6 +414,8 @@ class AutomationEngine:
             "initialized": self._is_initialized,
             "running": self._is_running,
             "auto_mode": self.auto_mode,
+            "active_strategy_class": self.settings.ACTIVE_STRATEGY_CLASS,
+            "active_strategy_name": self.settings.ACTIVE_STRATEGY_NAME,
             "paper_trading": self.paper_trading,
             "trading_side": self.trading_side,
             "risk_controls": {
@@ -394,6 +425,7 @@ class AutomationEngine:
                 "max_open_trades": self.max_open_trades,
             },
             "daily_pnl": self._daily_pnl,
+            "strategy_hud": (self._active_strategies[0][1].latest_metrics if self._active_strategies and hasattr(self._active_strategies[0][1], 'latest_metrics') else {}) or {},
             "active_strategies": [
                 {
                     "name": config.name,
@@ -407,6 +439,7 @@ class AutomationEngine:
             ],
             "signals_today": len(self._signals_log),
             "trades_today": len(self._trades_today),
+            "active_signals_count": self._get_active_signal_count(),
             "recent_signals": self._signals_log[-10:],
             "recent_trades": self._trades_today[-10:],
             "market_hours": self._order_service.is_market_hours() if self._order_service else False,
@@ -419,6 +452,17 @@ class AutomationEngine:
     def get_trades_log(self) -> list[dict]:
         """Get all trades executed today."""
         return self._trades_today
+
+    def _get_active_signal_count(self) -> int:
+        """Get count of active (non-closed) signals from DB."""
+        try:
+            from app.database.connection import get_session, ActiveSignal
+            session = get_session()
+            count = session.query(ActiveSignal).filter_by(status="active").count()
+            session.close()
+            return count
+        except Exception:
+            return 0
 
     async def trigger_test_signal(self, instrument_key: str) -> dict:
         """Force a test signal for debugging."""

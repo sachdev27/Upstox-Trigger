@@ -13,10 +13,58 @@ let currentInstrumentName = localStorage.getItem("currentInstrumentName") || "Ni
 let currentInterval = localStorage.getItem("currentInterval") || "15minute";
 let engineActive = false;
 let dynamicSchemas = {};
-const IST_OFFSET = 0; // Standardize to UTC seconds
+const IST_OFFSET = 0; // Standardize to UTC seconds 
 
 let globalSearchResults = [];
 let selectedSearchIndex = -1;
+const domNodes = new Map(); // Performance Cache: instrument_key -> { row: HTMLElement, ltp: HTMLElement, pnl: HTMLElement, ... }
+const lastUiUpdate = { status: 0, volume: 0 }; // Throttling state
+const pendingUpdates = new Map(); // Batching Queue: key -> last_tick_data
+let isFlushing = false;
+
+// --- IndexedDB Cache System ---
+const DB_NAME = 'TradingTerminalDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'historical_data';
+
+async function initDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME);
+            }
+        };
+        request.onsuccess = (e) => resolve(e.target.result);
+        request.onerror = (e) => reject(e.target.error);
+    });
+}
+
+async function getCachedHistorical(key, interval) {
+    const db = await initDB();
+    return new Promise((resolve) => {
+        const transaction = db.transaction(STORE_NAME, 'readonly');
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.get(`${key}_${interval}`);
+        request.onsuccess = () => {
+            const result = request.result;
+            if (result && (Date.now() - result.timestamp < 300000)) { // 5 minute TTL
+                resolve(result.data);
+            } else {
+                resolve(null);
+            }
+        };
+        request.onerror = () => resolve(null);
+    });
+}
+
+async function setCachedHistorical(key, interval, data) {
+    const db = await initDB();
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    store.put({ timestamp: Date.now(), data }, `${key}_${interval}`);
+}
 
 // Services
 const chart = new ChartManager('tvchart');
@@ -37,8 +85,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     await refreshPositions();
     await refreshTrades();
     await refreshSignals();
+    await refreshActiveSignals();
+    await refreshWatchlist();
     await checkAuth();
     await refreshStatus();
+    await loadSettingsIntoUI();
     refreshAccountSummary();
     refreshMarketStatus();
     refreshOrderBook();
@@ -63,10 +114,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     
     // Interval updates
     setInterval(updateClock, 1000);
-    setInterval(refreshAccountSummary, 60000); // Every minute
-    setInterval(refreshPositions, 30000); // Every 30 seconds
-    setInterval(refreshMarketStatus, 60000); // Every minute
-    setInterval(refreshOrderBook, 30000); // Every 30 seconds
+    setInterval(refreshAccountSummary, 60000);
+    setInterval(refreshPositions, 30000);
+    setInterval(refreshMarketStatus, 60000);
+    setInterval(refreshOrderBook, 30000);
+    setInterval(refreshActiveSignals, 15000); // Every 15 seconds
+    setInterval(refreshOverlay, 30000); // Refresh strategy indicators/HUD every 30s
 });
 
 function setupEventListeners() {
@@ -93,66 +146,65 @@ function setupEventListeners() {
         renderDynamicStrategyForm();
         refreshOverlay();
     });
+
+    // Watchlist search
+    const wlSearch = document.getElementById("watchlist-search");
+    let wlSearchTimer;
+    wlSearch?.addEventListener("input", (e) => {
+        clearTimeout(wlSearchTimer);
+        const query = e.target.value.trim();
+        const results = document.getElementById("watchlist-search-results");
+        if (query.length < 2) {
+            results.innerHTML = "";
+            return;
+        }
+        wlSearchTimer = setTimeout(async () => {
+            try {
+                const data = await api.searchInstruments(query);
+                const instruments = data.instruments || [];
+                results.innerHTML = "";
+                instruments.slice(0, 5).forEach(inst => {
+                    const item = document.createElement("div");
+                    item.className = "wl-search-item";
+                    item.innerHTML = `<span style="font-weight:600; color:var(--primary); font-size:0.8rem;">${inst.trading_symbol || inst.symbol}</span> <span style="font-size:0.7rem; color:var(--text-muted);">${inst.name || ''}</span>`;
+                    item.onclick = async () => {
+                        await api.addToWatchlist(inst.instrument_key);
+                        showToast(`Added ${inst.trading_symbol || inst.symbol} to watchlist`, 'success');
+                        wlSearch.value = "";
+                        results.innerHTML = "";
+                        refreshWatchlist();
+                    };
+                    results.appendChild(item);
+                });
+            } catch (e) { console.error(e); }
+        }, 300);
+    });
 }
 
 function handleWsMessage(msg) {
-    if (msg.type === 'market_data') {
-        const d = msg.data;
-        // 1. Update Chart/Instrument/Header
-        if (d.instrument_key === currentInstrumentKey) {
-            chart.updateCandle(d.candle, currentInterval);
-            updateElementText("inst-ltp", `₹${formatPrice(d.ltp)}`);
-            updateElementText("inst-volume", `Vol: ${(d.volume || 0).toLocaleString()}`);
-            
-            // Add pulse effect to header LTP
-            const ltpEl = document.getElementById("inst-ltp");
-            if (ltpEl) {
-                ltpEl.classList.add('pulse');
-                setTimeout(() => ltpEl.classList.remove('pulse'), 500);
-            }
+    let d;
+    if (Array.isArray(msg) && msg[0] === 't') {
+        // Packed format: ["t", key, ltp, v, iv, delta, theta, ts]
+        d = {
+            instrument_key: msg[1],
+            ltp: msg[2],
+            volume: msg[3],
+            iv: msg[4],
+            delta: msg[5],
+            theta: msg[6],
+            candle: { time: msg[7], close: msg[2], open: msg[2], high: msg[2], low: msg[2] }
+        };
+    } else if (msg.type === "market_data") {
+        d = msg.data;
+    }
+
+    if (d) {
+        // Queue for batched UI update
+        pendingUpdates.set(d.instrument_key, d);
+        if (!isFlushing) {
+            isFlushing = true;
+            requestAnimationFrame(flushUpdates);
         }
-
-        // 2. Update Index Status Bar (Global Nifty/BankNifty display)
-        if (d.instrument_key.includes("NSE_INDEX")) {
-            const indicator = document.getElementById("market-status-indicator");
-            if (indicator) {
-                const name = d.instrument_key.includes("Nifty 50") ? "NIFTY 50" : "BANK NIFTY";
-                const currentText = indicator.innerText;
-                const statusPart = currentText.includes("|") ? currentText.split("|")[0].trim() : "🟢 Market";
-                indicator.innerHTML = `${statusPart} | <span class="mono" style="color:var(--primary); font-weight:600;">${name}: ${formatPrice(d.ltp)}</span>`;
-            }
-        }
-
-        // 2. Update Position Rows
-        const posRows = document.querySelectorAll(`#positions-body tr[data-key="${d.instrument_key}"]`);
-        posRows.forEach(row => {
-            const ltpCell = row.querySelector('.ltp-cell');
-            if (ltpCell) {
-                ltpCell.innerText = `₹${formatPrice(d.ltp)}`;
-                ltpCell.classList.add('pulse');
-                setTimeout(() => ltpCell.classList.remove('pulse'), 500);
-            }
-            updatePositionPnL(row, d.ltp);
-        });
-
-        // 3. Update Option Chain Cells (LTP, Volume, Greeks)
-        const ocCells = document.querySelectorAll(`#oc-tbody [data-key="${d.instrument_key}"]`);
-        ocCells.forEach(cell => {
-            const field = cell.dataset.field;
-            if (field === 'ltp') {
-                cell.innerText = formatPrice(d.ltp);
-                cell.classList.add('pulse');
-                setTimeout(() => cell.classList.remove('pulse'), 500);
-            } else if (field === 'volume') {
-                cell.innerText = (d.volume || 0).toLocaleString();
-            } else if (field === 'iv') {
-                cell.innerText = (d.iv || 0).toFixed(1) + '%';
-            } else if (field === 'delta') {
-                cell.innerText = (d.delta || 0).toFixed(2);
-            } else if (field === 'theta') {
-                cell.innerText = (d.theta || 0).toFixed(2);
-            }
-        });
     } else if (msg.type === "portfolio_update") {
         refreshPositions();
         refreshAccountSummary();
@@ -167,6 +219,11 @@ function handleWsMessage(msg) {
                 addLog(`🎯 Signal: ${msg.data.action} on ${msg.data.instrument}`, 'info');
                 showToast(`New Signal: ${msg.data.action} on ${msg.data.instrument}`);
                 refreshSignals();
+                refreshActiveSignals();
+                if (msg.data.latest_metrics) {
+                    renderStrategyHUD({ latest_metrics: msg.data.latest_metrics });
+                }
+                refreshOverlay(); // Still refresh overlay for markers and latest indicators on chart
                 break;
             case 'trade_executed':
                 addLog(`💰 Trade: ${msg.data.action} @ ${msg.data.price}`, 'success');
@@ -178,14 +235,83 @@ function handleWsMessage(msg) {
     }
 }
 
+function flushUpdates() {
+    isFlushing = false;
+    const items = Array.from(pendingUpdates.values());
+    pendingUpdates.clear();
+
+    items.forEach(d => {
+        // 1. Update Chart (Primary)
+        if (d.instrument_key === currentInstrumentKey) {
+            chart.updateCandle(d.candle, currentInterval);
+            updateElementText("inst-ltp", `₹${formatPrice(d.ltp)}`);
+            if (Date.now() - lastUiUpdate.volume > 500) {
+                updateElementText("inst-volume", `Vol: ${(d.volume || 0).toLocaleString()}`);
+                lastUiUpdate.volume = Date.now();
+            }
+        }
+
+        // 2. Status Bar
+        if (d.instrument_key.includes("NSE_INDEX") && Date.now() - lastUiUpdate.status > 1000) {
+            const indicator = document.getElementById("market-status-indicator");
+            if (indicator) {
+                const name = d.instrument_key.includes("Nifty 50") ? "NIFTY 50" : "BANK NIFTY";
+                const currentText = indicator.innerText;
+                const statusPart = currentText.includes("|") ? currentText.split("|")[0].trim() : "🟢 Market";
+                indicator.innerHTML = `${statusPart} | <span class="mono" style="color:var(--primary); font-weight:600;">${name}: ${formatPrice(d.ltp)}</span>`;
+                lastUiUpdate.status = Date.now();
+            }
+        }
+
+        // 3. Positions (Cached)
+        const cachedPos = domNodes.get(`pos-${d.instrument_key}`);
+        if (cachedPos) {
+            if (cachedPos.ltp) {
+                cachedPos.ltp.innerText = `₹${formatPrice(d.ltp)}`;
+            }
+            updatePositionPnL(cachedPos, d.ltp);
+        }
+
+        // 4. Option Chain (Cached)
+        const cachedOC = domNodes.get(`oc-${d.instrument_key}`);
+        if (cachedOC) {
+            if (cachedOC.ltp) cachedOC.ltp.innerText = formatPrice(d.ltp);
+            if (cachedOC.volume) cachedOC.volume.innerText = (d.volume || 0).toLocaleString();
+            if (cachedOC.delta && d.delta !== undefined) cachedOC.delta.innerText = d.delta.toFixed(2);
+            if (cachedOC.theta && d.theta !== undefined) cachedOC.theta.innerText = d.theta.toFixed(2);
+            if (cachedOC.iv && d.iv !== undefined) cachedOC.iv.innerText = `${(d.iv || 0).toFixed(1)}%`;
+        }
+    });
+
+    // PnL Global update
+    updateGlobalPnL();
+}
+
+function updateGlobalPnL() {
+    let totalPnL = 0;
+    for (const [key, cached] of domNodes.entries()) {
+        if (key.startsWith('pos-')) {
+            const pnl = parseFloat(cached.pnl.innerText.replace('₹', '').replace(/,/g, '')) || 0;
+            totalPnL += pnl;
+        }
+    }
+    
+    const pnlEl = document.getElementById('account-pnl');
+    if (pnlEl) {
+        pnlEl.innerText = `₹${formatPrice(totalPnL)}`;
+        pnlEl.className = `mono ${totalPnL >= 0 ? 'text-success' : 'text-danger'}`;
+    }
+}
+
 // Helper function to update PnL for position rows
-function updatePositionPnL(row, ltp) {
-    const pnlCell = row.querySelector('.pnl-cell');
-    if (pnlCell && row.dataset.avg !== undefined && row.dataset.qty !== undefined) {
-        const avg = parseFloat(row.dataset.avg);
-        const qty = parseFloat(row.dataset.qty);
-        // Only update PnL if we have an open position. 
-        // For closed positions (qty=0), PnL is already realized and shouldn't change with LTP.
+function updatePositionPnL(container, ltp) {
+    // container can be a DOM row or a cached object { pnl: HTMLElement, avg: number, qty: number }
+    const isCached = !container.querySelector;
+    const pnlCell = isCached ? container.pnl : container.querySelector('.pnl-cell');
+    const avg = isCached ? container.avg : parseFloat(container.dataset.avg);
+    const qty = isCached ? container.qty : parseFloat(container.dataset.qty);
+
+    if (pnlCell && avg !== undefined && qty !== undefined) {
         if (qty !== 0) {
             const pnl = (ltp - avg) * qty;
             pnlCell.innerText = `₹${formatPrice(pnl)}`;
@@ -197,15 +323,21 @@ function updatePositionPnL(row, ltp) {
 
 async function fetchHistoricalCandles() {
     try {
+        // 1. Check IndexedDB Cache
+        const cached = await getCachedHistorical(currentInstrumentKey, currentInterval);
+        if (cached && cached.length > 0) {
+            chart.setData(cached);
+            return;
+        }
+
+        // 2. Fetch from API
         const data = await api.getHistoricalCandles(currentInstrumentKey, currentInterval);
-        // Backend returns {instrument_key, count, candles}
         if (data && data.candles) {
-            // Filter invalid candles and sort chronologically
             const valid = data.candles
                 .filter(c => c && c.time && c.open != null && c.high != null && c.low != null && c.close != null)
+                .map(c => ({...c, time: c.time}))
                 .sort((a, b) => a.time - b.time);
             
-            // Deduplicate (LightweightCharts requires unique time)
             const unique = [];
             let lastT = null;
             for (const c of valid) {
@@ -215,7 +347,12 @@ async function fetchHistoricalCandles() {
                 }
             }
             
+            // 3. Store in Cache & Update Chart
+            if (unique.length > 0) {
+                await setCachedHistorical(currentInstrumentKey, currentInterval, unique);
+            }
             chart.setData(unique);
+            
             if (unique.length === 0) {
                 showToast("No candle data found for this interval", "warning");
             }
@@ -302,6 +439,12 @@ async function refreshPositions() {
         const { data } = await api.getPositions();
         const list = document.getElementById("positions-body");
         if (!list) return;
+
+        // Clear only position-related cache
+        for (const key of domNodes.keys()) {
+            if (key.startsWith('pos-')) domNodes.delete(key);
+        }
+        
         list.innerHTML = "";
         
         if (!data || data.length === 0) {
@@ -327,14 +470,18 @@ async function refreshPositions() {
                 <td class="mono pnl-cell ${pnlClass}">₹${formatPrice(p.pnl)}</td>
             `;
             list.appendChild(row);
+
+            // Cache the row and key cells for fast WS updates
+            domNodes.set(`pos-${p.instrument_token}`, {
+                pnl: row.querySelector('.pnl-cell'),
+                ltp: row.querySelector('.ltp-cell'),
+                avg: p.average_price,
+                qty: p.quantity
+            });
         });
 
         // Update Global PnL in header
-        const pnlEl = document.getElementById('account-pnl');
-        if (pnlEl) {
-            pnlEl.innerText = `₹${formatPrice(totalPnL)}`;
-            pnlEl.className = `mono ${totalPnL >= 0 ? 'text-success' : 'text-danger'}`;
-        }
+        updateGlobalPnL();
 
         // Trigger dynamic subscription if this tab is active
         const activeTab = document.querySelector('.bottom-tab.active');
@@ -563,6 +710,236 @@ function subscribeToPositions() {
     });
 }
 
+// ── Watchlist Management ──────────────────────────────────────
+
+const AVAILABLE_TIMEFRAMES = ['1m', '5m', '15m', '30m', '1H', '1D'];
+
+async function refreshWatchlist() {
+    try {
+        const data = await api.getWatchlist();
+        const container = document.getElementById("watchlist-items");
+        if (!container) return;
+        
+        const items = data.data || [];
+        // Also refresh the name map for active signals
+        _watchlistNameMap = {};
+        items.forEach(i => {
+            _watchlistNameMap[i.instrument_key] = { symbol: i.symbol, name: i.name };
+        });
+
+        if (items.length === 0) {
+            container.innerHTML = '<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">No instruments in watchlist</div>';
+            return;
+        }
+
+        container.innerHTML = "";
+        items.forEach(item => {
+            const activeTFs = item.timeframes || ['15m'];
+            const tfBadges = AVAILABLE_TIMEFRAMES.map(tf => {
+                const isActive = activeTFs.includes(tf);
+                const cls = isActive ? 'tf-active' : 'tf-inactive';
+                const escapedTFs = JSON.stringify(activeTFs).replace(/"/g, '&quot;');
+                return '<span class="tf-badge ' + cls + '" onclick="event.stopPropagation(); toggleWatchlistTF(' + item.id + ', \'' + tf + '\', ' + escapedTFs + ')" title="' + (isActive ? 'Remove' : 'Add') + ' ' + tf + '">' + tf + '</span>';
+            }).join('');
+
+            const symSafe = (item.symbol || item.name || '').replace(/'/g, "\\'");
+            const div = document.createElement("div");
+            div.className = "watchlist-item";
+            div.innerHTML = '<div style="flex: 1; min-width: 0;">'
+                + '<div style="display: flex; align-items: baseline; gap: 6px;">'
+                + '<span style="font-size: 0.82rem; font-weight: 600;">' + (item.symbol || item.instrument_key) + '</span>'
+                + '<span style="font-size: 0.65rem; color: var(--text-muted);">' + (item.name || '') + '</span>'
+                + '</div>'
+                + '<div class="tf-picker" style="display: flex; gap: 2px; margin-top: 4px;">' + tfBadges + '</div>'
+                + '</div>'
+                + '<div style="display: flex; gap: 4px; align-items: center; flex-shrink: 0;">'
+                + '<button class="btn btn-outline" style="width: auto; padding: 2px 6px; font-size: 0.6rem;" onclick="event.stopPropagation(); selectInstrument(\'' + item.instrument_key + '\', \'' + symSafe + '\')" title="View Chart">📈</button>'
+                + '<button class="btn btn-outline" style="width: auto; padding: 2px 6px; font-size: 0.6rem; color: var(--danger);" onclick="event.stopPropagation(); removeFromWatchlist(\'' + item.instrument_key + '\')" title="Remove">✕</button>'
+                + '</div>';
+            container.appendChild(div);
+        });
+    } catch (e) {
+        console.error("Failed to refresh watchlist", e);
+    }
+}
+
+window.toggleWatchlistTF = async (itemId, tf, currentTFs) => {
+    let newTFs;
+    if (currentTFs.includes(tf)) {
+        if (currentTFs.length <= 1) {
+            showToast('Must have at least one timeframe', 'warning');
+            return;
+        }
+        newTFs = currentTFs.filter(t => t !== tf);
+    } else {
+        newTFs = [...currentTFs, tf];
+    }
+    try {
+        await api.updateWatchlistTimeframes(itemId, newTFs.join(','));
+        refreshWatchlist();
+    } catch (e) {
+        showToast('Failed to update timeframes', 'error');
+    }
+};
+
+window.addCurrentToWatchlist = async () => {
+    if (!currentInstrumentKey) {
+        showToast('No instrument selected', 'warning');
+        return;
+    }
+    try {
+        await api.addToWatchlist(currentInstrumentKey);
+        showToast(`Added ${currentInstrumentName} to watchlist`, 'success');
+        refreshWatchlist();
+    } catch (e) {
+        showToast('Failed to add to watchlist', 'error');
+    }
+};
+
+window.removeFromWatchlist = async (key) => {
+    try {
+        await api.removeFromWatchlist(key);
+        showToast('Removed from watchlist', 'info');
+        refreshWatchlist();
+    } catch (e) {
+        showToast('Failed to remove', 'error');
+    }
+};
+
+window.importWatchlistCSV = () => {
+    document.getElementById('watchlist-csv-input')?.click();
+};
+
+window.handleWatchlistCSVImport = async (input) => {
+    if (!input.files || !input.files[0]) return;
+    try {
+        const res = await api.importWatchlist(input.files[0]);
+        showToast(`Imported: ${res.added} added, ${res.skipped} skipped`, 'success');
+        refreshWatchlist();
+    } catch (e) {
+        showToast('CSV import failed', 'error');
+    }
+    input.value = ''; // Reset input
+};
+
+window.exportWatchlistCSV = async () => {
+    try {
+        const response = await api.exportWatchlist();
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'watchlist.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast('Watchlist exported', 'success');
+    } catch (e) {
+        showToast('Export failed', 'error');
+    }
+};
+
+// ── Active Signals ────────────────────────────────────────────
+
+// Cached watchlist lookup for resolving instrument names
+let _watchlistNameMap = {};
+
+async function _refreshWatchlistNameMap() {
+    try {
+        const wlData = await api.getWatchlist();
+        const items = wlData.data || [];
+        _watchlistNameMap = {};
+        items.forEach(i => {
+            _watchlistNameMap[i.instrument_key] = { symbol: i.symbol, name: i.name };
+        });
+    } catch (e) { /* ignore */ }
+}
+
+function _resolveInstrument(instrumentKey) {
+    const cached = _watchlistNameMap[instrumentKey];
+    if (cached) return cached;
+    // Fallback: extract from key
+    const parts = instrumentKey.split("|");
+    return { symbol: parts.length > 1 ? parts[1] : instrumentKey, name: '' };
+}
+
+async function refreshActiveSignals() {
+    try {
+        const data = await api.getActiveSignals();
+        const signals = data.data || [];
+        
+        // Ensure name map is populated
+        if (Object.keys(_watchlistNameMap).length === 0) {
+            await _refreshWatchlistNameMap();
+        }
+        
+        // Build rows HTML once, apply to both tables
+        const targets = ['active-signals-body', 'active-signals-body-main'];
+        
+        targets.forEach(targetId => {
+            const tbody = document.getElementById(targetId);
+            if (!tbody) return;
+            tbody.innerHTML = "";
+            
+            if (signals.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:20px; color:var(--text-muted)">No active signals</td></tr>`;
+                return;
+            }
+            
+            signals.forEach(s => {
+                const row = document.createElement("tr");
+                if (s.status === 'active') row.classList.add('active-signal-row');
+                
+                const inst = _resolveInstrument(s.instrument_key);
+                const time = s.created_at ? new Date(s.created_at).toLocaleTimeString('en-IN', { hour12: false }) : '--';
+                const statusBadge = s.status === 'active' 
+                    ? '<span class="badge" style="background:rgba(0,208,132,0.15); color:#00d084;">ACTIVE</span>'
+                    : '<span class="badge" style="background:rgba(139,139,158,0.15); color:#8b8b9e;">CLOSED</span>';
+                
+                row.innerHTML = `
+                    <td class="text-muted" style="font-size:0.7rem">${time}</td>
+                    <td style="font-size:0.75rem">${s.strategy_name}</td>
+                    <td class="mono" style="font-size:0.75rem; font-weight:600; color:var(--primary);">${inst.symbol}</td>
+                    <td style="font-size:0.7rem; color:var(--text-muted);">${inst.name || '-'}</td>
+                    <td><span class="badge" style="font-size:0.6rem; padding:1px 4px;">${s.timeframe || '15m'}</span></td>
+                    <td><span class="badge ${s.action.toLowerCase()}">${s.action}</span></td>
+                    <td class="mono">₹${formatPrice(s.price)}</td>
+                    <td class="mono text-muted" style="font-size:0.75rem">${s.stop_loss ? '₹' + formatPrice(s.stop_loss) : '-'}</td>
+                    <td class="mono text-muted" style="font-size:0.75rem">${s.take_profit ? '₹' + formatPrice(s.take_profit) : '-'}</td>
+                    <td>${s.confidence_score || 0}</td>
+                    <td>${statusBadge}</td>
+                    <td>
+                        ${s.status === 'active' ? `<button class="btn btn-outline" style="width:auto; padding:2px 6px; font-size:0.65rem;" onclick="closeActiveSignal(${s.id})">Close</button>` : ''}
+                        <button class="btn btn-outline" style="width:auto; padding:2px 6px; font-size:0.65rem; color:var(--danger);" onclick="deleteActiveSignal(${s.id})">✕</button>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+        });
+    } catch (e) {
+        console.error("Failed to refresh active signals", e);
+    }
+}
+
+window.closeActiveSignal = async (id) => {
+    try {
+        await api.closeActiveSignal(id);
+        showToast('Signal closed', 'info');
+        refreshActiveSignals();
+    } catch (e) {
+        showToast('Failed to close signal', 'error');
+    }
+};
+
+window.deleteActiveSignal = async (id) => {
+    try {
+        await api.deleteActiveSignal(id);
+        showToast('Signal deleted', 'info');
+        refreshActiveSignals();
+    } catch (e) {
+        showToast('Failed to delete signal', 'error');
+    }
+};
+
 
 
 // Window globals for legacy onclick handlers
@@ -661,10 +1038,10 @@ window.saveSandboxSettings = async () => {
 };
 
 window.saveRiskConfig = async () => {
-    const capital = document.getElementById('setting-capital').value;
-    const risk = document.getElementById('setting-risk-pct').value;
-    const maxLoss = document.getElementById('setting-max-loss-pct').value;
-    const maxTrades = document.getElementById('setting-max-trades').value;
+    const capital = document.getElementById('risk-capital').value;
+    const risk = document.getElementById('risk-pct').value;
+    const maxLoss = document.getElementById('risk-maxloss').value;
+    const maxTrades = document.getElementById('risk-maxtrades').value;
     const side = document.getElementById('setting-trading-side').value;
     
     const payload = {
@@ -676,13 +1053,114 @@ window.saveRiskConfig = async () => {
     };
     
     try {
-        await api.setAutoMode(payload); // Using setAutoMode which is actually updateConfig
+        await api.updateConfig(payload); 
         showToast("Risk Configuration Saved", "success");
         refreshStatus();
     } catch (e) {
         showToast("Failed to save risk config", "error");
     }
 };
+
+window.toggleSandboxMode = async (enabled) => {
+    try {
+        await api.updateConfig({ use_sandbox: enabled });
+        showToast(`Sandbox Mode ${enabled ? 'Enabled' : 'Disabled'}`, 'info');
+        refreshStatus();
+    } catch (e) {
+        showToast("Failed to toggle Sandbox Mode", "error");
+    }
+};
+
+window.togglePaperMode = async (enabled) => {
+    try {
+        await api.updateConfig({ paper_trading: enabled });
+        showToast(`Paper Trading ${enabled ? 'Enabled' : 'Disabled'}`, 'info');
+        refreshStatus();
+    } catch (e) {
+        showToast("Failed to toggle Paper Mode", "error");
+    }
+};
+
+window.updateTradingSide = async (side) => {
+    try {
+        await api.updateConfig({ trading_side: side });
+        showToast(`Trading Side updated to ${side}`, 'info');
+        refreshStatus();
+    } catch (e) {
+        showToast("Failed to update Trading Side", "error");
+    }
+};
+
+window.saveNotificationSettings = async () => {
+    const channels = document.getElementById('setting-notification-channels').value;
+    const server = document.getElementById('setting-smtp-server').value;
+    const port = document.getElementById('setting-smtp-port').value;
+    const user = document.getElementById('setting-smtp-user').value;
+    const password = document.getElementById('setting-smtp-password').value;
+    const recipient = document.getElementById('setting-email-recipient').value;
+    
+    const payload = {};
+    if (channels) payload.NOTIFICATION_CHANNELS = channels;
+    if (server) payload.SMTP_SERVER = server;
+    if (port) payload.SMTP_PORT = parseInt(port);
+    if (user) payload.SMTP_USER = user;
+    if (password && !password.includes('***')) payload.SMTP_PASSWORD = password;
+    if (recipient) payload.EMAIL_RECIPIENT = recipient;
+    
+    try {
+        await api.saveSettings(payload);
+        showToast("Notification settings saved", "success");
+    } catch (e) {
+        showToast("Failed to save notification settings", "error");
+    }
+};
+
+window.testNotification = async (channel = "email") => {
+    try {
+        showToast(`Sending test ${channel}...`, "info");
+        const res = await api.testNotification(channel);
+        if (res.status === 'success') {
+            showToast(res.message, "success");
+        } else {
+            showToast(res.message, "error");
+        }
+    } catch (e) {
+        showToast("Failed to dispatch test notification", "error");
+    }
+};
+
+async function loadSettingsIntoUI() {
+    try {
+        const settings = await api.getSettings();
+        
+        // General
+        if (document.getElementById('setting-api-key')) document.getElementById('setting-api-key').value = settings.API_KEY || '';
+        if (document.getElementById('setting-redirect-uri')) document.getElementById('setting-redirect-uri').value = settings.REDIRECT_URI || '';
+        
+        // Sandbox & Modes
+        if (document.getElementById('setting-sandbox-key')) document.getElementById('setting-sandbox-key').value = settings.SANDBOX_API_KEY || '';
+        if (document.getElementById('toggle-sandboxmode')) document.getElementById('toggle-sandboxmode').checked = settings.USE_SANDBOX || false;
+        if (document.getElementById('toggle-papermode')) document.getElementById('toggle-papermode').checked = settings.PAPER_TRADING ?? true;
+        
+        // Risk
+        if (document.getElementById('risk-capital')) document.getElementById('risk-capital').value = settings.TRADING_CAPITAL || 100000;
+        if (document.getElementById('risk-pct')) document.getElementById('risk-pct').value = settings.MAX_RISK_PER_TRADE_PCT || 1.0;
+        if (document.getElementById('risk-maxloss')) document.getElementById('risk-maxloss').value = settings.MAX_DAILY_LOSS_PCT || 3.0;
+        if (document.getElementById('risk-maxtrades')) document.getElementById('risk-maxtrades').value = settings.MAX_OPEN_TRADES || 3;
+        if (document.getElementById('setting-trading-side')) document.getElementById('setting-trading-side').value = settings.TRADING_SIDE || 'BOTH';
+        
+        // Notifications
+        if (document.getElementById('setting-notification-channels')) document.getElementById('setting-notification-channels').value = settings.NOTIFICATION_CHANNELS || 'EMAIL';
+        if (document.getElementById('setting-smtp-server')) document.getElementById('setting-smtp-server').value = settings.SMTP_SERVER || '';
+        if (document.getElementById('setting-smtp-port')) document.getElementById('setting-smtp-port').value = settings.SMTP_PORT || 587;
+        if (document.getElementById('setting-smtp-user')) document.getElementById('setting-smtp-user').value = settings.SMTP_USER || '';
+        if (document.getElementById('setting-smtp-password')) document.getElementById('setting-smtp-password').value = settings.SMTP_PASSWORD || '';
+        if (document.getElementById('setting-email-recipient')) document.getElementById('setting-email-recipient').value = settings.EMAIL_RECIPIENT || '';
+        
+    } catch (e) {
+        console.error("Failed to load settings into UI", e);
+    }
+}
 
 window.loadStrategy = async () => {
     const selector = document.getElementById('strategy-selector');
@@ -723,7 +1201,11 @@ window.toggleAutoMode = async (enabled) => {
 
 async function fetchStrategySchemas() {
     try {
-        const data = await api.getStrategySchemas();
+        const [data, status] = await Promise.all([
+            api.getStrategySchemas(),
+            api.getStatus()
+        ]);
+        
         const selector = document.getElementById("strategy-selector");
         if (!selector) return;
         selector.innerHTML = "";
@@ -737,18 +1219,30 @@ async function fetchStrategySchemas() {
             selector.appendChild(opt);
         });
         
-        // Default select first strategy
+        // Select matching strategy from engine status or default to index 0
+        const targetClass = status.active_strategy_class;
+        let selectedIdx = 0;
+        
+        if (targetClass) {
+            for (let i = 0; i < selector.options.length; i++) {
+                if (selector.options[i].dataset.class === targetClass) {
+                    selectedIdx = i;
+                    break;
+                }
+            }
+        }
+        
         if (selector.options.length > 0) {
-            selector.selectedIndex = 0;
-            renderDynamicStrategyForm();
-            refreshOverlay(); // Initial overlay trigger
+            selector.selectedIndex = selectedIdx;
+            window.renderDynamicStrategyForm();
+            refreshOverlay(); 
         }
     } catch(e) {
         console.error("Failed to load strategy schemas", e);
     }
 }
 
-function renderDynamicStrategyForm() {
+window.renderDynamicStrategyForm = () => {
     const selector = document.getElementById("strategy-selector");
     if (!selector) return;
     const sid = selector.value;
@@ -821,10 +1315,17 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
             }
             
             if (res.overlay && res.overlay.length > 0) {
-                const stData = res.overlay.filter(pt => pt.supertrend !== null).map(pt => ({
+                const primarySeries = res.overlay.filter(pt => pt.supertrend !== null).map(pt => ({
                     time: Math.floor(pt.time),
                     value: pt.supertrend,
                     color: pt.trend === 1 ? '#00d084' : '#ff4757'
+                }));
+                
+                // Secondary series (e.g. Slow EMA for ScalpPro)
+                const secondarySeries = res.overlay.filter(pt => pt.upper !== null).map(pt => ({
+                    time: Math.floor(pt.time),
+                    value: pt.upper,
+                    color: '#FF9800' // Distinct color for secondary line
                 }));
                 
                 const markers = [];
@@ -832,17 +1333,18 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
                 res.overlay.forEach(pt => {
                     const ds = pt.time;
                     if (lastTrend !== null && pt.trend !== lastTrend) {
+                        const isVerifiedSignal = pt.signal === 'BUY' || pt.signal === 'SELL';
                         markers.push({
                             time: Math.floor(ds),
                             position: pt.trend === 1 ? 'belowBar' : 'aboveBar',
-                            color: pt.trend === 1 ? '#00d084' : '#ff4757',
+                            color: pt.trend === 1 ? (isVerifiedSignal ? '#00ffaa' : 'rgba(0, 208, 132, 0.4)') : (isVerifiedSignal ? '#ff3366' : 'rgba(255, 71, 87, 0.4)'),
                             shape: pt.trend === 1 ? 'arrowUp' : 'arrowDown',
-                            text: pt.trend === 1 ? 'BUY' : 'SELL'
+                            text: isVerifiedSignal ? pt.signal : 'ST Flip'
                         });
                     }
                     lastTrend = pt.trend;
                 });
-                chart.setOverlayData(stData);
+                chart.setOverlayData(primarySeries, secondarySeries);
                 chart.setMarkers(markers);
             }
         } else {
@@ -918,12 +1420,20 @@ function renderStrategyHUD(strategy) {
     
     if (m.bars_in_trend !== undefined) addRow("Bars held", m.bars_in_trend, bgRow, bgRow);
     
+    // Catch-all for any other metrics (Generic support for new strategies like ScalpPro)
+    const handledKeys = ['tf_profile', 'tf_mode', 'exit_mode', 'trend', 'hard_gates', 'soft_filters', 'bars_in_trend'];
+    Object.keys(m).forEach(key => {
+        if (!handledKeys.includes(key)) {
+            addRow(key, m[key], bgRow, bgRow);
+        }
+    });
+
     html += `</div>`;
     document.getElementById("strategy-hud-container").innerHTML = html;
 }
 window.switchMainView = (view) => {
     // Hide all
-    const views = ['tvchart', 'option-chain-container', 'settings-view-container'];
+    const views = ['tvchart', 'option-chain-container', 'watchlist-view-container', 'settings-view-container'];
     views.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
@@ -933,6 +1443,7 @@ window.switchMainView = (view) => {
     const btnMap = {
         'chart': 'btn-view-chart',
         'options': 'btn-view-options',
+        'watchlist': 'btn-view-watchlist',
         'settings': 'btn-view-settings-center'
     };
     Object.values(btnMap).forEach(bid => {
@@ -943,6 +1454,7 @@ window.switchMainView = (view) => {
     const targetMap = {
         'chart': 'tvchart',
         'options': 'option-chain-container',
+        'watchlist': 'watchlist-view-container',
         'settings': 'settings-view-container'
     };
     const targetId = targetMap[view];
@@ -956,12 +1468,21 @@ window.switchMainView = (view) => {
         }
     }
 
+    // Refresh watchlist + active signals when switching to watchlist view
+    if (view === 'watchlist') {
+        refreshWatchlist();
+        refreshActiveSignals();
+    }
+
     // Persist instrument name across view transitions
     updateElementText('current-instrument', currentInstrumentName);
     updateElementText('oc-instrument-name', currentInstrumentName);
 
     if (view === 'options') fetchOptionChain();
-    if (view === 'settings') refreshStatus();
+    if (view === 'settings') {
+        refreshStatus();
+        loadSettingsIntoUI();
+    }
 };
 
 function switchTab(containerId, contentId) {
@@ -1045,10 +1566,8 @@ window.fetchOptionChain = async () => {
             renderOptionChain(res);
             
             // Subscribe to visible strikes (±10 around ATM)
-            // This is more efficient than the whole chain
             if (ws && ws.isConnected()) {
                 const keys = [];
-                // We'll subscribe to all for now as limits are high (2000 combined)
                 res.chain.forEach(row => {
                     if (row.ce?.instrument_key) keys.push(row.ce.instrument_key);
                     if (row.pe?.instrument_key) keys.push(row.pe.instrument_key);
@@ -1077,9 +1596,15 @@ function unsubscribeFromOptionChain() {
 }
 
 function renderOptionChain(data) {
-    const tbody = document.getElementById('oc-tbody');
-    if (!tbody) return;
-    tbody.innerHTML = "";
+    const list = document.getElementById('oc-tbody');
+    if (!list) return;
+
+    // Clear only OC-related cache
+    for (const key of domNodes.keys()) {
+        if (key.startsWith('oc-')) domNodes.delete(key);
+    }
+    
+    list.innerHTML = "";
     
     // Hide placeholder
     const placeholder = document.getElementById('oc-placeholder');
@@ -1146,7 +1671,27 @@ function renderOptionChain(data) {
             <td data-key="${pe.instrument_key}" data-field="theta" style="color:var(--text-muted); font-size:0.7rem;">${(pe.theta || 0).toFixed(2)}</td>
             <td data-key="${pe.instrument_key}" data-field="delta" style="color:var(--text-muted); font-size:0.7rem;">${(pe.delta || 0).toFixed(2)}</td>
         `;
-        tbody.appendChild(tr);
+        list.appendChild(tr);
+
+        // Cache references for fast WS updates
+        if (ce.instrument_key) {
+            domNodes.set(`oc-${ce.instrument_key}`, {
+                ltp: tr.querySelector(`[data-key="${ce.instrument_key}"][data-field="ltp"]`),
+                volume: tr.querySelector(`[data-key="${ce.instrument_key}"][data-field="volume"]`),
+                iv: tr.querySelector(`[data-key="${ce.instrument_key}"][data-field="iv"]`),
+                delta: tr.querySelector(`[data-key="${ce.instrument_key}"][data-field="delta"]`),
+                theta: tr.querySelector(`[data-key="${ce.instrument_key}"][data-field="theta"]`)
+            });
+        }
+        if (pe.instrument_key) {
+            domNodes.set(`oc-${pe.instrument_key}`, {
+                ltp: tr.querySelector(`[data-key="${pe.instrument_key}"][data-field="ltp"]`),
+                volume: tr.querySelector(`[data-key="${pe.instrument_key}"][data-field="volume"]`),
+                iv: tr.querySelector(`[data-key="${pe.instrument_key}"][data-field="iv"]`),
+                delta: tr.querySelector(`[data-key="${pe.instrument_key}"][data-field="delta"]`),
+                theta: tr.querySelector(`[data-key="${pe.instrument_key}"][data-field="theta"]`)
+            });
+        }
     });
 
     // Auto-scroll to ATM

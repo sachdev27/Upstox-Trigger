@@ -42,8 +42,8 @@ class AuthService:
 
         # Live Mode logic (with refresh)
         if self._is_token_expired(self.settings.ACCESS_TOKEN):
-            logger.info("Access token expired — refreshing...")
-            self._refresh_token()
+            logger.info("Live access token expired — refreshing...")
+            self._refresh_token(use_sandbox=False)
 
         config = upstox_client.Configuration()
         config.access_token = self.settings.ACCESS_TOKEN
@@ -69,12 +69,19 @@ class AuthService:
         self.settings.save_to_db("AUTH_CODE", auth_code, category="API", is_secret=True)
         self.settings.AUTH_CODE = auth_code
 
-        token = self._exchange_code_for_token(auth_code)
+        token = self._exchange_code_for_token(auth_code, use_sandbox=self.settings.USE_SANDBOX)
         if token:
-            # Save access token to DB
-            self.settings.save_to_db("ACCESS_TOKEN", token, category="API", is_secret=True)
-            self.settings.ACCESS_TOKEN = token
-            logger.info("Successfully obtained and persisted new access token to DB.")
+            key = "SANDBOX_ACCESS_TOKEN" if self.settings.USE_SANDBOX else "ACCESS_TOKEN"
+            self.settings.save_to_db(key, token, category="API", is_secret=True)
+            if self.settings.USE_SANDBOX:
+                self.settings.SANDBOX_ACCESS_TOKEN = token
+            else:
+                self.settings.ACCESS_TOKEN = token
+            
+            # Mark code as used immediately to prevent redundant refresh attempts
+            self.settings.save_to_db("AUTH_CODE", "USED", category="API", is_secret=True)
+            self.settings.AUTH_CODE = "USED"
+            logger.info(f"Successfully obtained and persisted new {key} to DB.")
         return token
 
     # ── Internal ────────────────────────────────────────────────
@@ -95,27 +102,45 @@ class AuthService:
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, KeyError):
             return True
 
-    def _refresh_token(self):
-        """Exchange the stored auth code for a new access token."""
-        token = self._exchange_code_for_token(self.settings.AUTH_CODE)
+    def _refresh_token(self, use_sandbox: bool = False):
+        """
+        Exchange the stored auth code for a new access token.
+        NOTE: Auth codes are single-use. We should only attempt this if the code hasn't been used.
+        """
+        if not self.settings.AUTH_CODE or self.settings.AUTH_CODE == "USED":
+            logger.warning("Auth code missing or already used. Manual re-authorization required.")
+            return
+
+        token = self._exchange_code_for_token(self.settings.AUTH_CODE, use_sandbox=use_sandbox)
         if token:
-            self.settings.save_to_db("ACCESS_TOKEN", token, category="API", is_secret=True)
-            self.settings.ACCESS_TOKEN = token
+            key = "SANDBOX_ACCESS_TOKEN" if use_sandbox else "ACCESS_TOKEN"
+            self.settings.save_to_db(key, token, category="API", is_secret=True)
+            
+            # Mark code as used to prevent infinite loop on failure
+            self.settings.save_to_db("AUTH_CODE", "USED", category="API", is_secret=True)
+            self.settings.AUTH_CODE = "USED"
+
+            if use_sandbox:
+                self.settings.SANDBOX_ACCESS_TOKEN = token
+            else:
+                self.settings.ACCESS_TOKEN = token
+            logger.info("Successfully swapped single-use code for access token.")
         else:
+            # If exchange failed, the code might still be invalid/used
             logger.error(
-                "Failed to refresh token. Visit the auth URL to re-authorize:\n"
+                "Failed to exchange auth code. Visit the auth URL to re-authorize:\n"
                 f"  {self.get_auth_url()}"
             )
 
-    def _exchange_code_for_token(self, auth_code: str) -> str | None:
+    def _exchange_code_for_token(self, auth_code: str, use_sandbox: bool = False) -> str | None:
         """Call Upstox token endpoint to exchange auth code for access token."""
         try:
             config = upstox_client.Configuration()
             api_instance = upstox_client.LoginApi(
                 upstox_client.ApiClient(config)
             )
-            client_id = self.settings.SANDBOX_API_KEY if self.settings.USE_SANDBOX else self.settings.API_KEY
-            client_secret = self.settings.SANDBOX_API_SECRET if self.settings.USE_SANDBOX else self.settings.API_SECRET
+            client_id = self.settings.SANDBOX_API_KEY if use_sandbox else self.settings.API_KEY
+            client_secret = self.settings.SANDBOX_API_SECRET if use_sandbox else self.settings.API_SECRET
             
             response = api_instance.token(
                 self.settings.API_VERSION,

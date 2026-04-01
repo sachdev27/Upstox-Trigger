@@ -112,6 +112,39 @@ class MarketTick(Base):
     oi = Column(Float)
 
 
+class Watchlist(Base):
+    """User-defined watchlist for monitoring and strategy evaluation."""
+
+    __tablename__ = "watchlists"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    instrument_key = Column(String, unique=True, nullable=False)
+    symbol = Column(String)
+    name = Column(String)
+    timeframes = Column(JSON, default=["15m"])  # Multi-TF scanning
+    added_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ActiveSignal(Base):
+    """Persisted strategy signals — tracks active/closed status."""
+
+    __tablename__ = "active_signals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy_name = Column(String, nullable=False)
+    instrument_key = Column(String, nullable=False)
+    timeframe = Column(String, default="15m")
+    action = Column(String, nullable=False)  # BUY / SELL
+    price = Column(Float, nullable=False)
+    stop_loss = Column(Float)
+    take_profit = Column(Float)
+    confidence_score = Column(Integer, default=0)
+    status = Column(String, default="active")  # active / closed
+    created_at = Column(DateTime, default=datetime.utcnow)
+    closed_at = Column(DateTime, nullable=True)
+    metadata_json = Column(JSON, default={})
+
+
 # ── Engine & Session ────────────────────────────────────────────
 
 _engine = None
@@ -132,7 +165,7 @@ def get_engine():
 
         _engine = create_engine(
             db_url,
-            echo=settings.DEBUG,
+            echo=False,
             connect_args={"check_same_thread": False} if "sqlite" in db_url else {},
         )
         logger.info(f"Database engine created: {db_url}")
@@ -148,7 +181,20 @@ def get_session():
 
 
 def init_db():
-    """Create all tables if they don't exist."""
+    """Create all tables if they don't exist, and run lightweight migrations."""
     engine = get_engine()
     Base.metadata.create_all(engine)
     logger.info("Database tables initialized.")
+
+    # ── Lightweight migrations for existing DBs ──
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        # Add 'timeframes' column to watchlists if missing
+        try:
+            conn.execute(text(
+                "ALTER TABLE watchlists ADD COLUMN timeframes TEXT DEFAULT '[\"15m\"]'"
+            ))
+            conn.commit()
+            logger.info("Migration: added 'timeframes' column to watchlists")
+        except Exception:
+            pass  # Column already exists

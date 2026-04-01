@@ -111,6 +111,8 @@ class SuperTrendPro(BaseStrategy):
         tf_map = {
             "1m": 1, "5m": 5, "15m": 15, "30m": 30,
             "1H": 60, "4H": 240, "1D": 1440, "1W": 10080,
+            "1minute": 1, "5minute": 5, "15minute": 15, "30minute": 30,
+            "1hour": 60, "day": 1440
         }
         return tf_map.get(timeframe, 15)
 
@@ -145,6 +147,44 @@ class SuperTrendPro(BaseStrategy):
 
     # ── Signal Evaluation (on_candle) ───────────────────────────
 
+    def _get_indicators(self, df: pd.DataFrame, htf_df: pd.DataFrame | None = None) -> dict:
+        """Calculate and cache all indicators once per cycle."""
+        if len(df) == 0: return {}
+        
+        # Identity check: length + last timestamp
+        df_id = (len(df), df["time"].iloc[-1] if "time" in df.columns else 0)
+        # Also check htf_df if present
+        htf_id = (len(htf_df), htf_df["time"].iloc[-1] if "time" in htf_df.columns else 0) if htf_df is not None else None
+        
+        if hasattr(self, "_last_eval_id") and self._last_eval_id == (df_id, htf_id):
+            return self._indicator_cache
+
+        p = self.params
+        res = {
+            "st_primary": supertrend(df, p["atr_period"], p["atr_multiplier"], p["use_rma"]),
+            "atr_vals": atr(df, p["atr_period"], p["use_rma"]),
+            "adx_data": adx(df, p["adx_length"]),
+            "roc_vals": roc(df["close"], p["roc_lookback"]).abs(),
+            "squeeze": bb_squeeze(df["close"], p["bb_length"], p["bb_multiplier"], p["squeeze_lookback"])
+        }
+        
+        # Section 2: Slow ST
+        if p["use_dual_st"]:
+            res["st_slow"] = supertrend(df, p["slow_atr_period"], p["slow_atr_multiplier"], p["use_rma"])
+            
+        # Section 3: Consec Bars
+        res["consec_bars"] = consecutive_confirming_bars(res["st_primary"]["trend"], df["close"])
+        
+        # Section 4b: HTF
+        if p["use_htf_filter"] and htf_df is not None and len(htf_df) > 30:
+            res["st_htf"] = supertrend(htf_df, p["htf_atr_period"], p["htf_atr_multiplier"])
+        else:
+            res["st_htf"] = None
+
+        self._last_eval_id = (df_id, htf_id)
+        self._indicator_cache = res
+        return res
+
     def on_candle(
         self,
         df: pd.DataFrame,
@@ -152,75 +192,47 @@ class SuperTrendPro(BaseStrategy):
     ) -> TradeSignal | None:
         """
         Evaluate the latest candle and return a BUY/SELL signal if all gates pass.
-
         Args:
             df: Primary timeframe OHLCV DataFrame
             htf_df: Higher timeframe OHLCV DataFrame (optional, for H3 gate)
         """
         if len(df) < 100:
-            return None  # Not enough data for indicators
+            return None
 
-        # Snapshot the full strategy evaluation matrix for the UI Dashboard panel
+        # Snapshot evaluation state for UI
         self.latest_metrics = self.get_dashboard_state(df, htf_df)
 
         p = self.params
         tf_mins = self._tf_minutes(self.config.timeframe)
         is_auto = p["tf_mode"] == "auto"
-
-        # Get auto thresholds
         auto = self._auto_thresholds(tf_mins) if is_auto else {}
 
-        # ── Section 1: Primary SuperTrend ───────────────────────
-        st = supertrend(df, p["atr_period"], p["atr_multiplier"], p["use_rma"])
-        trend = st["trend"]
+        ind = self._get_indicators(df, htf_df)
+        trend = ind["st_primary"]["trend"]
 
         # Buy/Sell signal: trend flip
         buy_signal = trend.iloc[-1] == 1 and trend.iloc[-2] == -1
         sell_signal = trend.iloc[-1] == -1 and trend.iloc[-2] == 1
 
         if not buy_signal and not sell_signal:
-            return None  # No trend flip → no signal
+            return None
 
         # ── Section 2: H1 — Dual ST Agreement ──────────────────
-        dual_agree = True
         if p["use_dual_st"]:
-            slow_st = supertrend(
-                df, p["slow_atr_period"], p["slow_atr_multiplier"], p["use_rma"]
-            )
-            dual_agree = slow_st["trend"].iloc[-1] == trend.iloc[-1]
-
-        if not dual_agree:
-            return None
+            if ind["st_slow"]["trend"].iloc[-1] != trend.iloc[-1]:
+                return None
 
         # ── Section 3: H2 — Consecutive Bar Confirmation ───────
-        consec_ok = True
         if p["use_consecutive"]:
-            consec_bars_req = (
-                auto.get("consec_bars", p["manual_consec_bars"])
-                if is_auto else p["manual_consec_bars"]
-            )
-            consec_count = consecutive_confirming_bars(trend, df["close"])
-            consec_ok = consec_count.iloc[-1] >= consec_bars_req
-
-        if not consec_ok:
-            return None
+            consec_bars_req = auto.get("consec_bars", p["manual_consec_bars"]) if is_auto else p["manual_consec_bars"]
+            if ind["consec_bars"].iloc[-1] < consec_bars_req:
+                return None
 
         # ── Section 4b: H3 — HTF Trend Filter ──────────────────
-        htf_bullish = True
-        htf_bearish = True
-        if p["use_htf_filter"] and htf_df is not None and len(htf_df) > 30:
-            htf_st = supertrend(
-                htf_df, p["htf_atr_period"], p["htf_atr_multiplier"]
-            )
-            htf_trend = htf_st["trend"].iloc[-1]
-            htf_bullish = htf_trend == 1
-            htf_bearish = htf_trend == -1
-
-        # Buy only when HTF bullish, Sell only when HTF bearish
-        if buy_signal and not htf_bullish:
-            return None
-        if sell_signal and not htf_bearish:
-            return None
+        if p["use_htf_filter"] and ind["st_htf"] is not None:
+            htf_trend = ind["st_htf"]["trend"].iloc[-1]
+            if buy_signal and htf_trend != 1: return None
+            if sell_signal and htf_trend != -1: return None
 
         # ── Section 4: Soft Score Filters ───────────────────────
         soft_score = 0
@@ -228,8 +240,7 @@ class SuperTrendPro(BaseStrategy):
         # S1: ADX
         if p["use_adx"]:
             adx_thresh = auto.get("adx_thresh", p["manual_adx_threshold"]) if is_auto else p["manual_adx_threshold"]
-            adx_data = adx(df, p["adx_length"])
-            if adx_data["adx"].iloc[-1] > adx_thresh:
+            if ind["adx_data"]["adx"].iloc[-1] > adx_thresh:
                 soft_score += 1
         else:
             soft_score += 1
@@ -245,8 +256,7 @@ class SuperTrendPro(BaseStrategy):
         # S3: ATR Percentile
         if p["use_atr_percentile"]:
             atr_pct_thresh = auto.get("atr_pct_thresh", p["manual_atr_pct_threshold"]) if is_auto else p["manual_atr_pct_threshold"]
-            atr_vals = atr(df, p["atr_period"], p["use_rma"])
-            pct = atr_percentile(atr_vals, p["atr_pct_lookback"])
+            pct = atr_percentile(ind["atr_vals"], p["atr_pct_lookback"])
             if not isinstance(pct, pd.Series):
                 pct = pd.Series(pct, index=df.index)
             if pct.iloc[-1] >= atr_pct_thresh:
@@ -257,34 +267,25 @@ class SuperTrendPro(BaseStrategy):
         # S4: ROC
         if p["use_roc"]:
             roc_thresh = auto.get("roc_thresh", p["manual_roc_threshold"]) if is_auto else p["manual_roc_threshold"]
-            roc_val = roc(df["close"], p["roc_lookback"]).abs()
-            if roc_val.iloc[-1] >= roc_thresh:
+            if ind["roc_vals"].iloc[-1] >= roc_thresh:
                 soft_score += 1
         else:
             soft_score += 1
 
         # S5: BB Squeeze
         if p["use_bb_squeeze"]:
-            squeeze = bb_squeeze(
-                df["close"], p["bb_length"], p["bb_multiplier"], p["squeeze_lookback"]
-            )
-            if squeeze["squeeze_breakout"].iloc[-1]:
+            if ind["squeeze"]["squeeze_breakout"].iloc[-1]:
                 soft_score += 1
         else:
             soft_score += 1
 
-        soft_required = (
-            auto.get("soft_required", p["manual_soft_required"])
-            if is_auto else p["manual_soft_required"]
-        )
-
+        soft_required = auto.get("soft_required", p["manual_soft_required"]) if is_auto else p["manual_soft_required"]
         if soft_score < soft_required:
-            return None  # Near miss — not enough soft filters passed
+            return None
 
         # ── Section 5: Valid Signal! ────────────────────────────
         current_price = df["close"].iloc[-1]
-        atr_val = atr(df, p["atr_period"], p["use_rma"]).iloc[-1]
-
+        atr_val = ind["atr_vals"].iloc[-1]
         sl_dist = atr_val * p["sl_multiplier"]
 
         if buy_signal:
@@ -368,12 +369,13 @@ class SuperTrendPro(BaseStrategy):
         is_auto = p["tf_mode"] == "auto"
         auto = self._auto_thresholds(tf_mins) if is_auto else {}
 
-        st = supertrend(df, p["atr_period"], p["atr_multiplier"], p["use_rma"])
-        atr_vals = atr(df, p["atr_period"], p["use_rma"])
-        adx_data = adx(df, p["adx_length"])
-        roc_val = roc(df["close"], p["roc_lookback"]).abs()
-        squeeze = bb_squeeze(df["close"], p["bb_length"], p["bb_multiplier"], p["squeeze_lookback"])
-        consec = consecutive_confirming_bars(st["trend"], df["close"])
+        ind = self._get_indicators(df, htf_df)
+        st = ind["st_primary"]
+        atr_vals = ind["atr_vals"]
+        adx_data = ind["adx_data"]
+        roc_val = ind["roc_vals"]
+        squeeze = ind["squeeze"]
+        consec = ind["consec_bars"]
 
         # Soft scores
         adx_thresh = auto.get("adx_thresh", p["manual_adx_threshold"]) if is_auto else p["manual_adx_threshold"]
@@ -411,7 +413,7 @@ class SuperTrendPro(BaseStrategy):
             "supertrend_value": float(st["supertrend"].iloc[-1]),
             "bars_in_trend": int(consec.iloc[-1]),
             "hard_gates": {
-                "dual_st": "AGREE" if (not p["use_dual_st"] or True) else "DISAGREE",
+                "dual_st": "AGREE" if (not p["use_dual_st"] or (ind.get("st_slow") and ind["st_slow"]["trend"].iloc[-1] == st["trend"].iloc[-1])) else "DISAGREE",
                 "consecutive": f"{int(consec.iloc[-1])}/{auto.get('consec_bars', p['manual_consec_bars'])}",
             },
             "soft_filters": {
