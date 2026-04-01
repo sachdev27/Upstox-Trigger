@@ -1,4 +1,4 @@
-/* 
+/*
     Upstox Trading Automation — V2 Trading Terminal Theme
     Premium Dark Glassmorphism
 */
@@ -9,7 +9,7 @@
     --bg-card: rgba(30, 30, 42, 0.6);
     --border-color: rgba(255, 255, 255, 0.08);
     --border-hover: rgba(255, 255, 255, 0.15);
-    
+
     --text-main: #f0f0f5;
     --text-muted: #8b8b9e;
     --text-secondary: #b4b4c7;
@@ -35,7 +35,7 @@
 body {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     background-color: var(--bg-dark);
-    background-image: 
+    background-image:
         radial-gradient(circle at 15% 50%, rgba(92, 111, 255, 0.08), transparent 25%),
         radial-gradient(circle at 85% 30%, rgba(0, 208, 132, 0.05), transparent 25%);
     background-attachment: fixed;
@@ -239,6 +239,173 @@ body {
     position: relative;
     border-bottom: 1px solid var(--border-color);
     background: #0a0a0f;
+}
+
+/* ═══ Strategy HUD + OC Insight ═══════════════════════════ */
+.hud-empty {
+    padding: 16px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
+.hud-empty-title {
+    margin-bottom: 4px;
+}
+
+.hud-empty-message {
+    color: var(--text-secondary);
+}
+
+.hud-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: #404040;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.75rem;
+}
+
+.hud-cell {
+    padding: 4px 8px;
+}
+
+.hud-cell-header {
+    background: #1e222d;
+    color: #fff;
+}
+
+.hud-cell-row {
+    background: #2a2e39;
+    color: #fff;
+}
+
+.hud-cell-info {
+    background: rgba(0, 188, 212, 0.2);
+    color: #00bcd4;
+}
+
+.hud-cell-accent {
+    background: rgba(255, 152, 0, 0.2);
+    color: #ff9800;
+}
+
+.hud-cell-pass {
+    background: rgba(76, 175, 80, 0.2);
+    color: #4caf50;
+}
+
+.hud-cell-fail {
+    background: rgba(244, 67, 54, 0.2);
+    color: #ff5252;
+}
+
+.hud-cell-warn {
+    background: rgba(255, 235, 59, 0.2);
+    color: #ffeb3b;
+}
+
+.oc-panel-head {
+    padding: 8px;
+}
+
+.oc-panel-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.oc-sentiment {
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.oc-score-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.oc-expiry {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.oc-bar-track {
+    height: 4px;
+    background: #404040;
+    border-radius: 2px;
+    margin-bottom: 8px;
+    position: relative;
+}
+
+.oc-bar-center {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: 1px;
+    height: 100%;
+    background: #666;
+}
+
+.oc-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+}
+
+.oc-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: #404040;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.7rem;
+}
+
+.oc-label {
+    padding: 3px 6px;
+    background: #1e222d;
+    color: #fff;
+}
+
+.oc-value {
+    padding: 3px 6px;
+    background: #2a2e39;
+    color: #fff;
+}
+
+.oc-signals {
+    padding: 6px 8px;
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    border-top: 1px solid #404040;
+    max-height: 80px;
+    overflow-y: auto;
+}
+
+.oc-signal-row {
+    margin-bottom: 2px;
+}
+
+.oc-tone-bull {
+    color: #4caf50;
+}
+
+.oc-tone-bear {
+    color: #ff5252;
+}
+
+.oc-tone-neutral {
+    color: #ff9800;
+}
+
+.oc-bg-bull {
+    background: rgba(76, 175, 80, 0.15);
+}
+
+.oc-bg-bear {
+    background: rgba(244, 67, 54, 0.15);
 }
 
 .bottom-panel {
@@ -744,4 +911,3 @@ input:checked + .toggle-slider:before {
 .active-signal-row:hover td {
     background: rgba(0, 208, 132, 0.06) !important;
 }
-

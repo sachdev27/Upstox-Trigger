@@ -68,16 +68,16 @@ class SchedulerService:
         )
 
         # Candle check: market hours 9:16 AM – 3:29 PM IST, Mon–Fri
-        # Run every 15 seconds for near-real-time evaluation in AUTO mode.
+        # Run every 5 seconds for faster, clock-aligned evaluation in AUTO mode.
         # Job A: 9:16–9:59
         self.scheduler.add_job(
             self._run_callbacks,
             CronTrigger(
-                second="*/15", minute="16-59", hour=9, day_of_week="mon-fri"
+                second="*/5", minute="16-59", hour=9, day_of_week="mon-fri"
             ),
             args=["candle_check"],
             id="candle_check_9",
-            name="Candle Check 15s (9:16-9:59)",
+            name="Candle Check 5s (9:16-9:59)",
             coalesce=True,
             max_instances=1,
             misfire_grace_time=30,
@@ -87,11 +87,11 @@ class SchedulerService:
         self.scheduler.add_job(
             self._run_callbacks,
             CronTrigger(
-                second="*/15", minute="*", hour="10-14", day_of_week="mon-fri"
+                second="*/5", minute="*", hour="10-14", day_of_week="mon-fri"
             ),
             args=["candle_check"],
             id="candle_check_main",
-            name="Candle Check 15s (10:00-14:59)",
+            name="Candle Check 5s (10:00-14:59)",
             coalesce=True,
             max_instances=1,
             misfire_grace_time=30,
@@ -101,11 +101,11 @@ class SchedulerService:
         self.scheduler.add_job(
             self._run_callbacks,
             CronTrigger(
-                second="*/15", minute="0-29", hour=15, day_of_week="mon-fri"
+                second="*/5", minute="0-29", hour=15, day_of_week="mon-fri"
             ),
             args=["candle_check"],
             id="candle_check_afternoon",
-            name="Candle Check 15s (15:00-15:29)",
+            name="Candle Check 5s (15:00-15:29)",
             coalesce=True,
             max_instances=1,
             misfire_grace_time=30,

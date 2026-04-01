@@ -3,9 +3,16 @@
  */
 
 import { api } from './api.js';
-import { showToast, updateElementText, formatPrice } from './ui.js';
+import * as ui from './ui.js';
 import { EngineWS } from './ws.js';
 import { ChartManager } from './chart.js';
+
+const showToast = ui.showToast;
+const updateElementText = ui.updateElementText;
+const formatPrice = ui.formatPrice;
+const renderStrategyHUDEmpty = ui.renderStrategyHUDEmpty;
+const renderStrategyHUD = ui.renderStrategyHUD;
+const renderOcInsight = ui.renderOcInsight || (() => {});
 
 // Application State
 let currentInstrumentKey = localStorage.getItem("currentInstrumentKey") || "NSE_INDEX|Nifty 50";
@@ -1546,82 +1553,6 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
     }
 }
 
-function renderStrategyHUDEmpty(message) {
-    const hud = document.getElementById("strategy-hud-container");
-    if (!hud) return;
-    hud.innerHTML = `<div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
-        <div style="margin-bottom: 4px;">📊 SuperTrend Pro v6.3</div>
-        <div style="color: var(--accent-secondary);">${message}</div>
-    </div>`;
-}
-
-function renderStrategyHUD(strategy) {
-    const m = strategy.latest_metrics;
-    if (!m) {
-        renderStrategyHUDEmpty("No metrics data available.");
-        return;
-    }
-
-    // Helper to format rows identical to TradingView
-    const bgHdr = "background: #1e222d; color: white;";
-    const bgRow = "background: #2a2e39; color: white;";
-    const bgCyn = "background: rgba(0, 188, 212, 0.2); color: #00bcd4;";
-    const bgOrn = "background: rgba(255, 152, 0, 0.2); color: #ff9800;";
-
-    const cGrn = "background: rgba(76, 175, 80, 0.2); color: #4caf50;";
-    const cRed = "background: rgba(244, 67, 54, 0.2); color: #ff5252;";
-    const cYlw = "background: rgba(255, 235, 59, 0.2); color: #ffeb3b;";
-
-    const passCol = (ok) => ok ? cGrn : cRed;
-
-    let html = `<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #404040; font-family: monospace; font-size: 0.75rem;">`;
-
-    const addRow = (label, val, bgLabel, bgVal) => {
-        html += `<div style="padding: 4px 8px; ${bgLabel}">${label}</div>`;
-        html += `<div style="padding: 4px 8px; ${bgVal}">${val}</div>`;
-    };
-
-    addRow("Metric", "Value", bgHdr, bgHdr);
-
-    // Safely render — not all metrics may be present
-    if (m.tf_profile) addRow("TF profile", `${m.tf_profile} (${m.tf_mode || ''})`, bgCyn, bgCyn);
-    if (m.exit_mode) addRow("Exit mode", m.exit_mode, bgCyn, bgCyn);
-    if (m.trend) addRow("ST Trend", m.trend, bgRow, m.trend === "LONG" ? cGrn : cRed);
-
-    if (m.hard_gates) {
-        if (m.hard_gates.dual_st) addRow("H1 Dual ST", m.hard_gates.dual_st, bgOrn, m.hard_gates.dual_st === "AGREE" ? cGrn : cRed);
-        if (m.hard_gates.consecutive) {
-            let consecOk = parseInt(m.hard_gates.consecutive.split('/')[0]) >= parseInt(m.hard_gates.consecutive.split('/')[1]);
-            addRow("H2 Consec", `${m.hard_gates.consecutive} ${consecOk ? 'PASS' : 'FAIL'}`, bgOrn, passCol(consecOk));
-        }
-    }
-
-    if (m.soft_filters) {
-        if (m.soft_filters.score !== undefined) addRow("Soft score", m.soft_filters.score, bgRow, cYlw);
-        if (m.soft_filters.adx) addRow("S1 ADX", `${m.soft_filters.adx.value} ${m.soft_filters.adx.pass ? 'PASS' : 'FAIL'}`, bgRow, passCol(m.soft_filters.adx.pass));
-        if (m.soft_filters.volume) addRow("S2 Volume", m.soft_filters.volume.pass ? "SURGE" : "FLAT", bgRow, passCol(m.soft_filters.volume.pass));
-        if (m.soft_filters.atr_pct) addRow("S3 ATR%", `${m.soft_filters.atr_pct.value}%`, bgRow, passCol(m.soft_filters.atr_pct.pass));
-        if (m.soft_filters.roc) addRow("S4 ROC", `${m.soft_filters.roc.value}%`, bgRow, passCol(m.soft_filters.roc.pass));
-        if (m.soft_filters.bb_squeeze) {
-            let bb = m.soft_filters.bb_squeeze;
-            addRow("S5 BB", bb.state, bgRow, bb.pass ? cGrn : (bb.state === 'SQUEEZE' ? cYlw : cRed));
-        }
-    }
-
-    if (m.bars_in_trend !== undefined) addRow("Bars held", m.bars_in_trend, bgRow, bgRow);
-
-    // Catch-all for any other metrics (Generic support for new strategies like ScalpPro)
-    const handledKeys = ['tf_profile', 'tf_mode', 'exit_mode', 'trend', 'hard_gates', 'soft_filters', 'bars_in_trend'];
-    Object.keys(m).forEach(key => {
-        if (!handledKeys.includes(key)) {
-            addRow(key, m[key], bgRow, bgRow);
-        }
-    });
-
-    html += `</div>`;
-    document.getElementById("strategy-hud-container").innerHTML = html;
-}
-
 // ── OC Insight Panel ────────────────────────────────────────────
 
 let _lastOcKey = null;
@@ -1647,90 +1578,10 @@ async function refreshOcInsight() {
             return;
         }
         _lastOcKey = ocKey;
-        renderOcInsight(res.analysis);
+        renderOcInsight(res.analysis, res.expiry_date);
     } catch (e) {
         container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--accent-danger); font-size: 0.75rem;">Failed to load OC analysis</div>`;
     }
-}
-
-function renderOcInsight(a) {
-    const container = document.getElementById("oc-insight-container");
-    if (!container || !a) return;
-
-    const ds = a.directional_score || 0;
-    const sentiment = a.sentiment || "NEUTRAL";
-
-    const sentColor = sentiment === "BULLISH" ? "#4caf50" : sentiment === "BEARISH" ? "#ff5252" : "#ff9800";
-    const barPct = Math.abs(ds);
-    const barColor = ds >= 0 ? "#4caf50" : "#ff5252";
-
-    const pcr = a.pcr || {};
-    const mp = a.max_pain || {};
-    const oi = a.oi_concentration || {};
-    const iv = a.iv_skew || {};
-    const oib = a.oi_buildup || {};
-
-    const bgRow = "background: #2a2e39; color: white;";
-    const bgHdr = "background: #1e222d; color: white;";
-    const cGrn = "color: #4caf50;";
-    const cRed = "color: #ff5252;";
-    const cYlw = "color: #ff9800;";
-    const biasColor = (b) => b === "BULLISH" ? cGrn : b === "BEARISH" ? cRed : cYlw;
-
-    let html = `
-    <div style="padding: 8px;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-            <span style="font-size: 0.8rem; font-weight: 600; ${biasColor(sentiment)}">${sentiment}</span>
-            <span style="font-size: 0.7rem; color: var(--text-muted);">Score: <b style="${biasColor(sentiment)}">${ds > 0 ? '+' : ''}${ds}</b></span>
-        </div>
-        <div style="height: 4px; background: #404040; border-radius: 2px; margin-bottom: 8px; position: relative;">
-            <div style="position: absolute; left: 50%; top: 0; width: 1px; height: 100%; background: #666;"></div>
-            <div style="height: 100%; width: ${barPct}%; background: ${barColor}; border-radius: 2px; margin-left: ${ds >= 0 ? '50%' : (50 - barPct) + '%'};"></div>
-        </div>
-    </div>`;
-
-    html += `<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #404040; font-family: monospace; font-size: 0.7rem;">`;
-
-    const addRow = (label, val, valStyle = bgRow) => {
-        html += `<div style="padding: 3px 6px; ${bgHdr}">${label}</div>`;
-        html += `<div style="padding: 3px 6px; ${valStyle}">${val}</div>`;
-    };
-
-    // PCR
-    const pcrVal = (pcr.pcr_oi || 0).toFixed(2);
-    const pcrStyle = pcr.pcr_oi > 1.0 ? `background:rgba(76,175,80,0.15);${cGrn}` : pcr.pcr_oi < 0.8 ? `background:rgba(244,67,54,0.15);${cRed}` : bgRow;
-    addRow("PCR (OI)", pcrVal, pcrStyle);
-
-    // Max Pain
-    addRow("Max Pain", mp.max_pain_strike ? mp.max_pain_strike.toLocaleString() : '-', bgRow);
-
-    // Spot
-    if (a.spot_price) addRow("Spot", a.spot_price.toLocaleString(), bgRow);
-
-    // Support / Resistance
-    if (oi.immediate_support) addRow("Support", oi.immediate_support.toLocaleString(), `background:rgba(76,175,80,0.15);${cGrn}`);
-    if (oi.immediate_resistance) addRow("Resistance", oi.immediate_resistance.toLocaleString(), `background:rgba(244,67,54,0.15);${cRed}`);
-
-    // IV Skew
-    const skewVal = `${iv.skew_bias || 'N/A'} (${(iv.iv_skew || 0).toFixed(1)})`;
-    addRow("IV Skew", skewVal, `${biasColor(iv.skew_bias)} background: #2a2e39;`);
-
-    // OI Buildup
-    addRow("OI Bias", oib.oi_bias || 'N/A', `${biasColor(oib.oi_bias)} background: #2a2e39;`);
-
-    html += `</div>`;
-
-    // Signal explanations (compact)
-    if (a.signals && a.signals.length > 0) {
-        html += `<div style="padding: 6px 8px; font-size: 0.65rem; color: var(--text-muted); border-top: 1px solid #404040; max-height: 80px; overflow-y: auto;">`;
-        a.signals.forEach(s => {
-            const icon = s.includes('BULLISH') || s.includes('bullish') || s.includes('support') ? '🟢' : s.includes('BEARISH') || s.includes('bearish') || s.includes('resistance') ? '🔴' : '⚪';
-            html += `<div style="margin-bottom: 2px;">${icon} ${s}</div>`;
-        });
-        html += `</div>`;
-    }
-
-    container.innerHTML = html;
 }
 
 window.switchMainView = (view) => {

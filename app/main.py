@@ -77,7 +77,7 @@ async def lifespan(app: FastAPI):
     engine.broadcast_callback = broadcast_to_clients
 
     async def _scheduled_run_cycle():
-        """Called automatically every 15 seconds during market hours."""
+        """Called automatically every 5 seconds during market hours."""
         if engine.auto_mode:
             logger.info("🤖 [AUTO MODE] Running scheduled cycle...")
             await engine.run_cycle()
