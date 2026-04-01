@@ -11,7 +11,7 @@ export class ChartManager {
         this.secondarySeries = null;
         this.resizeObserver = null;
         this.lastBar = null;
-        
+
         this.intervalMap = {
             "1minute": 60,
             "5minute": 300,
@@ -77,7 +77,7 @@ export class ChartManager {
             lineWidth: 1.5,
             lineType: LightweightCharts.LineType.Step,
             crosshairMarkerVisible: false,
-            color: '#FF9800', 
+            color: '#FF9800',
             priceLineVisible: false,
             lineStyle: LightweightCharts.LineStyle.Dashed,
         });
@@ -103,15 +103,13 @@ export class ChartManager {
         const seconds = this.intervalMap[interval] || 60;
         const roundedTime = Math.floor(Math.round(candle.time) / seconds) * seconds;
 
-        console.log(`[CHART] Tick: ${candle.time} | Rounded: ${roundedTime} | Interval: ${interval} | Last: ${this.lastBar?.time}`);
-
         // 2. Aggregate OHLC if same bar (Compare as Numbers to be safe)
         if (this.lastBar && Number(this.lastBar.time) === Number(roundedTime)) {
             this.lastBar.high = Math.max(this.lastBar.high, candle.high);
             this.lastBar.low = Math.min(this.lastBar.low, candle.low);
             this.lastBar.close = candle.close;
         } else {
-            console.warn(`[CHART] NEW BAR: Current Rounded ${roundedTime} vs Last ${this.lastBar?.time}`);
+            // New bar — open is preserved from the first tick (candle.open = ltp at bar start)
             this.lastBar = { ...candle, time: roundedTime };
         }
 

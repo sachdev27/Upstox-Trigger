@@ -112,6 +112,7 @@ class AutomationEngine:
         self._signals_log: list[dict] = []
         self._trades_today: list[dict] = []
         self._daily_pnl: float = 0.0
+        self._paper_positions: dict[str, float] = {}  # instrument_key -> entry_price (paper trading only)
         self._is_initialized: bool = False
         self._is_running: bool = False
         self.auto_mode: bool = False
@@ -500,6 +501,7 @@ class AutomationEngine:
         self._signals_log.clear()
         self._trades_today.clear()
         self._daily_pnl = 0.0
+        self._paper_positions.clear()
         logger.info("Daily counters reset.")
 
 

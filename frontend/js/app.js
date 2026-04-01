@@ -13,7 +13,7 @@ let currentInstrumentName = localStorage.getItem("currentInstrumentName") || "Ni
 let currentInterval = localStorage.getItem("currentInterval") || "15minute";
 let engineActive = false;
 let dynamicSchemas = {};
-const IST_OFFSET = 0; // Standardize to UTC seconds 
+const IST_OFFSET = 0; // Standardize to UTC seconds
 
 let globalSearchResults = [];
 let selectedSearchIndex = -1;
@@ -77,9 +77,9 @@ const ws = new EngineWS(handleWsMessage, () => {
 document.addEventListener("DOMContentLoaded", async () => {
     chart.init();
     ws.connect();
-    
+
     // Restore sidebar state — REMOVED
-    
+
     await fetchHistoricalCandles();
     await refreshAccountSummary();
     await refreshPositions();
@@ -95,12 +95,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     refreshOrderBook();
     updateClock();
     await fetchStrategySchemas();
-    
+
     // Restore UI from localStorage
     updateElementText('current-instrument', currentInstrumentName);
     updateElementText('oc-instrument-name', currentInstrumentName);
     updateElementText('inst-ltp', `₹0.00`);
-    
+
     // Set active state for persisted timeframe
     const activeBtn = document.getElementById(`tf-${currentInterval}`);
     if (activeBtn) {
@@ -111,7 +111,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Set up listeners
     setupEventListeners();
     setupGlobalSearch();
-    
+
     // Interval updates
     setInterval(updateClock, 1000);
     setInterval(refreshAccountSummary, 60000);
@@ -126,7 +126,7 @@ function setupEventListeners() {
     // Buy/Sell buttons
     document.getElementById('btn-buy')?.addEventListener('click', () => placeManualOrder('BUY'));
     document.getElementById('btn-sell')?.addEventListener('click', () => placeManualOrder('SELL'));
-    
+
     // Instrument search
     const searchInp = document.getElementById("instrument-search");
     let searchTimeout;
@@ -209,8 +209,7 @@ function handleWsMessage(msg) {
         refreshPositions();
         refreshAccountSummary();
     } else {
-        // For other message types, log and handle via switch
-        console.log("WS Message:", msg);
+        // Handle named message types
         switch (msg.type) {
             case 'status':
                 updateEngineStatus(msg.data);
@@ -295,7 +294,7 @@ function updateGlobalPnL() {
             totalPnL += pnl;
         }
     }
-    
+
     const pnlEl = document.getElementById('account-pnl');
     if (pnlEl) {
         pnlEl.innerText = `₹${formatPrice(totalPnL)}`;
@@ -337,7 +336,7 @@ async function fetchHistoricalCandles() {
                 .filter(c => c && c.time && c.open != null && c.high != null && c.low != null && c.close != null)
                 .map(c => ({...c, time: c.time}))
                 .sort((a, b) => a.time - b.time);
-            
+
             const unique = [];
             let lastT = null;
             for (const c of valid) {
@@ -346,13 +345,13 @@ async function fetchHistoricalCandles() {
                     lastT = c.time;
                 }
             }
-            
+
             // 3. Store in Cache & Update Chart
             if (unique.length > 0) {
                 await setCachedHistorical(currentInstrumentKey, currentInterval, unique);
             }
             chart.setData(unique);
-            
+
             if (unique.length === 0) {
                 showToast("No candle data found for this interval", "warning");
             }
@@ -367,7 +366,7 @@ async function fetchHistoricalCandles() {
 
 async function selectInstrument(key, name) {
     const oldKey = currentInstrumentKey;
-    
+
     // 1. Update state
     currentInstrumentKey = key;
     currentInstrumentName = name;
@@ -378,7 +377,7 @@ async function selectInstrument(key, name) {
     updateElementText('oc-instrument-name', name);
     updateElementText('inst-ltp', '₹--');
     updateElementText('inst-volume', 'Vol: --');
-    
+
     // 2. Unsubscribe from old if appropriate
     if (oldKey && shouldUnsubscribe(oldKey)) {
         ws.send({ action: 'unsubscribe', instrument_key: oldKey });
@@ -386,7 +385,7 @@ async function selectInstrument(key, name) {
 
     // 3. Subscribe to new
     ws.send({ action: 'subscribe', instrument_key: currentInstrumentKey });
-    
+
     chart.clear();
     await fetchHistoricalCandles();
     await refreshOverlay();
@@ -444,14 +443,14 @@ async function refreshPositions() {
         for (const key of domNodes.keys()) {
             if (key.startsWith('pos-')) domNodes.delete(key);
         }
-        
+
         list.innerHTML = "";
-        
+
         if (!data || data.length === 0) {
             list.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--text-muted)">No open positions</td></tr>`;
             return;
         }
-        
+
         let totalPnL = 0;
         data.forEach(p => {
             totalPnL += (p.pnl || 0);
@@ -499,13 +498,13 @@ async function refreshTrades() {
         const list = document.getElementById("trades-body");
         if (!list) return;
         list.innerHTML = "";
-        
+
         const trades = data.data || [];
         if (trades.length === 0) {
             list.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted)">No trades today</td></tr>`;
             return;
         }
-        
+
         trades.reverse().forEach(t => {
             const row = document.createElement("tr");
             row.innerHTML = `
@@ -528,13 +527,13 @@ async function refreshSignals() {
         const list = document.getElementById("signals-body");
         if (!list) return;
         list.innerHTML = "";
-        
+
         const signals = data.data || [];
         if (signals.length === 0) {
             list.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted)">No signals Generated</td></tr>`;
             return;
         }
-        
+
         signals.reverse().forEach(s => {
             const row = document.createElement("tr");
             row.innerHTML = `
@@ -557,17 +556,17 @@ async function refreshOrderBook() {
         const list = document.getElementById("order-book-body");
         if (!list) return;
         list.innerHTML = "";
-        
+
         if (!data || data.length === 0) {
             list.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--text-muted)">No orders today</td></tr>`;
             return;
         }
-        
+
         data.reverse().forEach(o => {
             const row = document.createElement("tr");
             const sideClass = o.transaction_type === 'BUY' ? 'buy' : 'sell';
             const statusClass = (o.status === 'COMPLETE' || o.status === 'FILLED') ? 'text-success' : (o.status === 'REJECTED' || o.status === 'CANCELLED') ? 'text-danger' : 'text-warning';
-            
+
             row.innerHTML = `
                 <td class="text-muted small">${new Date(o.order_timestamp).toLocaleTimeString()}</td>
                 <td class="mono small">${o.tradingsymbol}</td>
@@ -609,7 +608,7 @@ async function refreshStatus() {
 function updateEngineStatus(status) {
     const text = document.getElementById("engine-status-text");
     if (!text) return;
-    
+
     if (status.initialized) {
         text.innerText = "Active";
         text.className = "text-success";
@@ -619,10 +618,10 @@ function updateEngineStatus(status) {
         text.className = "text-warning";
         engineActive = false;
     }
-    
+
     const autoToggle = document.getElementById("toggle-automode");
     if (autoToggle) autoToggle.checked = status.auto_mode;
-    
+
     document.getElementById("auto-mode-card")?.classList.toggle("active", status.auto_mode);
 }
 
@@ -632,7 +631,7 @@ async function checkAuth() {
         const data = await res.json();
         const badge = document.getElementById("auth-status");
         const text = document.getElementById("auth-status-text");
-        
+
         if (data.auth === "valid") {
             badge.className = "status-badge online";
             text.innerText = "Auth Valid";
@@ -665,7 +664,7 @@ function shouldUnsubscribe(key, leavingPositions = false) {
             if (inPositions) return false;
         }
     }
-    
+
     return true;
 }
 
@@ -719,7 +718,7 @@ async function refreshWatchlist() {
         const data = await api.getWatchlist();
         const container = document.getElementById("watchlist-items");
         if (!container) return;
-        
+
         const items = data.data || [];
         // Also refresh the name map for active signals
         _watchlistNameMap = {};
@@ -866,35 +865,35 @@ async function refreshActiveSignals() {
     try {
         const data = await api.getActiveSignals();
         const signals = data.data || [];
-        
+
         // Ensure name map is populated
         if (Object.keys(_watchlistNameMap).length === 0) {
             await _refreshWatchlistNameMap();
         }
-        
+
         // Build rows HTML once, apply to both tables
         const targets = ['active-signals-body', 'active-signals-body-main'];
-        
+
         targets.forEach(targetId => {
             const tbody = document.getElementById(targetId);
             if (!tbody) return;
             tbody.innerHTML = "";
-            
+
             if (signals.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:20px; color:var(--text-muted)">No active signals</td></tr>`;
                 return;
             }
-            
+
             signals.forEach(s => {
                 const row = document.createElement("tr");
                 if (s.status === 'active') row.classList.add('active-signal-row');
-                
+
                 const inst = _resolveInstrument(s.instrument_key);
                 const time = s.created_at ? new Date(s.created_at).toLocaleTimeString('en-IN', { hour12: false }) : '--';
-                const statusBadge = s.status === 'active' 
+                const statusBadge = s.status === 'active'
                     ? '<span class="badge" style="background:rgba(0,208,132,0.15); color:#00d084;">ACTIVE</span>'
                     : '<span class="badge" style="background:rgba(139,139,158,0.15); color:#8b8b9e;">CLOSED</span>';
-                
+
                 row.innerHTML = `
                     <td class="text-muted" style="font-size:0.7rem">${time}</td>
                     <td style="font-size:0.75rem">${s.strategy_name}</td>
@@ -951,7 +950,7 @@ window.setChartTimeframe = (interval) => {
 
     // Update timeframe buttons exactly by ID
     const allIntervals = ['1minute', '5minute', '15minute', '30minute', '1hour', 'day'];
-    
+
     allIntervals.forEach(t => {
         const btn = document.getElementById(`tf-${t}`);
         if (btn) {
@@ -1003,12 +1002,12 @@ window.saveSettings = async () => {
     const key = document.getElementById('setting-api-key').value;
     const secret = document.getElementById('setting-api-secret').value;
     const uri = document.getElementById('setting-redirect-uri').value;
-    
+
     const payload = {};
     if (key && !key.includes('...')) payload.API_KEY = key;
     if (secret && !secret.includes('***')) payload.API_SECRET = secret;
     if (uri) payload.REDIRECT_URI = uri;
-    
+
     try {
         await api.saveSettings(payload);
         showToast("API Configuration Saved", "success");
@@ -1021,12 +1020,12 @@ window.saveSandboxSettings = async () => {
     const key = document.getElementById('setting-sandbox-key').value;
     const secret = document.getElementById('setting-sandbox-secret').value;
     const token = document.getElementById('setting-sandbox-token').value;
-    
+
     const payload = {};
     if (key && !key.includes('...')) payload.SANDBOX_API_KEY = key;
     if (secret && !secret.includes('***')) payload.SANDBOX_API_SECRET = secret;
     if (token && !token.includes('***')) payload.SANDBOX_ACCESS_TOKEN = token;
-    
+
     try {
         await api.saveSettings(payload);
         showToast("Sandbox Configuration Saved", "success");
@@ -1041,7 +1040,7 @@ window.saveRiskConfig = async () => {
     const maxLoss = document.getElementById('risk-maxloss').value;
     const maxTrades = document.getElementById('risk-maxtrades').value;
     const side = document.getElementById('setting-trading-side').value;
-    
+
     const payload = {
         trading_capital: parseFloat(capital),
         risk_per_trade_pct: parseFloat(risk),
@@ -1049,9 +1048,9 @@ window.saveRiskConfig = async () => {
         max_open_trades: parseInt(maxTrades),
         trading_side: side
     };
-    
+
     try {
-        await api.updateConfig(payload); 
+        await api.updateConfig(payload);
         showToast("Risk Configuration Saved", "success");
         refreshStatus();
     } catch (e) {
@@ -1096,7 +1095,7 @@ window.saveNotificationSettings = async () => {
     const user = document.getElementById('setting-smtp-user').value;
     const password = document.getElementById('setting-smtp-password').value;
     const recipient = document.getElementById('setting-email-recipient').value;
-    
+
     const payload = {};
     if (channels) payload.NOTIFICATION_CHANNELS = channels;
     if (server) payload.SMTP_SERVER = server;
@@ -1104,7 +1103,7 @@ window.saveNotificationSettings = async () => {
     if (user) payload.SMTP_USER = user;
     if (password && !password.includes('***')) payload.SMTP_PASSWORD = password;
     if (recipient) payload.EMAIL_RECIPIENT = recipient;
-    
+
     try {
         await api.saveSettings(payload);
         showToast("Notification settings saved", "success");
@@ -1130,23 +1129,23 @@ window.testNotification = async (channel = "email") => {
 async function loadSettingsIntoUI() {
     try {
         const settings = await api.getSettings();
-        
+
         // General
         if (document.getElementById('setting-api-key')) document.getElementById('setting-api-key').value = settings.API_KEY || '';
         if (document.getElementById('setting-redirect-uri')) document.getElementById('setting-redirect-uri').value = settings.REDIRECT_URI || '';
-        
+
         // Sandbox & Modes
         if (document.getElementById('setting-sandbox-key')) document.getElementById('setting-sandbox-key').value = settings.SANDBOX_API_KEY || '';
         if (document.getElementById('toggle-sandboxmode')) document.getElementById('toggle-sandboxmode').checked = settings.USE_SANDBOX || false;
         if (document.getElementById('toggle-papermode')) document.getElementById('toggle-papermode').checked = settings.PAPER_TRADING ?? true;
-        
+
         // Risk
         if (document.getElementById('risk-capital')) document.getElementById('risk-capital').value = settings.TRADING_CAPITAL || 100000;
         if (document.getElementById('risk-pct')) document.getElementById('risk-pct').value = settings.MAX_RISK_PER_TRADE_PCT || 1.0;
         if (document.getElementById('risk-maxloss')) document.getElementById('risk-maxloss').value = settings.MAX_DAILY_LOSS_PCT || 3.0;
         if (document.getElementById('risk-maxtrades')) document.getElementById('risk-maxtrades').value = settings.MAX_OPEN_TRADES || 3;
         if (document.getElementById('setting-trading-side')) document.getElementById('setting-trading-side').value = settings.TRADING_SIDE || 'BOTH';
-        
+
         // Notifications
         if (document.getElementById('setting-notification-channels')) document.getElementById('setting-notification-channels').value = settings.NOTIFICATION_CHANNELS || 'EMAIL';
         if (document.getElementById('setting-smtp-server')) document.getElementById('setting-smtp-server').value = settings.SMTP_SERVER || '';
@@ -1154,7 +1153,7 @@ async function loadSettingsIntoUI() {
         if (document.getElementById('setting-smtp-user')) document.getElementById('setting-smtp-user').value = settings.SMTP_USER || '';
         if (document.getElementById('setting-smtp-password')) document.getElementById('setting-smtp-password').value = settings.SMTP_PASSWORD || '';
         if (document.getElementById('setting-email-recipient')) document.getElementById('setting-email-recipient').value = settings.EMAIL_RECIPIENT || '';
-        
+
     } catch (e) {
         console.error("Failed to load settings into UI", e);
     }
@@ -1163,10 +1162,10 @@ async function loadSettingsIntoUI() {
 window.loadStrategy = async () => {
     const selector = document.getElementById('strategy-selector');
     if (!selector) return;
-    
+
     const strategyClass = selector.options[selector.selectedIndex].dataset.class;
     const name = selector.options[selector.selectedIndex].text;
-    
+
     const payload = {
         strategy_class: strategyClass,
         name: name,
@@ -1203,11 +1202,11 @@ async function fetchStrategySchemas() {
             api.getStrategySchemas(),
             api.getStatus()
         ]);
-        
+
         const selector = document.getElementById("strategy-selector");
         if (!selector) return;
         selector.innerHTML = "";
-        
+
         data.strategies.forEach(s => {
             dynamicSchemas[s.id] = s;
             const opt = document.createElement("option");
@@ -1216,11 +1215,11 @@ async function fetchStrategySchemas() {
             opt.innerText = s.name;
             selector.appendChild(opt);
         });
-        
+
         // Select matching strategy from engine status or default to index 0
         const targetClass = status.active_strategy_class;
         let selectedIdx = 0;
-        
+
         if (targetClass) {
             for (let i = 0; i < selector.options.length; i++) {
                 if (selector.options[i].dataset.class === targetClass) {
@@ -1229,11 +1228,11 @@ async function fetchStrategySchemas() {
                 }
             }
         }
-        
+
         if (selector.options.length > 0) {
             selector.selectedIndex = selectedIdx;
             window.renderDynamicStrategyForm();
-            refreshOverlay(); 
+            refreshOverlay();
         }
     } catch(e) {
         console.error("Failed to load strategy schemas", e);
@@ -1246,16 +1245,16 @@ window.renderDynamicStrategyForm = () => {
     const sid = selector.value;
     const schema = dynamicSchemas[sid];
     if (!schema) return;
-    
+
     const container = document.getElementById("dynamic-strategy-container");
     if (!container) return;
     container.innerHTML = "";
-    
+
     schema.params.forEach(p => {
         const div = document.createElement('div');
         div.className = "form-group";
         div.style.marginTop = "8px";
-        
+
         if (p.type === 'boolean') {
             div.innerHTML = `
                 <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--text-secondary);">
@@ -1292,13 +1291,13 @@ async function refreshOverlay() {
     let cls = selector?.options[selector.selectedIndex]?.dataset?.class;
     // Fallback to default strategy if selector isn't populated yet
     if (!cls) cls = "SuperTrendPro";
-    
+
     // Show loading state in the HUD
     const hud = document.getElementById("strategy-hud-container");
     if (hud && hud.innerText.includes('Waiting')) {
         hud.innerHTML = `<div style="padding: 16px; text-align: center; color: var(--accent-primary); font-size: 0.8rem;">⏳ Loading strategy data...</div>`;
     }
-    
+
     await fetchStrategyOverlay(currentInstrumentKey, currentInterval, cls, getDynamicParams());
 }
 
@@ -1311,21 +1310,21 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
             } else {
                 renderStrategyHUDEmpty("No metrics returned — strategy may need more candle data.");
             }
-            
+
             if (res.overlay && res.overlay.length > 0) {
                 const primarySeries = res.overlay.filter(pt => pt.supertrend !== null).map(pt => ({
                     time: Math.floor(pt.time),
                     value: pt.supertrend,
                     color: pt.trend === 1 ? '#00d084' : '#ff4757'
                 }));
-                
+
                 // Secondary series (e.g. Slow EMA for ScalpPro)
                 const secondarySeries = res.overlay.filter(pt => pt.upper !== null).map(pt => ({
                     time: Math.floor(pt.time),
                     value: pt.upper,
                     color: '#FF9800' // Distinct color for secondary line
                 }));
-                
+
                 const markers = [];
                 let lastTrend = null;
                 res.overlay.forEach(pt => {
@@ -1369,33 +1368,33 @@ function renderStrategyHUD(strategy) {
         renderStrategyHUDEmpty("No metrics data available.");
         return;
     }
-    
+
     // Helper to format rows identical to TradingView
     const bgHdr = "background: #1e222d; color: white;";
     const bgRow = "background: #2a2e39; color: white;";
     const bgCyn = "background: rgba(0, 188, 212, 0.2); color: #00bcd4;";
     const bgOrn = "background: rgba(255, 152, 0, 0.2); color: #ff9800;";
-    
+
     const cGrn = "background: rgba(76, 175, 80, 0.2); color: #4caf50;";
     const cRed = "background: rgba(244, 67, 54, 0.2); color: #ff5252;";
     const cYlw = "background: rgba(255, 235, 59, 0.2); color: #ffeb3b;";
-    
+
     const passCol = (ok) => ok ? cGrn : cRed;
-    
+
     let html = `<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #404040; font-family: monospace; font-size: 0.75rem;">`;
-    
+
     const addRow = (label, val, bgLabel, bgVal) => {
         html += `<div style="padding: 4px 8px; ${bgLabel}">${label}</div>`;
         html += `<div style="padding: 4px 8px; ${bgVal}">${val}</div>`;
     };
-    
+
     addRow("Metric", "Value", bgHdr, bgHdr);
-    
+
     // Safely render — not all metrics may be present
     if (m.tf_profile) addRow("TF profile", `${m.tf_profile} (${m.tf_mode || ''})`, bgCyn, bgCyn);
     if (m.exit_mode) addRow("Exit mode", m.exit_mode, bgCyn, bgCyn);
     if (m.trend) addRow("ST Trend", m.trend, bgRow, m.trend === "LONG" ? cGrn : cRed);
-    
+
     if (m.hard_gates) {
         if (m.hard_gates.dual_st) addRow("H1 Dual ST", m.hard_gates.dual_st, bgOrn, m.hard_gates.dual_st === "AGREE" ? cGrn : cRed);
         if (m.hard_gates.consecutive) {
@@ -1403,7 +1402,7 @@ function renderStrategyHUD(strategy) {
             addRow("H2 Consec", `${m.hard_gates.consecutive} ${consecOk ? 'PASS' : 'FAIL'}`, bgOrn, passCol(consecOk));
         }
     }
-    
+
     if (m.soft_filters) {
         if (m.soft_filters.score !== undefined) addRow("Soft score", m.soft_filters.score, bgRow, cYlw);
         if (m.soft_filters.adx) addRow("S1 ADX", `${m.soft_filters.adx.value} ${m.soft_filters.adx.pass ? 'PASS' : 'FAIL'}`, bgRow, passCol(m.soft_filters.adx.pass));
@@ -1415,9 +1414,9 @@ function renderStrategyHUD(strategy) {
             addRow("S5 BB", bb.state, bgRow, bb.pass ? cGrn : (bb.state === 'SQUEEZE' ? cYlw : cRed));
         }
     }
-    
+
     if (m.bars_in_trend !== undefined) addRow("Bars held", m.bars_in_trend, bgRow, bgRow);
-    
+
     // Catch-all for any other metrics (Generic support for new strategies like ScalpPro)
     const handledKeys = ['tf_profile', 'tf_mode', 'exit_mode', 'trend', 'hard_gates', 'soft_filters', 'bars_in_trend'];
     Object.keys(m).forEach(key => {
@@ -1436,7 +1435,7 @@ window.switchMainView = (view) => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
-    
+
     // Update button states
     const btnMap = {
         'chart': 'btn-view-chart',
@@ -1486,7 +1485,7 @@ window.switchMainView = (view) => {
 function switchTab(containerId, contentId) {
     const container = document.getElementById(containerId);
     if (!container) return;
-    
+
     // Manage dynamic subscriptions for bottom panel
     if (containerId === 'bottom-panel') {
         const isLeavingPositions = document.querySelector('.bottom-tab.active')?.innerText.toLowerCase().includes('position');
@@ -1497,12 +1496,12 @@ function switchTab(containerId, contentId) {
         } else if (isEnteringPositions) {
             subscribeToPositions();
         }
-        
+
         // Option Chain logic
         const prevTabName = document.querySelector('.bottom-tab.active')?.innerText.toLowerCase() || "";
         const isLeavingOptions = prevTabName.includes('option chain');
         const isEnteringOptions = contentId === 'tab-options';
-        
+
         if (isLeavingOptions && !isEnteringOptions) {
             unsubscribeFromOptionChain();
         }
@@ -1512,7 +1511,7 @@ function switchTab(containerId, contentId) {
     container.querySelectorAll('.bottom-tab, .settings-tab, .sidebar-link').forEach(btn => {
         btn.classList.remove('active');
     });
-    
+
     // 2. Hide all content containers within this scope
     // Use more specific selectors if needed, but for now we hide everything in the container
     const allContents = container.querySelectorAll('.bottom-content, .settings-content, .tab-content, .settings-view-container');
@@ -1546,7 +1545,7 @@ window.switchSettingsTab = (tabId) => {
     // Hide all contents
     document.querySelectorAll('.settings-content').forEach(c => c.classList.remove('active'));
     document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
-    
+
     // Show target
     document.getElementById(`set-tab-${tabId}`)?.classList.add('active');
     // Find button (hacky but works)
@@ -1562,7 +1561,7 @@ window.fetchOptionChain = async () => {
         const res = await api.getOptionChain(currentInstrumentKey, expiry);
         if (res.status === 'success') {
             renderOptionChain(res);
-            
+
             // Subscribe to visible strikes (±10 around ATM)
             if (ws && ws.isConnected()) {
                 const keys = [];
@@ -1601,13 +1600,13 @@ function renderOptionChain(data) {
     for (const key of domNodes.keys()) {
         if (key.startsWith('oc-')) domNodes.delete(key);
     }
-    
+
     list.innerHTML = "";
-    
+
     // Hide placeholder
     const placeholder = document.getElementById('oc-placeholder');
     if (placeholder) placeholder.style.display = 'none';
-    
+
     // Populate expiries if not already
     const select = document.getElementById('oc-expiry-select');
     if (select && select.options.length <= 1 && data.available_expiries) {
@@ -1641,15 +1640,15 @@ function renderOptionChain(data) {
         const ce = row.ce || {};
         const pe = row.pe || {};
         const isATM = idx === atmIndex;
-        
+
         const ceITM = row.strike_price < data.spot_price;
         const peITM = row.strike_price > data.spot_price;
-        
+
         if (isATM) {
             tr.style.border = "1px solid #00d084";
             tr.id = "atm-row";
         }
-        
+
         tr.innerHTML = `
             <td data-key="${ce.instrument_key}" data-field="delta" style="color:var(--text-muted); font-size:0.7rem;">${(ce.delta || 0).toFixed(2)}</td>
             <td data-key="${ce.instrument_key}" data-field="theta" style="color:var(--text-muted); font-size:0.7rem;">${(ce.theta || 0).toFixed(2)}</td>
@@ -1703,7 +1702,7 @@ function setupGlobalSearch() {
     const modal = document.getElementById("global-search-modal");
     const input = document.getElementById("global-search-input");
     const results = document.getElementById("global-search-results");
-    
+
     if (!modal || !input) return;
 
     // 1. Opening the modal on keyboard press

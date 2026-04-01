@@ -85,6 +85,9 @@ export const api = {
             body: JSON.stringify({ instrument_key: instrumentKey })
         }).then(r => r.json());
     },
+    async setAutoMode(enabled) {
+        return fetch(`${API_BASE}/engine/auto-mode?enabled=${enabled}`, { method: 'POST' }).then(r => r.json());
+    },
     async loadStrategy(payload) {
         const params = new URLSearchParams(payload);
         return fetch(`${API_BASE}/engine/load-strategy?${params.toString()}`, { method: 'POST' }).then(r => r.json());

@@ -91,6 +91,19 @@ class ExecutionProcessor(SignalProcessor):
                 "score": signal.confidence_score,
             })
 
+            # Paper P&L tracking so the daily-loss risk guard has real data.
+            if signal.action.value == "BUY":
+                engine._paper_positions[trade_instrument] = signal.price
+            elif signal.action.value == "SELL":
+                entry = engine._paper_positions.pop(trade_instrument, None)
+                if entry is not None:
+                    pnl = (signal.price - entry) * max(signal.quantity, 1)
+                    engine._daily_pnl += pnl
+                    logger.info(
+                        f"📊 Paper P&L: ₹{pnl:.2f} on {trade_instrument} "
+                        f"(daily total: ₹{engine._daily_pnl:.2f})"
+                    )
+
             # DB Log
             try:
                 session = get_session()
