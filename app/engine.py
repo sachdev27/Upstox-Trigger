@@ -113,6 +113,7 @@ class AutomationEngine:
         self._trades_today: list[dict] = []
         self._daily_pnl: float = 0.0
         self._paper_positions: dict[str, float] = {}  # instrument_key -> entry_price (paper trading only)
+        self._last_evaluated_bar: dict[tuple[str, str, str], str] = {}
         self._is_initialized: bool = False
         self._is_running: bool = False
         self.auto_mode: bool = False
@@ -214,6 +215,7 @@ class AutomationEngine:
         timeframe: str = "15m",
         params: dict | None = None,
         paper_trading: bool = True,
+        replace_existing: bool = True,
     ):
         """Register a strategy to be evaluated on each cycle."""
         cls = STRATEGY_CLASSES.get(strategy_class_name)
@@ -222,6 +224,13 @@ class AutomationEngine:
                 f"Unknown strategy: {strategy_class_name}. "
                 f"Available: {list(STRATEGY_CLASSES.keys())}"
             )
+
+        if replace_existing:
+            # Keep a single active instance per strategy class to avoid stale/duplicate evaluators.
+            self._active_strategies = [
+                (cfg, strat) for (cfg, strat) in self._active_strategies
+                if strat.__class__.__name__ != strategy_class_name
+            ]
 
         config = StrategyConfig(
             name=name,
@@ -359,6 +368,22 @@ class AutomationEngine:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
+        # Deduplicate per-candle evaluation: with a fast scheduler (e.g., every 15s),
+        # candle-based strategies must not be re-evaluated on the same bar.
+        bar_ts = None
+        bar_key = None
+        if "datetime" in df.columns:
+            bar_ts = df["datetime"].iloc[-1]
+        elif "time" in df.columns:
+            bar_ts = df["time"].iloc[-1]
+
+        if bar_ts is not None:
+            eval_key = (config.name, instrument_key, config.timeframe)
+            bar_key = str(bar_ts)
+            if self._last_evaluated_bar.get(eval_key) == bar_key:
+                return None
+            self._last_evaluated_bar[eval_key] = bar_key
+
         htf_df = None
         if htf_candles:
             htf_df = pd.DataFrame(htf_candles)
@@ -374,6 +399,8 @@ class AutomationEngine:
             strategy.latest_metrics = strategy.get_dashboard_state(df, htf_df=htf_df)
         if signal:
             signal.instrument_key = instrument_key
+            if bar_key:
+                signal.metadata["bar_key"] = bar_key
             self._signals_log.append({
                 "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
                 "strategy": config.name,
@@ -502,6 +529,7 @@ class AutomationEngine:
         self._trades_today.clear()
         self._daily_pnl = 0.0
         self._paper_positions.clear()
+        self._last_evaluated_bar.clear()
         logger.info("Daily counters reset.")
 
 

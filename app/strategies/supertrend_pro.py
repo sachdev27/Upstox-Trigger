@@ -410,6 +410,17 @@ class SuperTrendPro(BaseStrategy):
                 tf_profile = name
                 break
 
+        st_slow = ind.get("st_slow")
+        has_slow_trend = (
+            st_slow is not None
+            and isinstance(st_slow, pd.DataFrame)
+            and not st_slow.empty
+            and "trend" in st_slow.columns
+        )
+        dual_st_agree = (not p["use_dual_st"]) or (
+            has_slow_trend and st_slow["trend"].iloc[-1] == st["trend"].iloc[-1]
+        )
+
         return {
             "tf_profile": tf_profile,
             "tf_mode": "auto" if is_auto else "manual",
@@ -417,7 +428,7 @@ class SuperTrendPro(BaseStrategy):
             "supertrend_value": float(st["supertrend"].iloc[-1]),
             "bars_in_trend": int(consec.iloc[-1]),
             "hard_gates": {
-                "dual_st": "AGREE" if (not p["use_dual_st"] or (ind.get("st_slow") and ind["st_slow"]["trend"].iloc[-1] == st["trend"].iloc[-1])) else "DISAGREE",
+                "dual_st": "AGREE" if dual_st_agree else "DISAGREE",
                 "consecutive": f"{int(consec.iloc[-1])}/{auto.get('consec_bars', p['manual_consec_bars'])}",
             },
             "soft_filters": {

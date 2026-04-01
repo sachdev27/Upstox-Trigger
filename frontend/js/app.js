@@ -21,6 +21,25 @@ const domNodes = new Map(); // Performance Cache: instrument_key -> { row: HTMLE
 const lastUiUpdate = { status: 0, volume: 0 }; // Throttling state
 const pendingUpdates = new Map(); // Batching Queue: key -> last_tick_data
 let isFlushing = false;
+let overlayRefreshInFlight = false;
+let lastOverlayRefreshAt = 0;
+const OVERLAY_REFRESH_MS = 5000;
+
+async function scheduleOverlayRefresh(force = false) {
+    if (!currentInstrumentKey) return;
+    const now = Date.now();
+    if (!force && (overlayRefreshInFlight || (now - lastOverlayRefreshAt) < OVERLAY_REFRESH_MS)) {
+        return;
+    }
+
+    overlayRefreshInFlight = true;
+    try {
+        await refreshOverlay();
+    } finally {
+        lastOverlayRefreshAt = Date.now();
+        overlayRefreshInFlight = false;
+    }
+}
 
 // --- IndexedDB Cache System ---
 const DB_NAME = 'TradingTerminalDB';
@@ -119,7 +138,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setInterval(refreshMarketStatus, 60000);
     setInterval(refreshOrderBook, 30000);
     setInterval(refreshActiveSignals, 15000); // Every 15 seconds
-    setInterval(refreshOverlay, 30000); // Refresh strategy indicators/HUD every 30s
+    setInterval(() => scheduleOverlayRefresh(false), OVERLAY_REFRESH_MS); // Near-real-time strategy HUD/overlay
 });
 
 function setupEventListeners() {
@@ -144,7 +163,7 @@ function setupEventListeners() {
     // Strategy selector change
     document.getElementById("strategy-selector")?.addEventListener("change", () => {
         renderDynamicStrategyForm();
-        refreshOverlay();
+        scheduleOverlayRefresh(true);
     });
 
     // Watchlist search
@@ -222,7 +241,7 @@ function handleWsMessage(msg) {
                 if (msg.data.latest_metrics) {
                     renderStrategyHUD({ latest_metrics: msg.data.latest_metrics });
                 }
-                refreshOverlay(); // Still refresh overlay for markers and latest indicators on chart
+                scheduleOverlayRefresh(true); // Force immediate strategy overlay refresh on signal
                 break;
             case 'trade_executed': {
                 const td = msg.data;
@@ -254,6 +273,7 @@ function flushUpdates() {
         if (d.instrument_key === currentInstrumentKey) {
             chart.updateCandle(d.candle, currentInterval);
             updateElementText("inst-ltp", `₹${formatPrice(d.ltp)}`);
+            scheduleOverlayRefresh(false);
             if (Date.now() - lastUiUpdate.volume > 500) {
                 updateElementText("inst-volume", `Vol: ${(d.volume || 0).toLocaleString()}`);
                 lastUiUpdate.volume = Date.now();
@@ -398,7 +418,7 @@ async function selectInstrument(key, name) {
 
     chart.clear();
     await fetchHistoricalCandles();
-    await refreshOverlay();
+    await scheduleOverlayRefresh(true);
 }
 
 async function placeManualOrder(side) {
@@ -999,7 +1019,7 @@ window.setChartTimeframe = (interval) => {
         }
     });
 
-    fetchHistoricalCandles().then(() => refreshOverlay());
+    fetchHistoricalCandles().then(() => scheduleOverlayRefresh(true));
 };
 window.loginUpstox = () => window.location.href = "/auth/login";
 
@@ -1200,20 +1220,29 @@ window.loadStrategy = async () => {
 
     const strategyClass = selector.options[selector.selectedIndex].dataset.class;
     const name = selector.options[selector.selectedIndex].text;
+    const paperModeToggle = document.getElementById('toggle-papermode');
+    const isPaperMode = paperModeToggle ? !!paperModeToggle.checked : true;
 
     const payload = {
         strategy_class: strategyClass,
         name: name,
         instruments: currentInstrumentKey,
         timeframe: currentInterval,
-        paper_trading: true // Initial default
+        paper_trading: isPaperMode,
+        params: JSON.stringify(getDynamicParams()),
+        replace_existing: true,
     };
 
     try {
         await api.loadStrategy(payload);
-        showToast("Strategy Loaded Successfully", "success");
+        showToast("Strategy applied to engine successfully", "success");
         refreshStatus();
-        refreshOverlay();
+        await scheduleOverlayRefresh(true);
+
+        const autoToggle = document.getElementById('toggle-automode');
+        if (!autoToggle || !autoToggle.checked) {
+            showToast("Auto Mode is OFF: chart can show setup signals, but engine won't execute until Auto Mode is enabled.", "warning");
+        }
     } catch (e) {
         showToast("Failed to load strategy", "error");
     }
@@ -1267,7 +1296,7 @@ async function fetchStrategySchemas() {
         if (selector.options.length > 0) {
             selector.selectedIndex = selectedIdx;
             window.renderDynamicStrategyForm();
-            refreshOverlay();
+            scheduleOverlayRefresh(true);
         }
     } catch(e) {
         console.error("Failed to load strategy schemas", e);

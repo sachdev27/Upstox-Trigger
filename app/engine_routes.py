@@ -27,8 +27,12 @@ async def load_strategy(
     instruments: str = "NSE_INDEX|Nifty 50",
     timeframe: str = "15m",
     paper_trading: bool = True,
+    params: str = "{}",
+    replace_existing: bool = True,
 ):
     """Load a strategy into the engine."""
+    import json
+
     # Persist selection to settings
     settings = get_settings()
     settings.save_to_db("ACTIVE_STRATEGY_CLASS", strategy_class, category="STRATEGY")
@@ -36,14 +40,27 @@ async def load_strategy(
 
     engine = get_engine()
     instrument_list = [i.strip() for i in instruments.split(",")]
+    try:
+        parsed_params = json.loads(params) if params else {}
+    except Exception:
+        parsed_params = {}
+
     engine.load_strategy(
         strategy_class_name=strategy_class,
         name=name,
         instruments=instrument_list,
         timeframe=timeframe,
+        params=parsed_params,
         paper_trading=paper_trading,
+        replace_existing=replace_existing,
     )
-    return {"status": "loaded", "strategy": name, "instruments": instrument_list}
+    return {
+        "status": "loaded",
+        "strategy": name,
+        "instruments": instrument_list,
+        "params_applied": parsed_params,
+        "replace_existing": replace_existing,
+    }
 
 
 @router.post("/run-cycle")
@@ -104,7 +121,7 @@ async def trigger_test_signal(payload: dict):
     instrument_key = payload.get("instrument_key")
     if not instrument_key:
         return {"status": "error", "message": "Missing instrument_key"}
-        
+
     res = await engine.trigger_test_signal(instrument_key)
     return {"status": "success", "result": res}
 

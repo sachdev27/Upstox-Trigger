@@ -156,6 +156,39 @@ class AlerterProcessor(SignalProcessor):
             from app.database.connection import ActiveSignal
             session = get_session()
             try:
+                # DB-level duplicate guard: block same strategy/instrument/timeframe/action
+                # on the same bar (or within a short fallback window) to avoid UI spam.
+                recent = (
+                    session.query(ActiveSignal)
+                    .filter(
+                        ActiveSignal.strategy_name == (signal.strategy_name or config.name),
+                        ActiveSignal.instrument_key == signal.instrument_key,
+                        ActiveSignal.timeframe == config.timeframe,
+                        ActiveSignal.action == signal.action.value,
+                        ActiveSignal.status == "active",
+                        ActiveSignal.created_at >= (datetime.now(timezone.utc) - timedelta(seconds=90)),
+                    )
+                    .order_by(ActiveSignal.created_at.desc())
+                    .first()
+                )
+
+                duplicate = False
+                bar_key = (signal.metadata or {}).get("bar_key")
+                if recent:
+                    recent_meta = recent.metadata_json if isinstance(recent.metadata_json, dict) else {}
+                    recent_bar_key = recent_meta.get("bar_key")
+                    if bar_key and recent_bar_key:
+                        duplicate = (recent_bar_key == bar_key)
+                    else:
+                        duplicate = abs(float(recent.price or 0.0) - float(signal.price or 0.0)) < 1e-9
+
+                if duplicate:
+                    logger.info(
+                        f"⏭️ Skipping duplicate ActiveSignal: {signal.action.value} "
+                        f"{signal.instrument_key} ({config.timeframe})"
+                    )
+                    return True
+
                 active_sig = ActiveSignal(
                     strategy_name=signal.strategy_name or config.name,
                     instrument_key=signal.instrument_key,

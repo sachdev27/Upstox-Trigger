@@ -101,7 +101,7 @@ export class ChartManager {
 
         // 1. Round time to interval
         const seconds = this.intervalMap[interval] || 60;
-        const roundedTime = Math.floor(Math.round(candle.time) / seconds) * seconds;
+        const roundedTime = Math.floor(Number(candle.time) / seconds) * seconds;
 
         // 2. Aggregate OHLC if same bar (Compare as Numbers to be safe)
         if (this.lastBar && Number(this.lastBar.time) === Number(roundedTime)) {

@@ -64,14 +64,14 @@ async def get_profile():
 async def get_featured_instruments():
     """Return featured instruments from the database for the UI default Watchlist."""
     from app.database.connection import get_session, Instrument
-    
+
     session = get_session()
     try:
         db_insts = session.query(Instrument).filter(
-            (Instrument.instrument_type == 'INDEX') | 
+            (Instrument.instrument_type == 'INDEX') |
             (Instrument.instrument_type == 'EQUITY')
         ).limit(100).all()
-        
+
         instruments = []
         for inst in db_insts:
             instruments.append({
@@ -80,7 +80,7 @@ async def get_featured_instruments():
                 "segment": inst.exchange,
                 "symbol": inst.symbol
             })
-            
+
         return {"status": "success", "count": len(instruments), "instruments": instruments}
     except Exception as e:
         return {"status": "error", "message": f"Failed to fetch from DB: {e}"}
@@ -171,54 +171,74 @@ async def get_strategy_overlay(
     import json
     svc = _get_market_service()
     candles = svc.get_historical_candles(instrument_key, timeframe, from_date, to_date)
-    
+
     if not candles:
         return {"status": "error", "message": "No candle data available.", "overlay": []}
-    
+
     import pandas as pd
     from app.strategies.indicators import supertrend
     from app.strategies.supertrend_pro import SuperTrendPro
     from app.strategies.base import StrategyConfig
-    
+
     try:
         parsed_params = json.loads(params)
     except Exception:
         parsed_params = {}
-        
+
     df = pd.DataFrame(candles)
     for col in ["open", "high", "low", "close", "volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-            
+
     config = StrategyConfig(name="Dynamic Execution", instruments=[instrument_key], timeframe=timeframe)
-    
+
     if strategy_class == "SuperTrendPro":
         strategy = SuperTrendPro(config)
         strategy.params.update(parsed_params)
-        metrics = strategy.get_dashboard_state(df)
-        
+
+        htf_df = None
+        if strategy.params.get("use_htf_filter"):
+            htf_tf = strategy.params.get("htf_timeframe", "1D")
+            tf_map = {
+                "1D": "day", "D": "day", "W": "week", "1W": "week",
+                "1H": "60minute", "60m": "60minute", "60minute": "60minute",
+                "30m": "30minute", "30minute": "30minute",
+                "15m": "15minute", "15minute": "15minute",
+                "5m": "5minute", "5minute": "5minute",
+                "1m": "1minute", "1minute": "1minute",
+            }
+            htf_interval = tf_map.get(str(htf_tf), "day")
+            htf_candles = svc.get_historical_candles(instrument_key, htf_interval, from_date, to_date)
+            if htf_candles:
+                htf_df = pd.DataFrame(htf_candles)
+                for col in ["open", "high", "low", "close", "volume"]:
+                    if col in htf_df.columns:
+                        htf_df[col] = pd.to_numeric(htf_df[col], errors="coerce")
+
+        metrics = strategy.get_dashboard_state(df, htf_df=htf_df)
+
         p_atr = strategy.params.get("atr_period", 10)
         p_mult = strategy.params.get("atr_multiplier", 3.0)
         st_df = supertrend(df, period=p_atr, multiplier=p_mult, use_rma=True)
         trend = st_df["trend"]
-        
+
         # Only evaluate full strategy logic at points where the primary trend flips!
         # This keeps the API response blazing fast (O(1) in the number of flips).
         import numpy as np
         flips = (trend != trend.shift(1)) & (trend.shift(1).notna())
         flip_indices = np.where(flips)[0]
-        
+
         valid_signals = {}
         for idx in flip_indices:
             if idx < 100: continue
             window = df.iloc[:idx+1]
             try:
-                sig = strategy.on_candle(window, htf_df=None)
+                sig = strategy.on_candle(window, htf_df=htf_df)
                 if sig:
                     valid_signals[df.iloc[idx]["time"]] = sig.action.value
             except Exception:
                 pass
-        
+
         overlay = []
         for i in range(len(df)):
             c = df.iloc[i]
@@ -231,27 +251,27 @@ async def get_strategy_overlay(
                 "lower": None if pd.isna(s["lower_band"]) else float(s["lower_band"]),
                 "signal": valid_signals.get(c["time"], None)
             })
-            
+
         return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
-        
+
     elif strategy_class == "ScalpPro":
         from app.strategies.scalp_pro import ScalpPro
         from app.strategies.indicators import ema
         import numpy as np
-        
+
         strategy = ScalpPro(config)
         strategy.params.update(parsed_params)
         metrics = strategy.get_dashboard_state(df)
-        
+
         fast_line = ema(df["close"], strategy.params.get("fast_ema", 9))
         slow_line = ema(df["close"], strategy.params.get("slow_ema", 21))
-        
+
         trend = np.where(fast_line > slow_line, 1, -1)
         trend = pd.Series(trend, index=df.index)
-        
+
         flips = (trend != trend.shift(1)) & (trend.shift(1).notna())
         flip_indices = np.where(flips)[0]
-        
+
         valid_signals = {}
         for idx in flip_indices:
             if idx < 100: continue
@@ -262,7 +282,7 @@ async def get_strategy_overlay(
                     valid_signals[df.iloc[idx]["time"]] = sig.action.value
             except Exception:
                 pass
-                
+
         overlay = []
         for i in range(len(df)):
             c = df.iloc[i]
@@ -274,7 +294,7 @@ async def get_strategy_overlay(
                 "lower": None,
                 "signal": valid_signals.get(c["time"], None)
             })
-            
+
         return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
 
     else:
@@ -295,11 +315,11 @@ async def get_detailed_option_chain(
             instrument_key = "NSE_INDEX|Nifty 50"
         elif "bank nifty" in instrument_key.lower() or "nifty bank" in instrument_key.lower():
             instrument_key = "NSE_INDEX|Nifty Bank"
-            
+
         svc = _get_market_service()
         result = await svc.get_detailed_option_chain(instrument_key, expiry_date)
         return result
-        
+
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"Option chain route failed: {e}")

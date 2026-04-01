@@ -110,3 +110,36 @@ def test_indicators_supertrend():
     assert "trend" in result.columns
     assert len(result) == n
     assert set(result["trend"].dropna().unique()).issubset({1, -1})
+
+
+def test_supertrend_dashboard_state_with_dual_st_enabled():
+    """Regression: get_dashboard_state must not raise DataFrame truthiness errors."""
+    import pandas as pd
+    import numpy as np
+    from app.strategies.supertrend_pro import SuperTrendPro
+    from app.strategies.base import StrategyConfig
+
+    np.random.seed(7)
+    n = 220
+    close = 22000 + np.cumsum(np.random.randn(n) * 8)
+    high = close + np.random.rand(n) * 12
+    low = close - np.random.rand(n) * 12
+    volume = np.random.randint(1000, 5000, size=n)
+
+    df = pd.DataFrame({
+        "time": np.arange(n),
+        "open": close,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": volume,
+    })
+
+    cfg = StrategyConfig(name="ST Regression", instruments=["NSE_INDEX|Nifty 50"], timeframe="1minute")
+    strategy = SuperTrendPro(cfg)
+    strategy.params["use_dual_st"] = True
+
+    state = strategy.get_dashboard_state(df)
+    assert isinstance(state, dict)
+    assert "hard_gates" in state
+    assert state["hard_gates"]["dual_st"] in {"AGREE", "DISAGREE"}
