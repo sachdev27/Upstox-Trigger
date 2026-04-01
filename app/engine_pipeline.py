@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from app.config import get_settings
 from app.notifications.manager import get_notification_manager
 from app.database.connection import get_session, TradeLog
+from app.orders.models import TransactionType
 
 if TYPE_CHECKING:
     from app.engine import AutomationEngine
@@ -50,102 +51,281 @@ class ATMResolverProcessor(SignalProcessor):
         if ("INDEX" in signal.instrument_key or signal.instrument_key in ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]) and engine._market_service:
             try:
                 logger.info(f"🔍 Resolving ATM option for {signal.instrument_key} @ {signal.price}")
-                # Use the service directly
+                p = config.params or {}
+                expiry_mode = str(p.get("option_expiry_mode", "current")).lower()
+                moneyness_steps = int(p.get("option_moneyness_steps", 0) or 0)
+                buy_only = bool(p.get("option_buy_only", True))
+
+                # Initial fetch gets spot + available expiries.
                 chain_data = await engine._market_service.get_detailed_option_chain(signal.instrument_key)
                 if chain_data["status"] == "success" and chain_data["chain"]:
-                    matrix = chain_data["chain"]
-                    closest = min(matrix, key=lambda x: abs(x["strike_price"] - signal.price))
+                    available_expiries = chain_data.get("available_expiries", [])
+                    selected_expiry = chain_data.get("expiry_date")
+                    if available_expiries:
+                        if expiry_mode == "next" and len(available_expiries) > 1:
+                            selected_expiry = available_expiries[1]
+                        else:
+                            selected_expiry = available_expiries[0]
 
-                    # Logic for CE/PE
-                    side = "ce" if signal.action.value == "BUY" else "pe"
-                    opt = closest.get(side)
+                    # Refetch for selected expiry (if different from default response)
+                    if selected_expiry and selected_expiry != chain_data.get("expiry_date"):
+                        refetch = await engine._market_service.get_detailed_option_chain(
+                            signal.instrument_key,
+                            expiry_date=selected_expiry,
+                        )
+                        if refetch.get("status") == "success" and refetch.get("chain"):
+                            chain_data = refetch
+
+                    matrix = chain_data["chain"]
+                    spot = float(chain_data.get("spot_price") or signal.price or 0.0)
+                    atm_row = min(matrix, key=lambda x: abs(float(x["strike_price"]) - spot))
+
+                    # Infer strike step from chain (e.g., 50 for Nifty, 100 for BankNifty)
+                    strikes = sorted({float(r["strike_price"]) for r in matrix})
+                    step_size = min(
+                        [b - a for a, b in zip(strikes, strikes[1:]) if (b - a) > 0],
+                        default=50.0,
+                    )
+
+                    # BUY signal => CE; SELL signal => PE (directional long options)
+                    opt_side = "ce" if signal.action.value == "BUY" else "pe"
+                    target_strike = float(atm_row["strike_price"])
+                    if moneyness_steps > 0:
+                        if opt_side == "ce":
+                            target_strike += moneyness_steps * step_size
+                        else:
+                            target_strike -= moneyness_steps * step_size
+
+                    # Pick closest row around target strike that has desired side contract
+                    candidate_rows = [r for r in matrix if r.get(opt_side)]
+                    if candidate_rows:
+                        chosen_row = min(candidate_rows, key=lambda r: abs(float(r["strike_price"]) - target_strike))
+                    else:
+                        chosen_row = atm_row
+
+                    opt = chosen_row.get(opt_side)
                     if opt:
                         # Store original key and update current for execution
                         signal.metadata["underlying"] = signal.instrument_key
+                        signal.metadata["option_side"] = opt_side.upper()
+                        signal.metadata["expiry_date"] = chain_data.get("expiry_date")
+                        signal.metadata["strike_price"] = float(chosen_row.get("strike_price"))
+                        signal.metadata["direction_signal"] = signal.action.value
                         signal.instrument_key = opt["instrument_key"]
-                        logger.info(f"🎯 Resolved ATM {side.upper()}: {signal.instrument_key} (Strike: {closest['strike_price']})")
+
+                        # Enforce long-options model when configured
+                        if buy_only:
+                            signal.action = TransactionType.BUY
+
+                        logger.info(
+                            f"🎯 Resolved {opt_side.upper()} {signal.instrument_key} "
+                            f"(Expiry: {chain_data.get('expiry_date')}, Strike: {chosen_row['strike_price']})"
+                        )
                     else:
-                        logger.warning(f"No {side.upper()} available for ATM strike {closest['strike_price']}")
+                        logger.warning(f"No {opt_side.upper()} contract available for resolved strike")
             except Exception as e:
                 logger.error(f"Option resolution failed: {e}")
         return True
 
 class ExecutionProcessor(SignalProcessor):
-    """Handles paper or live order execution and database logging."""
-    async def process(self, signal: 'TradeSignal', config: 'StrategyConfig', engine: 'AutomationEngine') -> bool:
-        is_paper = engine.paper_trading or config.paper_trading
-        trade_instrument = signal.instrument_key
+    """
+    Handles paper or live order execution and database logging.
+    Supports:
+      - Single-lot execution (swarm_count = 1)
+      - Swarm execution: N parallel lots per signal, each with its own TP level
+      - Partial booking metadata extracted from signal and stored in managed_positions
+    """
+
+    def _build_position_record(
+        self,
+        signal: 'TradeSignal',
+        config: 'StrategyConfig',
+        exec_qty: int,
+        is_paper: bool,
+        lot_idx: int = 0,
+        swarm_count: int = 1,
+        tp_override: float | None = None,
+    ) -> dict:
+        """Build the managed_positions dict entry for one lot."""
+        meta = signal.metadata or {}
+        entry = float(signal.price or 0.0)
+        sl    = float(signal.stop_loss or 0.0)
+        tp    = tp_override if tp_override is not None else float(signal.take_profit or 0.0)
+        trail_distance = abs(entry - sl)
+
+        # Retrieve partial-booking levels from signal metadata (populated by strategy)
+        tp1 = float(meta.get("tp1") or 0.0)
+        tp2 = float(meta.get("tp2") or 0.0)
+        tp3 = float(meta.get("tp3") or tp)
+
+        return {
+            "entry_price":        entry,
+            "stop_loss":          sl,
+            "take_profit":        tp3 if swarm_count == 1 else tp,  # single lot always goes to tp3
+            "quantity":           exec_qty,
+            "quantity_remaining": exec_qty,
+            "is_paper":           is_paper,
+            "highest_price":      entry,
+            "trailing_enabled":   bool((config.params or {}).get("enable_trailing_sl", False)),
+            "trail_distance":     trail_distance,
+            "strategy_name":      signal.strategy_name or config.name,
+            # Partial booking levels (only relevant for swarm_count == 1 with partial_tp)
+            "partial_tp_enabled": bool(meta.get("partial_tp_enabled", False)) and swarm_count == 1,
+            "tp1":                tp1,
+            "tp2":                tp2,
+            "tp1_book_pct":       int(meta.get("tp1_book_pct", 40)),
+            "tp2_book_pct":       int(meta.get("tp2_book_pct", 40)),
+            "tp1_booked":         False,
+            "tp2_booked":         False,
+            "partial_pnl":        0.0,
+            # Swarm metadata
+            "swarm_idx":          lot_idx,
+            "swarm_total":        swarm_count,
+        }
+
+    async def _place_one_lot(
+        self,
+        instrument_key: str,
+        signal: 'TradeSignal',
+        config: 'StrategyConfig',
+        engine: 'AutomationEngine',
+        exec_qty: int,
+        is_paper: bool,
+        pos_key: str,
+        lot_idx: int,
+        swarm_count: int,
+        meta: dict,
+        tp_override: float | None,
+    ):
+        """Execute a single lot (paper or live) and register in _managed_positions."""
+        tp_levels = [
+            float(meta.get("tp1") or signal.take_profit or 0.0),
+            float(meta.get("tp2") or signal.take_profit or 0.0),
+            float(meta.get("tp3") or signal.take_profit or 0.0),
+        ]
+        # Each swarm lot gets a progressively further TP
+        swarm_tp = tp_levels[min(lot_idx, len(tp_levels) - 1)] if swarm_count > 1 else None
 
         if is_paper:
-            logger.info(f"📝 [PAPER] {signal.action.value} {trade_instrument} @ {signal.price:.2f}")
-            engine._trades_today.append({
-                "timestamp": datetime.now(IST).isoformat(),
-                "type": "paper",
-                "strategy": signal.strategy_name or config.name,
-                "instrument": trade_instrument,
-                "underlying": signal.metadata.get("underlying", signal.instrument_key),
-                "action": signal.action.value,
-                "price": signal.price,
-                "stop_loss": signal.stop_loss,
-                "take_profit": signal.take_profit,
-                "score": signal.confidence_score,
-            })
-
-            # Paper P&L tracking so the daily-loss risk guard has real data.
-            if signal.action.value == "BUY":
-                engine._paper_positions[trade_instrument] = signal.price
-            elif signal.action.value == "SELL":
-                entry = engine._paper_positions.pop(trade_instrument, None)
-                if entry is not None:
-                    pnl = (signal.price - entry) * max(signal.quantity, 1)
-                    engine._daily_pnl += pnl
-                    logger.info(
-                        f"📊 Paper P&L: ₹{pnl:.2f} on {trade_instrument} "
-                        f"(daily total: ₹{engine._daily_pnl:.2f})"
-                    )
-
-            # DB Log
-            try:
-                session = get_session()
-                try:
-                    log = TradeLog(
-                        timestamp=datetime.now(IST),
-                        strategy_name=signal.strategy_name or config.name,
-                        instrument_key=trade_instrument,
-                        action=signal.action.value,
-                        quantity=signal.quantity,
-                        price=signal.price,
-                        stop_loss=signal.stop_loss,
-                        take_profit=signal.take_profit,
-                        status="paper",
-                        metadata_json={"underlying": signal.metadata.get("underlying", signal.instrument_key), **(signal.metadata or {})}
-                    )
-                    session.add(log)
-                    session.commit()
-                except Exception as e:
-                    logger.error(f"DB log failed: {e}")
-                    session.rollback()
-                finally:
-                    session.close()
-            except Exception as e:
-                logger.error(f"DB session creation failed: {e}")
+            logger.info(
+                f"📝 [PAPER LOT {lot_idx+1}/{swarm_count}] "
+                f"{signal.action.value} {instrument_key} @ {signal.price:.2f} "
+                f"TP={swarm_tp or signal.take_profit:.2f}"
+            )
         else:
-            # Live execution logic
             try:
-                result = engine._order_service.place_signal(signal)
-                logger.info(f"💰 [LIVE] Order placed: {result}")
-                engine._trades_today.append({
-                    "timestamp": datetime.now(IST).isoformat(),
-                    "type": "live",
-                    "strategy": signal.strategy_name or config.name,
-                    "instrument": trade_instrument,
-                    "action": signal.action.value,
-                    "price": signal.price,
-                    "order_result": result,
-                })
+                from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
+                result = await asyncio.to_thread(
+                    engine._order_service.place_signal, signal
+                )
+                logger.info(f"💰 [LIVE LOT {lot_idx+1}/{swarm_count}] Order placed: {result}")
             except Exception as e:
-                logger.error(f"❌ Order execution failed: {e}")
-                return False
+                logger.error(f"❌ Swarm lot {lot_idx+1} order failed: {e}")
+                return
+
+        # Register position
+        engine._managed_positions[pos_key] = self._build_position_record(
+            signal, config, exec_qty, is_paper,
+            lot_idx=lot_idx, swarm_count=swarm_count, tp_override=swarm_tp,
+        )
+
+        # DB log
+        try:
+            session = get_session()
+            try:
+                log = TradeLog(
+                    timestamp=datetime.now(IST),
+                    strategy_name=signal.strategy_name or config.name,
+                    instrument_key=instrument_key,
+                    action=signal.action.value,
+                    quantity=exec_qty,
+                    price=signal.price,
+                    stop_loss=signal.stop_loss,
+                    take_profit=swarm_tp or signal.take_profit,
+                    status="paper" if is_paper else "live",
+                    metadata_json={
+                        "underlying": meta.get("underlying", instrument_key),
+                        "swarm_lot": lot_idx + 1,
+                        "swarm_total": swarm_count,
+                        **(signal.metadata or {}),
+                    }
+                )
+                session.add(log)
+                session.commit()
+            except Exception as e:
+                logger.error(f"DB log failed (lot {lot_idx+1}): {e}")
+                session.rollback()
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"DB session failed: {e}")
+
+    async def process(self, signal: 'TradeSignal', config: 'StrategyConfig', engine: 'AutomationEngine') -> bool:
+        is_paper       = engine.paper_trading or config.paper_trading
+        trade_instrument = signal.instrument_key
+        meta           = signal.metadata or {}
+
+        # Do not stack duplicate entries on an already managed open position.
+        if signal.action.value == "BUY" and trade_instrument in engine._managed_positions:
+            logger.info(f"⏭️ Entry skipped: {trade_instrument} already has an open managed position")
+            return False
+
+        exec_qty    = max(int(signal.quantity or 0), 1)
+        swarm_count = max(1, int(meta.get("swarm_count", 1)))
+
+        if signal.action.value == "BUY":
+            if swarm_count > 1:
+                # ── Swarm: fire N lots concurrently, keys = instrument_key#1..#N ──
+                # Remove any existing lots first (safety)
+                for i in range(1, swarm_count + 1):
+                    engine._managed_positions.pop(f"{trade_instrument}#{i}", None)
+
+                lot_tasks = [
+                    self._place_one_lot(
+                        trade_instrument, signal, config, engine,
+                        exec_qty, is_paper,
+                        pos_key=f"{trade_instrument}#{i+1}",
+                        lot_idx=i, swarm_count=swarm_count,
+                        meta=meta, tp_override=None,
+                    )
+                    for i in range(swarm_count)
+                ]
+                await asyncio.gather(*lot_tasks)
+            else:
+                # ── Single lot with optional partial-booking ─────────────────────
+                engine._managed_positions.pop(trade_instrument, None)
+                await self._place_one_lot(
+                    trade_instrument, signal, config, engine,
+                    exec_qty, is_paper,
+                    pos_key=trade_instrument,
+                    lot_idx=0, swarm_count=1,
+                    meta=meta, tp_override=None,
+                )
+
+            engine._paper_positions[trade_instrument] = signal.price
+
+        elif signal.action.value == "SELL":
+            entry = engine._paper_positions.pop(trade_instrument, None)
+            if entry is not None and is_paper:
+                pnl = (signal.price - entry) * exec_qty
+                engine._daily_pnl += pnl
+                logger.info(
+                    f"📊 Paper P&L: ₹{pnl:.2f} on {trade_instrument} "
+                    f"(daily total: ₹{engine._daily_pnl:.2f})"
+                )
+
+        engine._trades_today.append({
+            "timestamp":  datetime.now(IST).isoformat(),
+            "type":       "paper" if is_paper else "live",
+            "strategy":   signal.strategy_name or config.name,
+            "instrument": trade_instrument,
+            "action":     signal.action.value,
+            "price":      signal.price,
+            "stop_loss":  signal.stop_loss,
+            "take_profit": signal.take_profit,
+            "score":      signal.confidence_score,
+            "swarm_count": swarm_count,
+        })
         return True
 
 class AlerterProcessor(SignalProcessor):

@@ -42,8 +42,10 @@ class AuthService:
 
         # Live Mode logic (with refresh)
         if self._is_token_expired(self.settings.ACCESS_TOKEN):
-            logger.info("Live access token expired — refreshing...")
-            self._refresh_token(use_sandbox=False)
+            logger.info("Live access token appears expired — attempting refresh...")
+            refreshed = self._refresh_token(use_sandbox=False)
+            if not refreshed and self.settings.ACCESS_TOKEN:
+                logger.info("Proceeding with existing live access token.")
 
         config = upstox_client.Configuration()
         config.access_token = self.settings.ACCESS_TOKEN
@@ -77,7 +79,7 @@ class AuthService:
                 self.settings.SANDBOX_ACCESS_TOKEN = token
             else:
                 self.settings.ACCESS_TOKEN = token
-            
+
             # Mark code as used immediately to prevent redundant refresh attempts
             self.settings.save_to_db("AUTH_CODE", "USED", category="API", is_secret=True)
             self.settings.AUTH_CODE = "USED"
@@ -90,6 +92,10 @@ class AuthService:
         """Check if a JWT access token is expired."""
         if not token or token == "None":
             return True
+        # Upstox token formats may vary by flow/version; if token is not JWT-like,
+        # skip local-expiry heuristic and let API calls validate it.
+        if token.count(".") != 2:
+            return False
         try:
             decoded = api_jwt.decode(
                 jwt=token, algorithms=["HS256"],
@@ -100,22 +106,22 @@ class AuthService:
             )
             return exp_dt < datetime.now(timezone.utc)
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, KeyError):
-            return True
+            return False
 
-    def _refresh_token(self, use_sandbox: bool = False):
+    def _refresh_token(self, use_sandbox: bool = False) -> bool:
         """
         Exchange the stored auth code for a new access token.
         NOTE: Auth codes are single-use. We should only attempt this if the code hasn't been used.
         """
         if not self.settings.AUTH_CODE or self.settings.AUTH_CODE == "USED":
-            logger.warning("Auth code missing or already used. Manual re-authorization required.")
-            return
+            logger.info("Auth code missing or already used; skipping refresh attempt.")
+            return False
 
         token = self._exchange_code_for_token(self.settings.AUTH_CODE, use_sandbox=use_sandbox)
         if token:
             key = "SANDBOX_ACCESS_TOKEN" if use_sandbox else "ACCESS_TOKEN"
             self.settings.save_to_db(key, token, category="API", is_secret=True)
-            
+
             # Mark code as used to prevent infinite loop on failure
             self.settings.save_to_db("AUTH_CODE", "USED", category="API", is_secret=True)
             self.settings.AUTH_CODE = "USED"
@@ -125,12 +131,14 @@ class AuthService:
             else:
                 self.settings.ACCESS_TOKEN = token
             logger.info("Successfully swapped single-use code for access token.")
+            return True
         else:
             # If exchange failed, the code might still be invalid/used
             logger.error(
                 "Failed to exchange auth code. Visit the auth URL to re-authorize:\n"
                 f"  {self.get_auth_url()}"
             )
+            return False
 
     def _exchange_code_for_token(self, auth_code: str, use_sandbox: bool = False) -> str | None:
         """Call Upstox token endpoint to exchange auth code for access token."""
@@ -141,7 +149,7 @@ class AuthService:
             )
             client_id = self.settings.SANDBOX_API_KEY if use_sandbox else self.settings.API_KEY
             client_secret = self.settings.SANDBOX_API_SECRET if use_sandbox else self.settings.API_SECRET
-            
+
             response = api_instance.token(
                 self.settings.API_VERSION,
                 code=auth_code,

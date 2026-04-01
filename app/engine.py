@@ -76,6 +76,62 @@ logger = logging.getLogger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# ── Nifty 100 + 500 Instrument Keys ────────────────────────────
+# Sourced from ind_nifty500list.csv ↔ instrument_list.csv cross-reference.
+# These power the NIFTY100 / NIFTY500 watchlist keywords in run_cycle().
+
+NIFTY100_KEYS: list[str] = [
+    "NSE_EQ|INE769A01020","NSE_EQ|INE117A01022","NSE_EQ|INE358A01014",
+    "NSE_EQ|INE674K01013","NSE_EQ|INE647O01011","NSE_EQ|INE404A01024",
+    "NSE_EQ|INE012A01025","NSE_EQ|INE423A01024","NSE_EQ|INE364U01010",
+    "NSE_EQ|INE742F01042","NSE_EQ|INE079A01024","NSE_EQ|INE437A01024",
+    "NSE_EQ|INE021A01026","NSE_EQ|INE006I01046","NSE_EQ|INE949L01017",
+    "NSE_EQ|INE238A01034","NSE_EQ|INE917I01010","NSE_EQ|INE918I01026",
+    "NSE_EQ|INE397D01024","NSE_EQ|INE376G01013","NSE_EQ|INE216A01030",
+    "NSE_EQ|INE059A01026","NSE_EQ|INE522F01014","NSE_EQ|INE259A01022",
+    "NSE_EQ|INE016A01026","NSE_EQ|INE361B01024","NSE_EQ|INE935N01020",
+    "NSE_EQ|INE066A01021","NSE_EQ|INE102D01028","NSE_EQ|INE047A01021",
+    "NSE_EQ|INE176B01034","NSE_EQ|INE860A01027","NSE_EQ|INE040A01034",
+    "NSE_EQ|INE795G01014","NSE_EQ|INE158A01026","NSE_EQ|INE038A01020",
+    "NSE_EQ|INE030A01027","NSE_EQ|INE090A01021","NSE_EQ|INE095A01012",
+    "NSE_EQ|INE335Y01020","NSE_EQ|INE154A01025","NSE_EQ|INE019A01038",
+    "NSE_EQ|INE018A01030","NSE_EQ|INE326A01037","NSE_EQ|INE101A01026",
+    "NSE_EQ|INE196A01026","NSE_EQ|INE585B01010","NSE_EQ|INE414G01012",
+    "NSE_EQ|INE239A01024","NSE_EQ|INE733E01010","NSE_EQ|INE213A01029",
+    "NSE_EQ|INE761H01022","NSE_EQ|INE318A01026","NSE_EQ|INE455K01017",
+    "NSE_EQ|INE752E01010","NSE_EQ|INE002A01018","NSE_EQ|INE123W01016",
+    "NSE_EQ|INE062A01020","NSE_EQ|INE070A01015","NSE_EQ|INE044A01036",
+    "NSE_EQ|INE192A01025","NSE_EQ|INE081A01020","NSE_EQ|INE467B01029",
+    "NSE_EQ|INE669C01036","NSE_EQ|INE280A01028","NSE_EQ|INE685A01028",
+    "NSE_EQ|INE481G01011","NSE_EQ|INE205A01025","NSE_EQ|INE075A01022",
+]
+
+NIFTY500_KEYS: list[str] = []   # populated lazily from CSV on first access
+
+def _load_nifty500_keys() -> list[str]:
+    """Read Nifty-500 instrument keys from CSV files (lazy, called once)."""
+    import csv as _csv
+    from pathlib import Path as _Path
+    root = _Path(__file__).parent.parent
+    n500_csv = root / "ind_nifty500list.csv"
+    inst_csv = root / "instrument_list.csv"
+    if not n500_csv.exists() or not inst_csv.exists():
+        logger.warning("Nifty-500 CSV files not found; NIFTY500 watchlist will be empty.")
+        return []
+    isin_map: dict[str, str] = {}
+    with open(n500_csv) as f:
+        for row in _csv.DictReader(f):
+            isin_map[row["ISIN Code"]] = row["Symbol"]
+    keys = []
+    with open(inst_csv) as f:
+        for row in _csv.DictReader(f):
+            k = row.get("instrument_key", "")
+            isin = k.split("|")[-1] if "|" in k else ""
+            if isin in isin_map and row.get("exchange") == "NSE_EQ":
+                keys.append(k)
+    keys.sort()
+    return keys
+
 # Strategy class registry
 STRATEGY_CLASSES = {
     "SuperTrendPro": SuperTrendPro,
@@ -114,6 +170,7 @@ class AutomationEngine:
         self._daily_pnl: float = 0.0
         self._paper_positions: dict[str, float] = {}  # instrument_key -> entry_price (paper trading only)
         self._last_evaluated_bar: dict[tuple[str, str, str], str] = {}
+        self._managed_positions: dict[str, dict] = {}  # instrument_key -> autonomous exit state
         self._is_initialized: bool = False
         self._is_running: bool = False
         self.auto_mode: bool = False
@@ -246,14 +303,15 @@ class AutomationEngine:
 
     # ── Main Cycle ──────────────────────────────────────────────
 
-    async def _process_instrument_tf(self, strategy: BaseStrategy, tf_config: StrategyConfig, target: str):
-        """Helper to evaluate a single instrument and timeframe configuration."""
+    async def _process_instrument_tf(self, strategy: BaseStrategy, tf_config: StrategyConfig, target: str) -> tuple[TradeSignal, StrategyConfig] | None:
+        """Evaluate one instrument/timeframe and return candidate signal for ranking."""
         try:
             signal = await self._evaluate_instrument(strategy, tf_config, target)
             if signal:
-                await self._handle_signal(signal, tf_config)
+                return signal, tf_config
         except Exception as e:
             logger.error(f"Error evaluating {target} ({tf_config.timeframe}) with {tf_config.name}: {e}")
+        return None
 
     async def run_cycle(self):
         """
@@ -266,6 +324,10 @@ class AutomationEngine:
 
         if not self._active_strategies:
             return
+
+        # Autonomous position supervision on every cycle tick.
+        if self._managed_positions:
+            await self._manage_open_positions()
 
         now = datetime.now(IST)
         logger.info(f"🔄 Running cycle at {now.strftime('%H:%M:%S')}")
@@ -280,6 +342,13 @@ class AutomationEngine:
                 tf_overrides = {}  # instrument_key -> [timeframes]
                 if instrument == "NIFTY200":
                     target_instruments = list(NIFTY200_KEYS)
+                elif instrument == "NIFTY100":
+                    target_instruments = list(NIFTY100_KEYS)
+                elif instrument == "NIFTY500":
+                    global NIFTY500_KEYS
+                    if not NIFTY500_KEYS:
+                        NIFTY500_KEYS = _load_nifty500_keys()
+                    target_instruments = list(NIFTY500_KEYS)
                 elif instrument == "CUSTOM_WATCHLIST":
                     from app.database.connection import get_session, Watchlist
                     session = get_session()
@@ -314,8 +383,272 @@ class AutomationEngine:
                         tasks.append(self._process_instrument_tf(strategy, tf_config, target))
 
                 if tasks:
-                    # Run all evaluations for this strategy/instrument group concurrently
-                    await asyncio.gather(*tasks)
+                    # Run all evaluations for this strategy/instrument group concurrently.
+                    candidates = [c for c in await asyncio.gather(*tasks) if c is not None]
+                    if not candidates:
+                        continue
+
+                    # Keep the highest-scored candidate per instrument to avoid overtrading duplicates.
+                    by_instrument: dict[str, tuple[TradeSignal, StrategyConfig]] = {}
+                    for signal, tf_config in candidates:
+                        existing = by_instrument.get(signal.instrument_key)
+                        if (existing is None) or (signal.confidence_score > existing[0].confidence_score):
+                            by_instrument[signal.instrument_key] = (signal, tf_config)
+
+                    unique_candidates = list(by_instrument.values())
+
+                    params = config.params or {}
+                    min_score = int(params.get("min_confidence_score", 60))
+                    top_n = max(1, int(params.get("top_n_signals_per_cycle", 2)))
+
+                    eligible = [c for c in unique_candidates if int(c[0].confidence_score or 0) >= min_score]
+                    eligible.sort(key=lambda c: int(c[0].confidence_score or 0), reverse=True)
+                    selected = eligible[:top_n]
+
+                    skipped = len(unique_candidates) - len(selected)
+                    if skipped > 0:
+                        logger.info(
+                            f"⏭️ Selectivity filter kept {len(selected)}/{len(unique_candidates)} signals "
+                            f"(min_score={min_score}, top_n={top_n})"
+                        )
+
+                    for signal, tf_config in selected:
+                        await self._handle_signal(signal, tf_config)
+
+    async def _manage_open_positions(self):
+        """
+        Tick-level position supervisor.  Runs every 15s cycle.
+
+        Supports:
+        - Simple full-exit on TP / SL hit
+        - Partial booking (TP1 → book tp1_pct%, move SL to breakeven;
+                           TP2 → book tp2_pct%;
+                           TP3 / trail → exit remainder)
+        - Trailing SL (highest_price tracking)
+        - Swarm positions (multiple lots sharing same position key prefix)
+        """
+        if not self._market_service:
+            return
+
+        for instrument_key, pos in list(self._managed_positions.items()):
+            try:
+                ltp = await asyncio.to_thread(self._market_service.get_ltp, instrument_key)
+                if ltp is None:
+                    continue
+                ltp = float(ltp)
+
+                entry           = float(pos.get("entry_price", 0.0))
+                stop_loss       = float(pos.get("stop_loss") or 0.0)
+                take_profit     = float(pos.get("take_profit") or 0.0)
+                qty_remaining   = int(pos.get("quantity_remaining", pos.get("quantity") or 1))
+                qty_original    = int(pos.get("quantity") or 1)
+                is_paper        = bool(pos.get("is_paper", True))
+                strat_name      = pos.get("strategy_name", "")
+
+                # ── Trailing SL ──────────────────────────────────
+                highest = float(pos.get("highest_price") or entry)
+                if ltp > highest:
+                    highest = ltp
+                    pos["highest_price"] = highest
+
+                trailing_enabled = bool(pos.get("trailing_enabled", False))
+                trail_distance   = float(pos.get("trail_distance") or 0.0)
+                effective_sl     = stop_loss
+                if trailing_enabled and trail_distance > 0 and highest > entry:
+                    tr_sl = highest - trail_distance
+                    effective_sl = max(effective_sl, tr_sl)
+                    pos["effective_sl"] = effective_sl   # persist updated trail
+
+                # ── Partial Booking Levels ───────────────────────
+                partial_enabled = bool(pos.get("partial_tp_enabled", False))
+                tp1  = float(pos.get("tp1") or 0.0)
+                tp2  = float(pos.get("tp2") or 0.0)
+                tp1_pct = int(pos.get("tp1_book_pct", 40))
+                tp2_pct = int(pos.get("tp2_book_pct", 40))
+                tp1_booked = bool(pos.get("tp1_booked", False))
+                tp2_booked = bool(pos.get("tp2_booked", False))
+
+                # ── Check TP1 partial exit ───────────────────────
+                if partial_enabled and tp1 > 0 and not tp1_booked and ltp >= tp1:
+                    book_qty = max(1, round(qty_original * tp1_pct / 100))
+                    book_qty = min(book_qty, qty_remaining)
+                    if book_qty > 0:
+                        await self._execute_partial_exit(
+                            instrument_key, pos, ltp, book_qty, "TP1", is_paper
+                        )
+                        qty_remaining -= book_qty
+                        pos["quantity_remaining"] = qty_remaining
+                        pos["tp1_booked"] = True
+                        # Move SL to breakeven after TP1
+                        pos["stop_loss"] = entry
+                        pos["effective_sl"] = entry
+                        effective_sl = entry
+                        logger.info(f"📈 TP1 partial exit: sold {book_qty} of {instrument_key} @ {ltp:.2f}")
+
+                # ── Check TP2 partial exit ───────────────────────
+                if partial_enabled and tp2 > 0 and tp1_booked and not tp2_booked and ltp >= tp2:
+                    book_qty = max(1, round(qty_original * tp2_pct / 100))
+                    book_qty = min(book_qty, qty_remaining)
+                    if book_qty > 0:
+                        await self._execute_partial_exit(
+                            instrument_key, pos, ltp, book_qty, "TP2", is_paper
+                        )
+                        qty_remaining -= book_qty
+                        pos["quantity_remaining"] = qty_remaining
+                        pos["tp2_booked"] = True
+                        logger.info(f"📈 TP2 partial exit: sold {book_qty} of {instrument_key} @ {ltp:.2f}")
+
+                # ── Check full exit (TP / SL / trail) ───────────
+                if qty_remaining <= 0:
+                    # All lots booked via partial exits — clean up
+                    self._managed_positions.pop(instrument_key, None)
+                    self._close_active_signal_record(instrument_key)
+                    continue
+
+                hit_tp = take_profit > 0 and ltp >= take_profit
+                hit_sl = effective_sl > 0 and ltp <= effective_sl
+
+                if not (hit_tp or hit_sl):
+                    continue
+
+                exit_reason = "TP" if hit_tp else "SL/TRAIL"
+                logger.info(
+                    f"🛎️ Exit ({exit_reason}) {instrument_key}: "
+                    f"LTP={ltp:.2f} qty={qty_remaining}"
+                )
+
+                # Live order
+                if not is_paper and self._order_service:
+                    from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
+                    await asyncio.to_thread(
+                        self._order_service.place_order,
+                        OrderRequest(
+                            instrument_token=instrument_key,
+                            quantity=max(1, qty_remaining),
+                            transaction_type=TransactionType.SELL,
+                            order_type=OrderType.MARKET,
+                            product=ProductType.INTRADAY,
+                            tag=f"auto-exit-{strat_name}",
+                        )
+                    )
+
+                pnl = (ltp - entry) * max(1, qty_remaining)
+                # Add PnL from any partial exits already recorded
+                pnl += float(pos.get("partial_pnl", 0.0))
+                self._daily_pnl += (ltp - entry) * max(1, qty_remaining)
+                self._trades_today.append({
+                    "timestamp": datetime.now(IST).isoformat(),
+                    "type": "paper" if is_paper else "live",
+                    "strategy": strat_name,
+                    "instrument": instrument_key,
+                    "action": "SELL",
+                    "price": ltp,
+                    "reason": exit_reason,
+                    "pnl": pnl,
+                })
+
+                self._close_active_signal_record(instrument_key)
+
+                if self.broadcast_callback:
+                    asyncio.create_task(self.broadcast_callback({
+                        "type": "trade_executed",
+                        "data": {
+                            "type": "paper" if is_paper else "live",
+                            "strategy": strat_name,
+                            "instrument": instrument_key,
+                            "action": "SELL",
+                            "price": ltp,
+                            "exit_reason": exit_reason,
+                            "pnl": pnl,
+                        }
+                    }))
+
+                self._managed_positions.pop(instrument_key, None)
+            except Exception as e:
+                logger.error(f"Error managing position {instrument_key}: {e}")
+
+    async def _execute_partial_exit(
+        self,
+        instrument_key: str,
+        pos: dict,
+        ltp: float,
+        qty: int,
+        label: str,
+        is_paper: bool,
+    ):
+        """Place partial exit order (paper log or live) and record PnL."""
+        entry = float(pos.get("entry_price", 0.0))
+        strat_name = pos.get("strategy_name", "")
+
+        # Live market order
+        if not is_paper and self._order_service:
+            try:
+                from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
+                await asyncio.to_thread(
+                    self._order_service.place_order,
+                    OrderRequest(
+                        instrument_token=instrument_key,
+                        quantity=max(1, qty),
+                        transaction_type=TransactionType.SELL,
+                        order_type=OrderType.MARKET,
+                        product=ProductType.INTRADAY,
+                        tag=f"partial-{label.lower()}-{strat_name}",
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Partial exit order failed ({label}): {e}")
+
+        partial_pnl = (ltp - entry) * qty
+        pos["partial_pnl"] = float(pos.get("partial_pnl", 0.0)) + partial_pnl
+        self._daily_pnl += partial_pnl
+
+        self._trades_today.append({
+            "timestamp": datetime.now(IST).isoformat(),
+            "type": "paper" if is_paper else "live",
+            "strategy": strat_name,
+            "instrument": instrument_key,
+            "action": f"PARTIAL-SELL ({label})",
+            "price": ltp,
+            "qty": qty,
+            "pnl": partial_pnl,
+        })
+
+        if self.broadcast_callback:
+            asyncio.create_task(self.broadcast_callback({
+                "type": "trade_executed",
+                "data": {
+                    "type": "paper" if is_paper else "live",
+                    "strategy": strat_name,
+                    "instrument": instrument_key,
+                    "action": f"PARTIAL-SELL ({label})",
+                    "price": ltp,
+                    "pnl": partial_pnl,
+                }
+            }))
+
+    def _close_active_signal_record(self, instrument_key: str):
+        """Mark latest active signal as closed once autonomous exit is executed."""
+        try:
+            from app.database.connection import get_session, ActiveSignal
+            session = get_session()
+            try:
+                sig = (
+                    session.query(ActiveSignal)
+                    .filter(
+                        ActiveSignal.instrument_key == instrument_key,
+                        ActiveSignal.status == "active",
+                    )
+                    .order_by(ActiveSignal.created_at.desc())
+                    .first()
+                )
+                if sig:
+                    sig.status = "closed"
+                    sig.closed_at = datetime.now(timezone.utc)
+                    session.commit()
+            finally:
+                session.close()
+        except Exception:
+            pass
 
     async def _evaluate_instrument(
         self,
@@ -530,6 +863,7 @@ class AutomationEngine:
         self._daily_pnl = 0.0
         self._paper_positions.clear()
         self._last_evaluated_bar.clear()
+        self._managed_positions.clear()
         logger.info("Daily counters reset.")
 
 

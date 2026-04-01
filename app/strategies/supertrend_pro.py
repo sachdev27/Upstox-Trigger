@@ -101,6 +101,14 @@ class SuperTrendPro(BaseStrategy):
 
             # Risk
             "risk_per_trade_pct": 1.0,
+
+            # Option execution controls
+            "option_expiry_mode": "current",   # current | next
+            "option_moneyness_steps": 0,        # 0 = ATM, 1 = 1 strike OTM, ...
+            "option_buy_only": True,            # BUY signal -> BUY CE, SELL signal -> BUY PE
+
+            # Autonomous management controls
+            "enable_trailing_sl": True,
         }
 
     # ── Auto TF Adaptation (Section 0) ──────────────────────────

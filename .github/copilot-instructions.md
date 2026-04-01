@@ -73,6 +73,17 @@ source venv/bin/activate
 uvicorn app.main:app --reload --port 8210
 ```
 
+### Python Interpreter (Recommended for Scripts)
+
+Use the repository interpreter explicitly when running scripts/tests from automation tools:
+
+```bash
+./venv/bin/python scripts/backtest_scalpro.py --mode api --max-instruments 30
+./venv/bin/python -m pytest tests -q
+```
+
+If both `venv` and `.venv` exist, prefer `./venv/bin/python` for this repository to avoid package mismatch across environments.
+
 **Server Ready:** http://localhost:8210
 
 ### Startup Sequence (Detailed)
@@ -534,11 +545,14 @@ notification_manager.register_provider('telegram', telegram)
 | **Real-Time Market Data** | ✅ | WebSocket feeds (Nifty 50, BankNifty, custom) |
 | **Automated Signal Generation** | ✅ | SuperTrendPro, ScalpPro, custom strategies |
 | **Order Execution** | ✅ | Place, modify, cancel via Upstox API |
+| **Signal Selectivity Engine** | ✅ | Confidence scoring + top-N filtering per cycle |
 | **Paper Trading** | ✅ | Safe simulation mode (default) |
 | **Live Trading** | ✅ | Real trades (PAPER_TRADING=False) |
+| **Swarm Entry Execution** | ✅ | Multiple parallel lots per signal via `swarm_count` |
+| **Partial Profit Booking** | ✅ | TP1/TP2/TP3 staged exits with breakeven SL shift |
 | **Position Tracking** | ✅ | Open positions, P&L calculation |
 | **Trade Logging** | ✅ | All trades stored in database |
-| **Strategy Backtesting** | ⏳ | Framework ready, backtesting script pending |
+| **Strategy Backtesting** | ✅ | `scripts/backtest_scalpro.py` supports API/offline sweep + walk-forward |
 
 ### ✅ Risk Management
 
