@@ -43,6 +43,11 @@ async def lifespan(app: FastAPI):
     # Startup
     settings = get_settings()
     logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
+
+    # Configure global proxy behavior early so all SDK/API clients inherit it.
+    from app.network_proxy import configure_network_proxies
+    configure_network_proxies(settings)
+
     logger.info("🚀 Starting Upstox Trading Automation...")
     init_db()
     logger.info("✅ Database initialized.")

@@ -23,8 +23,16 @@ class OrderService:
         self.config = configuration
         self.settings = get_settings()
         self.api_version = self.settings.API_VERSION
+        self.algo_name = (self.settings.ALGO_NAME or "").strip()
         self._daily_pnl: float = 0.0
         self._trade_count: int = 0
+
+    def _get_api_client(self) -> upstox_client.ApiClient:
+        """Create an SDK client with required regulatory headers when configured."""
+        client = upstox_client.ApiClient(self.config)
+        if self.algo_name:
+            client.set_default_header("X-Algo-Name", self.algo_name)
+        return client
 
     # ── Order Execution ─────────────────────────────────────────
 
@@ -39,11 +47,11 @@ class OrderService:
         self._check_risk_limits()
 
         api = upstox_client.OrderApi(
-            upstox_client.ApiClient(self.config)
+            self._get_api_client()
         )
         try:
             response = api.place_order(
-                order.to_api_dict(), "3.0"
+                order.to_api_dict(), "3.0", algo_name=self.algo_name or None
             )
             self._trade_count += 1
             result = response.to_dict()
@@ -231,10 +239,10 @@ class OrderService:
     def modify_order(self, order_id: str, modifications: dict) -> dict:
         """Modify an existing order."""
         api = upstox_client.OrderApi(
-            upstox_client.ApiClient(self.config)
+            self._get_api_client()
         )
         try:
-            response = api.modify_order(modifications, "3.0")
+            response = api.modify_order(modifications, "3.0", algo_name=self.algo_name or None)
             return response.to_dict()
         except Exception as e:
             logger.error(f"Order modification failed: {e}")
@@ -243,10 +251,10 @@ class OrderService:
     def cancel_order(self, order_id: str) -> dict:
         """Cancel an order."""
         api = upstox_client.OrderApi(
-            upstox_client.ApiClient(self.config)
+            self._get_api_client()
         )
         try:
-            response = api.cancel_order(order_id, "3.0")
+            response = api.cancel_order(order_id, "3.0", algo_name=self.algo_name or None)
             return response.to_dict()
         except Exception as e:
             logger.error(f"Order cancellation failed: {e}")
@@ -257,7 +265,7 @@ class OrderService:
     def get_order_book(self) -> list:
         """Get all orders for today."""
         api = upstox_client.OrderApi(
-            upstox_client.ApiClient(self.config)
+            self._get_api_client()
         )
         try:
             response = api.get_order_book("3.0")
@@ -269,7 +277,7 @@ class OrderService:
     def get_order_details(self, order_id: str) -> dict | None:
         """Get details for a specific order."""
         api = upstox_client.OrderApi(
-            upstox_client.ApiClient(self.config)
+            self._get_api_client()
         )
         try:
             response = api.get_order_details(
@@ -283,7 +291,7 @@ class OrderService:
     def get_trade_history(self) -> list:
         """Get trade history for today."""
         api = upstox_client.OrderApi(
-            upstox_client.ApiClient(self.config)
+            self._get_api_client()
         )
         try:
             response = api.get_trade_history("3.0")
@@ -295,7 +303,7 @@ class OrderService:
     def get_positions(self) -> list:
         """Get all open positions."""
         api = upstox_client.PortfolioApi(
-            upstox_client.ApiClient(self.config)
+            self._get_api_client()
         )
         try:
             response = api.get_positions("3.0")
@@ -307,7 +315,7 @@ class OrderService:
     def get_holdings(self) -> list:
         """Get all equity holdings."""
         api = upstox_client.PortfolioApi(
-            upstox_client.ApiClient(self.config)
+            self._get_api_client()
         )
         try:
             response = api.get_holdings("3.0")
@@ -319,7 +327,7 @@ class OrderService:
     def get_funds_and_margin(self) -> dict:
         """Get account funds and margin details."""
         api = upstox_client.UserApi(
-            upstox_client.ApiClient(self.config)
+            self._get_api_client()
         )
         try:
             response = api.get_user_fund_margin("3.0")

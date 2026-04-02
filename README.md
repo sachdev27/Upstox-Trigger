@@ -61,6 +61,12 @@ UPSTOX_PROXY_URL="http://user:pass@140.245.243.157:3128"
 # Optional: direct requests() traffic (diagnostics/custom calls)
 REQUESTS_HTTP_PROXY="socks5h://user:pass@140.245.243.157:1080"
 REQUESTS_HTTPS_PROXY="socks5h://user:pass@140.245.243.157:1080"
+
+# Optional strict mode: refuse to initialize live SDK clients unless proxy exists
+REQUIRE_UPSTOX_PROXY=True
+
+# Regulatory header for order APIs (sent as X-Algo-Name)
+ALGO_NAME="your-approved-algo-name"
 ```
 
 Verify outbound IP through proxy:

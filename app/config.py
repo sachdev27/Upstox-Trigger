@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     REDIRECT_URI: str = "http://localhost:8210/callback/"
     AUTH_CODE: str = ""
     ACCESS_TOKEN: str = ""
+    ALGO_NAME: str = ""
+    ALGO_ID: str = ""
 
     # -- Upstox Sandbox ------------------------------------------
     USE_SANDBOX: bool = False
@@ -37,6 +39,7 @@ class Settings(BaseSettings):
     # Example: "http://user:pass@140.245.243.157:3128"
     # Some SDK/urllib3 combinations may not support SOCKS directly.
     UPSTOX_PROXY_URL: str = ""
+    REQUIRE_UPSTOX_PROXY: bool = False
 
     # Optional proxies for direct `requests` calls (e.g., diagnostics).
     # Example: "socks5h://user:pass@140.245.243.157:1080"

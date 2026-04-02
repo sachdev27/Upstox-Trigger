@@ -166,7 +166,18 @@ class AuthService:
         if access_token:
             config.access_token = access_token
 
-        proxy_url = (self.settings.UPSTOX_PROXY_URL or "").strip()
+        proxy_url = (
+            (self.settings.UPSTOX_PROXY_URL or "").strip()
+            or (self.settings.REQUESTS_HTTPS_PROXY or "").strip()
+            or (self.settings.REQUESTS_HTTP_PROXY or "").strip()
+        )
+
+        if self.settings.REQUIRE_UPSTOX_PROXY and not proxy_url:
+            raise RuntimeError(
+                "REQUIRE_UPSTOX_PROXY=True but no proxy is configured. "
+                "Set UPSTOX_PROXY_URL or REQUESTS_HTTPS_PROXY."
+            )
+
         if proxy_url:
             config.proxy = proxy_url
             logger.info("Upstox SDK proxy is enabled.")
