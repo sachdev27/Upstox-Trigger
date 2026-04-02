@@ -230,11 +230,21 @@ class AutomationEngine:
             if last_class and last_name:
                 logger.info(f"🔄 Auto-loading last active strategy: {last_name}")
                 try:
+                    import json as _json
+                    _saved_instruments = getattr(self.settings, "ACTIVE_STRATEGY_INSTRUMENTS", "NSE_INDEX|Nifty 50") or "NSE_INDEX|Nifty 50"
+                    _saved_tf = getattr(self.settings, "ACTIVE_STRATEGY_TIMEFRAME", "15m") or "15m"
+                    _saved_paper = str(getattr(self.settings, "ACTIVE_STRATEGY_PAPER", "True")).lower() in ("true", "1")
+                    try:
+                        _saved_params = _json.loads(getattr(self.settings, "ACTIVE_STRATEGY_PARAMS", "{}") or "{}")
+                    except Exception:
+                        _saved_params = {}
                     self.load_strategy(
                         strategy_class_name=last_class,
                         name=last_name,
-                        instruments=[self.settings.NIFTY], # Default if none
-                        timeframe="15m" # Default if none
+                        instruments=[i.strip() for i in _saved_instruments.split(",")],
+                        timeframe=_saved_tf,
+                        params=_saved_params,
+                        paper_trading=_saved_paper,
                     )
                 except Exception as e:
                     logger.error(f"Failed to auto-load strategy: {e}")
@@ -1138,6 +1148,7 @@ class AutomationEngine:
                     "instruments": config.instruments,
                     "timeframe": config.timeframe,
                     "paper_trading": config.paper_trading,
+                    "params": config.params or {},
                     "latest_metrics": getattr(strategy, "latest_metrics", None),
                 }
                 for config, strategy in self._active_strategies
@@ -1200,13 +1211,34 @@ class AutomationEngine:
         if spot_price <= 0:
             spot_price = 25000.0  # fallback
 
+        # Use the active strategy's SL/TP multipliers if available
+        sl_price = round(spot_price * 0.996, 2)   # default 0.4% SL
+        tp_price = round(spot_price * 1.012, 2)    # default 1.2% TP
+        if self._active_strategies:
+            _cfg, _strat = self._active_strategies[0]
+            p = _cfg.params or {}
+            # ScalpPro uses sl_atr_multiplier/tp_atr_multiplier; SuperTrendPro uses sl_multiplier/tp_multiplier
+            sl_mult = float(p.get("sl_atr_multiplier", p.get("sl_multiplier", 0)))
+            tp_mult = float(p.get("tp_atr_multiplier", p.get("tp_multiplier", 0)))
+            if sl_mult > 0 and tp_mult > 0:
+                # Approximate ATR as 0.5% of price for test signal
+                approx_atr = spot_price * 0.005
+                sl_dist = approx_atr * sl_mult
+                tp_dist = approx_atr * tp_mult
+                if tx_action == TransactionType.BUY:
+                    sl_price = round(spot_price - sl_dist, 2)
+                    tp_price = round(spot_price + tp_dist, 2)
+                else:
+                    sl_price = round(spot_price + sl_dist, 2)
+                    tp_price = round(spot_price - tp_dist, 2)
+
         signal = TradeSignal(
             strategy_name="Manual Test",
             instrument_key=instrument_key,
             action=tx_action,
             price=spot_price,
-            stop_loss=round(spot_price * 0.996, 2),   # 0.4% SL
-            take_profit=round(spot_price * 1.012, 2),  # 1.2% TP
+            stop_loss=sl_price,
+            take_profit=tp_price,
             confidence_score=5,
         )
         signal.metadata["requested_action"] = normalized_action

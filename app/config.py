@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     # ── Strategy Persistence ────────────────────────────────────
     ACTIVE_STRATEGY_CLASS: str = "SuperTrendPro"
     ACTIVE_STRATEGY_NAME: str = "SuperTrend Pro v6.3"
+    ACTIVE_STRATEGY_PARAMS: str = "{}"
+    ACTIVE_STRATEGY_INSTRUMENTS: str = "NSE_INDEX|Nifty 50"
+    ACTIVE_STRATEGY_TIMEFRAME: str = "15m"
+    ACTIVE_STRATEGY_PAPER: str = "True"
 
     # ── Notifications ───────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = ""

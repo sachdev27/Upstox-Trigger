@@ -612,7 +612,7 @@ async function refreshTrades() {
             price: t.price,
             stop_loss: t.stop_loss,
             take_profit: t.take_profit,
-            mode: '📋 Paper',
+            mode: t.status === 'live' ? '🔴 Live' : '📋 Paper',
             option_side: t.metadata?.option_side || null,
             strike_price: t.metadata?.strike_price ?? null,
             expiry_date: t.metadata?.expiry_date || null,
@@ -949,7 +949,9 @@ window.runExecutionProbe = async (action = 'BUY') => {
         const forceLive = !before.paperTrading;
 
         const triggerResult = await api.triggerTestSignal(currentInstrumentKey, probeAction, forceLive);
-        await api.runCycle();
+        // Note: triggerTestSignal already runs the full pipeline (_handle_signal).
+        // We do NOT call runCycle() here — that would evaluate the strategy independently
+        // and potentially place a second duplicate order.
         await new Promise(resolve => setTimeout(resolve, 1400));
 
         await Promise.all([
@@ -1418,6 +1420,18 @@ window.runCycle = async () => {
 
 // window.toggleSidebar removed
 
+window.clearTradeHistory = async () => {
+    if (!confirm('Clear all trade history entries?')) return;
+    try {
+        await api.clearPaperTrades();
+        tradeRowCache.clear();
+        await refreshTrades();
+        showToast('Trade history cleared', 'success');
+    } catch (e) {
+        showToast('Failed to clear trade history', 'error');
+    }
+};
+
 window.triggerTestSignal = async () => {
     const action = 'BUY';
     try {
@@ -1861,6 +1875,20 @@ async function fetchStrategySchemas() {
 
         if (selector.options.length > 0) {
             selector.selectedIndex = selectedIdx;
+            // Merge saved params from engine into schema defaults for the selected strategy
+            const activeStrats = status.active_strategies || [];
+            const selectedClass = selector.options[selectedIdx]?.dataset?.class;
+            const activeSchema = dynamicSchemas[selector.value];
+            if (activeSchema && selectedClass) {
+                const matchingStrat = activeStrats.find(s => s.name === activeSchema.name);
+                if (matchingStrat && matchingStrat.params) {
+                    activeSchema.params.forEach(p => {
+                        if (matchingStrat.params[p.name] !== undefined) {
+                            p.default = matchingStrat.params[p.name];
+                        }
+                    });
+                }
+            }
             window.renderDynamicStrategyForm();
             populateRiskLevels();
             scheduleOverlayRefresh(true);

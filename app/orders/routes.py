@@ -113,6 +113,22 @@ async def get_paper_trades(limit: int = 100):
 
 
 
+@router.delete("/trades/paper")
+async def clear_paper_trades():
+    """Clear all entries from the trade log."""
+    from app.database.connection import get_session, TradeLog as TradeLogModel
+    session = get_session()
+    try:
+        count = session.query(TradeLogModel).delete()
+        session.commit()
+        return {"status": "success", "deleted": count}
+    except Exception as e:
+        session.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        session.close()
+
+
 @router.get("/status/market-hours")
 async def check_market_hours():
     """Check if market is currently open."""

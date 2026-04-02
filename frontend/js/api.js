@@ -60,6 +60,9 @@ export const api = {
     async getPaperTrades(limit = 100) {
         return fetch(`${API_BASE}/orders/trades/paper?limit=${limit}`).then(r => r.json());
     },
+    async clearPaperTrades() {
+        return fetch(`${API_BASE}/orders/trades/paper`, { method: 'DELETE' }).then(r => r.json());
+    },
     async getOrderBook() {
         return fetchJsonWithRetry(`${API_BASE}/orders/book`, {}, 3, 500);
     },

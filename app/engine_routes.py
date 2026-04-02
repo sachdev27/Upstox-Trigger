@@ -33,17 +33,23 @@ async def load_strategy(
     """Load a strategy into the engine."""
     import json
 
-    # Persist selection to settings
-    settings = get_settings()
-    settings.save_to_db("ACTIVE_STRATEGY_CLASS", strategy_class, category="STRATEGY")
-    settings.save_to_db("ACTIVE_STRATEGY_NAME", name, category="STRATEGY")
-
     engine = get_engine()
     instrument_list = [i.strip() for i in instruments.split(",")]
     try:
         parsed_params = json.loads(params) if params else {}
     except Exception:
         parsed_params = {}
+
+    # Persist selection to settings
+    settings = get_settings()
+    settings.save_to_db("ACTIVE_STRATEGY_CLASS", strategy_class, category="STRATEGY")
+    settings.save_to_db("ACTIVE_STRATEGY_NAME", name, category="STRATEGY")
+
+    # Persist strategy params so they survive page refresh
+    settings.save_to_db("ACTIVE_STRATEGY_PARAMS", json.dumps(parsed_params), category="STRATEGY")
+    settings.save_to_db("ACTIVE_STRATEGY_INSTRUMENTS", instruments, category="STRATEGY")
+    settings.save_to_db("ACTIVE_STRATEGY_TIMEFRAME", timeframe, category="STRATEGY")
+    settings.save_to_db("ACTIVE_STRATEGY_PAPER", str(paper_trading), category="STRATEGY")
 
     engine.load_strategy(
         strategy_class_name=strategy_class,
