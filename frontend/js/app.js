@@ -1577,6 +1577,151 @@ window.saveNotificationSettings = async () => {
     }
 };
 
+// ── GTT Execution Settings ─────────────────────────────────
+
+window.toggleTrailingGapInput = () => {
+    const mode = document.getElementById('gtt-trailing-gap-mode')?.value;
+    const group = document.getElementById('gtt-custom-gap-group');
+    if (group) group.style.display = mode === 'custom' ? 'block' : 'none';
+};
+
+window.saveExecutionSettings = async () => {
+    const payload = {
+        gtt_product_type: document.getElementById('gtt-product-type')?.value || 'D',
+        gtt_entry_trigger_type: document.getElementById('gtt-entry-trigger')?.value || 'IMMEDIATE',
+        gtt_market_protection: parseInt(document.getElementById('gtt-market-protection')?.value || '-1'),
+        gtt_trailing_sl: !!document.getElementById('gtt-trailing-sl')?.checked,
+        gtt_trailing_gap_mode: document.getElementById('gtt-trailing-gap-mode')?.value || 'auto',
+        gtt_trailing_gap_value: parseFloat(document.getElementById('gtt-trailing-gap-value')?.value || '0'),
+    };
+
+    try {
+        await api.updateConfig(payload);
+
+        // Also save updated SL/TP/trailing multipliers back to the active strategy
+        const slMult = parseFloat(document.getElementById('exec-sl-mult')?.value);
+        const tpMult = parseFloat(document.getElementById('exec-tp-mult')?.value);
+        const trailMult = parseFloat(document.getElementById('exec-trail-mult')?.value);
+        if (slMult > 0 || tpMult > 0 || trailMult > 0) {
+            await saveRiskMultipliersToStrategy(slMult, tpMult, trailMult);
+        }
+
+        showToast("Execution settings saved", "success");
+    } catch (e) {
+        showToast("Failed to save execution settings", "error");
+    }
+};
+
+// ── Risk Level Multiplier Helpers ──────────────────────────
+
+// Strategy-specific key names for SL/TP/trailing multipliers
+const RISK_KEY_MAP = {
+    SuperTrendPro: { sl: 'sl_multiplier', tp: 'tp_multiplier', trail: 'trail_multiplier' },
+    ScalpPro:      { sl: 'sl_atr_multiplier', tp: 'tp_atr_multiplier', trail: 'trailing_atr_mult' },
+};
+
+window.populateRiskLevels = () => {
+    const selector = document.getElementById('strategy-selector');
+    if (!selector || selector.options.length === 0) return;
+    const cls = selector.options[selector.selectedIndex]?.dataset?.class;
+    const name = selector.options[selector.selectedIndex]?.text;
+    const schema = dynamicSchemas[selector.value];
+    if (!schema) return;
+
+    // Show strategy name badge
+    const badge = document.getElementById('exec-risk-strategy-badge');
+    if (badge) badge.textContent = name || cls;
+
+    const keys = RISK_KEY_MAP[cls] || {};
+
+    // Read current values from the dynamic param inputs (Strategy Config tab)
+    const slParam = schema.params.find(p => p.name === keys.sl);
+    const tpParam = schema.params.find(p => p.name === keys.tp);
+    const trailParam = schema.params.find(p => p.name === keys.trail);
+
+    // Try to get live edited values from Strategy Config form first, then fall back to schema defaults
+    const slVal = getParamLiveValue(keys.sl) ?? slParam?.default ?? 1.0;
+    const tpVal = getParamLiveValue(keys.tp) ?? tpParam?.default ?? 2.0;
+    const trailVal = getParamLiveValue(keys.trail) ?? trailParam?.default ?? 1.0;
+
+    document.getElementById('exec-sl-mult').value = slVal;
+    document.getElementById('exec-tp-mult').value = tpVal;
+    document.getElementById('exec-trail-mult').value = trailVal;
+
+    updateRiskExample(slVal, tpVal, trailVal);
+};
+
+function getParamLiveValue(paramName) {
+    if (!paramName) return null;
+    const el = document.querySelector(`.dyn-param[data-name="${paramName}"]`);
+    if (!el) return null;
+    return el.type === 'checkbox' ? el.checked : Number(el.value);
+}
+
+function updateRiskExample(sl, tp, trail) {
+    const box = document.getElementById('exec-risk-example-text');
+    if (!box) return;
+    // Use a realistic ATR example
+    const atr = 15;
+    const entry = 270;
+    const slPrice = (entry - sl * atr).toFixed(2);
+    const tpPrice = (entry + tp * atr).toFixed(2);
+    const trailGap = (trail * atr).toFixed(2);
+    box.innerHTML = `
+        <strong>If ATR = ₹${atr}, Entry = ₹${entry} (BUY):</strong><br>
+        Stop Loss = ₹${entry} − (${sl} × ₹${atr}) = <span style="color:var(--danger);font-weight:600">₹${slPrice}</span><br>
+        Take Profit = ₹${entry} + (${tp} × ₹${atr}) = <span style="color:var(--success);font-weight:600">₹${tpPrice}</span><br>
+        Trailing Gap = ${trail} × ₹${atr} = <span style="color:var(--accent-primary);font-weight:600">₹${trailGap}</span>
+        <span style="font-size:0.7rem;"> (SL follows price at this distance)</span>
+    `;
+}
+
+// Listen for changes on the risk level inputs to update the example live
+['exec-sl-mult', 'exec-tp-mult', 'exec-trail-mult'].forEach(id => {
+    document.getElementById(id)?.addEventListener('input', () => {
+        updateRiskExample(
+            parseFloat(document.getElementById('exec-sl-mult').value) || 1,
+            parseFloat(document.getElementById('exec-tp-mult').value) || 2,
+            parseFloat(document.getElementById('exec-trail-mult').value) || 1
+        );
+    });
+});
+
+async function saveRiskMultipliersToStrategy(sl, tp, trail) {
+    const selector = document.getElementById('strategy-selector');
+    if (!selector || selector.options.length === 0) return;
+    const cls = selector.options[selector.selectedIndex]?.dataset?.class;
+    const keys = RISK_KEY_MAP[cls];
+    if (!keys) return;
+
+    // Update the dynamic param inputs in the Strategy Config tab so they stay in sync
+    const setDynParam = (name, val) => {
+        const el = document.querySelector(`.dyn-param[data-name="${name}"]`);
+        if (el) el.value = val;
+    };
+    if (sl > 0) setDynParam(keys.sl, sl);
+    if (tp > 0) setDynParam(keys.tp, tp);
+    if (trail > 0) setDynParam(keys.trail, trail);
+
+    // Re-apply strategy with updated params (same as clicking "Load Strategy")
+    const strategyClass = selector.options[selector.selectedIndex].dataset.class;
+    const name = selector.options[selector.selectedIndex].text;
+    const paperModeToggle = document.getElementById('toggle-papermode');
+    const isPaperMode = paperModeToggle ? !!paperModeToggle.checked : true;
+
+    const payload = {
+        strategy_class: strategyClass,
+        name: name,
+        instruments: currentInstrumentKey,
+        timeframe: currentInterval,
+        paper_trading: isPaperMode,
+        params: JSON.stringify(getDynamicParams()),
+        replace_existing: true,
+    };
+
+    await api.loadStrategy(payload);
+}
+
 window.testNotification = async (channel = "email") => {
     try {
         showToast(`Sending test ${channel}...`, "info");
@@ -1618,6 +1763,17 @@ async function loadSettingsIntoUI() {
         if (document.getElementById('setting-smtp-user')) document.getElementById('setting-smtp-user').value = settings.SMTP_USER || '';
         if (document.getElementById('setting-smtp-password')) document.getElementById('setting-smtp-password').value = settings.SMTP_PASSWORD || '';
         if (document.getElementById('setting-email-recipient')) document.getElementById('setting-email-recipient').value = settings.EMAIL_RECIPIENT || '';
+
+        // GTT Execution settings
+        if (document.getElementById('gtt-product-type')) document.getElementById('gtt-product-type').value = settings.GTT_PRODUCT_TYPE || 'D';
+        if (document.getElementById('gtt-entry-trigger')) document.getElementById('gtt-entry-trigger').value = settings.GTT_ENTRY_TRIGGER_TYPE || 'IMMEDIATE';
+        if (document.getElementById('gtt-market-protection')) document.getElementById('gtt-market-protection').value = String(settings.GTT_MARKET_PROTECTION ?? -1);
+        if (document.getElementById('gtt-trailing-sl')) document.getElementById('gtt-trailing-sl').checked = settings.GTT_TRAILING_SL ?? true;
+        if (document.getElementById('gtt-trailing-gap-mode')) {
+            document.getElementById('gtt-trailing-gap-mode').value = settings.GTT_TRAILING_GAP_MODE || 'auto';
+            toggleTrailingGapInput();
+        }
+        if (document.getElementById('gtt-trailing-gap-value')) document.getElementById('gtt-trailing-gap-value').value = settings.GTT_TRAILING_GAP_VALUE || 0;
 
     } catch (e) {
         console.error("Failed to load settings into UI", e);
@@ -1706,6 +1862,7 @@ async function fetchStrategySchemas() {
         if (selector.options.length > 0) {
             selector.selectedIndex = selectedIdx;
             window.renderDynamicStrategyForm();
+            populateRiskLevels();
             scheduleOverlayRefresh(true);
         }
     } catch(e) {
@@ -1992,6 +2149,9 @@ window.switchSettingsTab = (tabId) => {
     document.querySelectorAll('.settings-tab').forEach(btn => {
         if (btn.innerText.toLowerCase().includes(tabId)) btn.classList.add('active');
     });
+
+    // Populate risk levels when switching to the Execution tab
+    if (tabId === 'execution') populateRiskLevels();
 };
 
 window.fetchOptionChain = async () => {

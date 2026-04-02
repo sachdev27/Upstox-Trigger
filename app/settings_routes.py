@@ -122,6 +122,12 @@ async def get_current_settings():
         "SMTP_PASSWORD": "********" if settings.SMTP_PASSWORD else "",
         "EMAIL_RECIPIENT": settings.EMAIL_RECIPIENT,
         "NOTIFICATION_CHANNELS": settings.NOTIFICATION_CHANNELS,
+        "GTT_PRODUCT_TYPE": settings.GTT_PRODUCT_TYPE,
+        "GTT_TRAILING_SL": settings.GTT_TRAILING_SL,
+        "GTT_TRAILING_GAP_MODE": settings.GTT_TRAILING_GAP_MODE,
+        "GTT_TRAILING_GAP_VALUE": settings.GTT_TRAILING_GAP_VALUE,
+        "GTT_MARKET_PROTECTION": settings.GTT_MARKET_PROTECTION,
+        "GTT_ENTRY_TRIGGER_TYPE": settings.GTT_ENTRY_TRIGGER_TYPE,
     }
 
 

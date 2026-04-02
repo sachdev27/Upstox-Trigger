@@ -518,21 +518,40 @@ class OrderService:
 
         ENTRY  → IMMEDIATE trigger at signal.price (limit order with auto market protection)
         TARGET → IMMEDIATE trigger at signal.take_profit
-        STOPLOSS → IMMEDIATE trigger at signal.stop_loss (with optional trailing_gap)
+        STOPLOSS → IMMEDIATE trigger at signal.stop_loss with trailing_gap
+
+        Trailing SL:  The stop-loss automatically follows the market price at a
+        fixed distance (trailing_gap).  If trailing_gap is not explicitly provided
+        it is derived from the entry→SL distance so the risk:reward ratio is
+        preserved while unrealised profit is locked in automatically.
+
+        Upstox constraint: trailing_gap >= 10% of |LTP − SL trigger price|.
+        Using the full entry→SL distance satisfies this by definition.
         """
         quantity = max(int(signal.quantity or 1), 1)
         quantity = self._normalize_to_lot_size(signal.instrument_key, quantity)
+
+        # Read GTT execution settings from config (set via frontend Execution tab)
+        settings = get_settings()
+        gtt_product = getattr(settings, "GTT_PRODUCT_TYPE", "D") or "D"
+        gtt_trailing_enabled = getattr(settings, "GTT_TRAILING_SL", True)
+        gtt_gap_mode = getattr(settings, "GTT_TRAILING_GAP_MODE", "auto") or "auto"
+        gtt_gap_custom = float(getattr(settings, "GTT_TRAILING_GAP_VALUE", 0.0) or 0.0)
+        gtt_market_prot = int(getattr(settings, "GTT_MARKET_PROTECTION", -1) or -1)
+        gtt_entry_type = getattr(settings, "GTT_ENTRY_TRIGGER_TYPE", "IMMEDIATE") or "IMMEDIATE"
 
         def _tick_round(price: float, tick: float = 0.05) -> float:
             """Round price to nearest tick size (0.05 for NSE F&O / equity)."""
             return round(round(price / tick) * tick, 2)
 
+        entry_price = _tick_round(float(signal.price))
+
         rules = [
             {
                 "strategy": "ENTRY",
-                "trigger_type": "IMMEDIATE",
-                "trigger_price": _tick_round(float(signal.price)),
-                "market_protection": -1,
+                "trigger_type": gtt_entry_type,
+                "trigger_price": entry_price,
+                "market_protection": gtt_market_prot,
             }
         ]
 
@@ -548,13 +567,28 @@ class OrderService:
                     "trigger_price": _tick_round(float(signal.take_profit)),
                 })
             if has_sl:
-                sl_rule = {
+                sl_price = _tick_round(float(signal.stop_loss))
+
+                sl_rule: dict = {
                     "strategy": "STOPLOSS",
                     "trigger_type": "IMMEDIATE",
-                    "trigger_price": _tick_round(float(signal.stop_loss)),
+                    "trigger_price": sl_price,
                 }
-                if trailing_gap > 0:
-                    sl_rule["trailing_gap"] = _tick_round(float(trailing_gap))
+
+                # Trailing SL: auto-derive gap from entry→SL distance, or use
+                # custom value from settings, or explicit caller override.
+                if gtt_trailing_enabled:
+                    if trailing_gap > 0:
+                        effective_gap = trailing_gap
+                    elif gtt_gap_mode == "custom" and gtt_gap_custom > 0:
+                        effective_gap = gtt_gap_custom
+                    else:
+                        effective_gap = abs(entry_price - sl_price)
+
+                    effective_gap = _tick_round(effective_gap)
+                    if effective_gap > 0:
+                        sl_rule["trailing_gap"] = effective_gap
+
                 rules.append(sl_rule)
         else:
             gtt_type = "SINGLE"
@@ -562,7 +596,7 @@ class OrderService:
         gtt_params = {
             "type": gtt_type,
             "quantity": quantity,
-            "product": "D",
+            "product": gtt_product,
             "instrument_token": signal.instrument_key,
             "transaction_type": signal.action.value,
             "rules": rules,

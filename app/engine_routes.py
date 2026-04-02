@@ -99,6 +99,13 @@ async def update_engine_config(config: dict):
         "trading_side": ("TRADING_SIDE", "ENGINE"),
         "use_sandbox": ("USE_SANDBOX", "ENGINE"),
         "auto_mode": (None, None),  # In-memory only
+        # GTT Execution settings
+        "gtt_product_type": ("GTT_PRODUCT_TYPE", "GTT"),
+        "gtt_trailing_sl": ("GTT_TRAILING_SL", "GTT"),
+        "gtt_trailing_gap_mode": ("GTT_TRAILING_GAP_MODE", "GTT"),
+        "gtt_trailing_gap_value": ("GTT_TRAILING_GAP_VALUE", "GTT"),
+        "gtt_market_protection": ("GTT_MARKET_PROTECTION", "GTT"),
+        "gtt_entry_trigger_type": ("GTT_ENTRY_TRIGGER_TYPE", "GTT"),
     }
 
     for key, value in config.items():

@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     AUTO_SLICE_ORDERS: bool = True
     DEFAULT_MARKET_PROTECTION: int = -1
 
+    # ── GTT Execution ───────────────────────────────────────────
+    GTT_PRODUCT_TYPE: str = "D"              # D=Delivery, I=Intraday, MTF=Margin
+    GTT_TRAILING_SL: bool = True             # Enable trailing stop-loss on GTT orders
+    GTT_TRAILING_GAP_MODE: str = "auto"      # "auto" = derive from entry-SL distance, "custom" = use GTT_TRAILING_GAP_VALUE
+    GTT_TRAILING_GAP_VALUE: float = 0.0      # Custom trailing gap (only if mode="custom")
+    GTT_MARKET_PROTECTION: int = -1          # -1=auto, 1-25=custom percentage
+    GTT_ENTRY_TRIGGER_TYPE: str = "IMMEDIATE"  # IMMEDIATE, ABOVE, or BELOW
+
     # -- Upstox Sandbox ------------------------------------------
     USE_SANDBOX: bool = False
     SANDBOX_API_KEY: str = ""
