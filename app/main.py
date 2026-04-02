@@ -248,18 +248,35 @@ async def lifespan(app: FastAPI):
     portfolio_streamer = PortfolioStreamer(portfolio_streamer_config)
 
     def sync_portfolio_update(message):
-        # Broadcast portfolio updates to all WS clients
+        # Process portfolio updates in the engine (GTT order fills, position changes)
         asyncio.run_coroutine_threadsafe(
-            broadcast_to_clients({"type": "portfolio_update", "data": message}),
+            _handle_portfolio_update(message),
             loop
         )
+
+    async def _handle_portfolio_update(message):
+        """Route portfolio stream events to engine and broadcast to UI."""
+        try:
+            from app.engine import get_engine
+            eng = get_engine()
+            await eng.handle_portfolio_update(message)
+        except Exception as e:
+            logger.error(f"Error processing portfolio update: {e}")
+
+        # Broadcast to all frontend WebSocket clients
+        await broadcast_to_clients({"type": "portfolio_update", "data": message})
 
     portfolio_streamer.on_update = sync_portfolio_update
 
     try:
-        portfolio_streamer.start(order_update=True, position_update=True, holding_update=True)
+        portfolio_streamer.start(
+            order_update=True,
+            position_update=True,
+            holding_update=True,
+            gtt_update=True,
+        )
         app.state.portfolio_streamer = portfolio_streamer
-        logger.info("📡 Portfolio Data Streamer started.")
+        logger.info("📡 Portfolio Data Streamer started (with GTT updates).")
     except Exception as e:
         logger.error(f"❌ Failed to start portfolio streamer: {e}")
 

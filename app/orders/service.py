@@ -264,6 +264,9 @@ class OrderService:
             }
         """
         terminal_states = {"COMPLETE", "COMPLETED", "REJECTED", "CANCELLED", "CANCELED"}
+        # AMO (After Market Order) status — order accepted, will execute at next open
+        amo_states = {"AFTER MARKET ORDER REQ RECEIVED", "AMO REQ RECEIVED"}
+        filled_states = {"COMPLETE", "COMPLETED"} | amo_states
         start = time.monotonic()
         last_status = None
 
@@ -287,11 +290,11 @@ class OrderService:
 
             if status:
                 last_status = status
-                if status in terminal_states:
+                if status in terminal_states or status in amo_states:
                     return {
                         "order_id": str(order_id),
                         "status": status,
-                        "is_filled": status in {"COMPLETE", "COMPLETED"},
+                        "is_filled": status in filled_states,
                         "is_terminal": True,
                         "timed_out": False,
                     }
@@ -452,3 +455,146 @@ class OrderService:
         market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
         return market_open <= now <= market_close and now.weekday() < 5
+
+    # ── GTT (Good Till Triggered) Orders ────────────────────────
+
+    def _get_access_token(self) -> str:
+        """Extract access token from the SDK Configuration object."""
+        token = getattr(self.config, "access_token", None)
+        if not token:
+            raise RuntimeError("No access token available for GTT order")
+        return token
+
+    def _gtt_headers(self) -> dict:
+        """Build HTTP headers for GTT REST API calls."""
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._get_access_token()}",
+        }
+        if self.algo_name:
+            headers["X-Algo-Name"] = self.algo_name
+        return headers
+
+    def place_gtt_order(self, gtt_params: dict) -> dict:
+        """
+        Place a GTT order via Upstox v3 REST API.
+
+        Args:
+            gtt_params: Dict with type, quantity, product, instrument_token,
+                        transaction_type, and rules array.
+
+        Returns:
+            API response dict with gtt_order_ids on success.
+        """
+        import json as _json
+        import requests as http_requests
+
+        self._check_risk_limits()
+
+        if (not getattr(self.config, "sandbox", False)) and self.require_algo_name and not self.algo_name:
+            raise RuntimeError(
+                "Live GTT order blocked: ALGO_NAME is required. Set ALGO_NAME in settings."
+            )
+
+        url = "https://api.upstox.com/v3/order/gtt/place"
+        logger.info(f"GTT request payload:\n{_json.dumps(gtt_params, indent=2)}")
+        resp = http_requests.post(url, json=gtt_params, headers=self._gtt_headers(), timeout=15)
+
+        if resp.status_code >= 400:
+            logger.error(f"GTT placement failed ({resp.status_code}): {resp.text}")
+            logger.error(f"GTT request was: {_json.dumps(gtt_params)}")
+            resp.raise_for_status()
+
+        result = resp.json()
+        self._trade_count += 1
+        logger.info(f"GTT order placed: {gtt_params.get('transaction_type')} "
+                     f"{gtt_params.get('quantity')} x {gtt_params.get('instrument_token')} → {result}")
+        return result
+
+    def place_gtt_signal(self, signal: TradeSignal, trailing_gap: float = 0.0) -> dict:
+        """
+        Convert a TradeSignal into a multi-leg GTT order.
+
+        ENTRY  → IMMEDIATE trigger at signal.price (limit order with auto market protection)
+        TARGET → IMMEDIATE trigger at signal.take_profit
+        STOPLOSS → IMMEDIATE trigger at signal.stop_loss (with optional trailing_gap)
+        """
+        quantity = max(int(signal.quantity or 1), 1)
+        quantity = self._normalize_to_lot_size(signal.instrument_key, quantity)
+
+        def _tick_round(price: float, tick: float = 0.05) -> float:
+            """Round price to nearest tick size (0.05 for NSE F&O / equity)."""
+            return round(round(price / tick) * tick, 2)
+
+        rules = [
+            {
+                "strategy": "ENTRY",
+                "trigger_type": "IMMEDIATE",
+                "trigger_price": _tick_round(float(signal.price)),
+                "market_protection": -1,
+            }
+        ]
+
+        has_tp = signal.take_profit > 0
+        has_sl = signal.stop_loss > 0
+
+        if has_tp or has_sl:
+            gtt_type = "MULTIPLE"
+            if has_tp:
+                rules.append({
+                    "strategy": "TARGET",
+                    "trigger_type": "IMMEDIATE",
+                    "trigger_price": _tick_round(float(signal.take_profit)),
+                })
+            if has_sl:
+                sl_rule = {
+                    "strategy": "STOPLOSS",
+                    "trigger_type": "IMMEDIATE",
+                    "trigger_price": _tick_round(float(signal.stop_loss)),
+                }
+                if trailing_gap > 0:
+                    sl_rule["trailing_gap"] = _tick_round(float(trailing_gap))
+                rules.append(sl_rule)
+        else:
+            gtt_type = "SINGLE"
+
+        gtt_params = {
+            "type": gtt_type,
+            "quantity": quantity,
+            "product": "D",
+            "instrument_token": signal.instrument_key,
+            "transaction_type": signal.action.value,
+            "rules": rules,
+        }
+
+        result = self.place_gtt_order(gtt_params)
+
+        gtt_ids = []
+        if isinstance(result, dict):
+            data = result.get("data", {})
+            if isinstance(data, dict):
+                gtt_ids = data.get("gtt_order_ids", [])
+
+        return {
+            "gtt_response": result,
+            "gtt_order_ids": gtt_ids,
+            "gtt_order_id": gtt_ids[0] if gtt_ids else None,
+            "quantity": quantity,
+        }
+
+    def cancel_gtt_order(self, gtt_order_id: str) -> dict:
+        """Cancel a pending GTT order."""
+        import requests as http_requests
+
+        url = "https://api.upstox.com/v3/order/gtt/cancel"
+        payload = {"gtt_order_id": gtt_order_id}
+        resp = http_requests.delete(url, json=payload, headers=self._gtt_headers(), timeout=15)
+
+        if resp.status_code >= 400:
+            logger.error(f"GTT cancel failed ({resp.status_code}): {resp.text}")
+            resp.raise_for_status()
+
+        result = resp.json()
+        logger.info(f"GTT order cancelled: {gtt_order_id} → {result}")
+        return result

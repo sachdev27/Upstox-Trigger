@@ -466,6 +466,10 @@ class AutomationEngine:
 
         for instrument_key, pos in list(self._managed_positions.items()):
             try:
+                # GTT positions have SL/TP managed at exchange level — skip software monitoring
+                if pos.get("is_gtt"):
+                    continue
+
                 ltp = await asyncio.to_thread(self._market_service.get_ltp, instrument_key)
                 if ltp is None:
                     continue
@@ -893,6 +897,17 @@ class AutomationEngine:
                 is_long = pos.get("entry_side", "BUY") == "BUY"
                 exit_side = TransactionType.SELL if is_long else TransactionType.BUY
 
+                # Cancel GTT order first (removes pending TARGET/STOPLOSS legs)
+                gtt_order_id = pos.get("gtt_order_id")
+                if gtt_order_id and not is_paper and self._order_service:
+                    try:
+                        await asyncio.to_thread(
+                            self._order_service.cancel_gtt_order, str(gtt_order_id)
+                        )
+                        logger.info(f"🗑️ Cancelled GTT {gtt_order_id} for square-off")
+                    except Exception as e:
+                        logger.warning(f"GTT cancel failed for {gtt_order_id}: {e}")
+
                 ltp = None
                 if self._market_service:
                     try:
@@ -959,6 +974,141 @@ class AutomationEngine:
 
         self._managed_positions.clear()
         logger.info("🏁 All positions squared off.")
+
+    # ── Portfolio Stream Handler ────────────────────────────────
+
+    async def handle_portfolio_update(self, message):
+        """
+        Process real-time portfolio stream updates (order, gtt_order, position).
+
+        Called by main.py when the PortfolioStreamer receives an event.
+        Handles:
+        - GTT order completions (TARGET/STOPLOSS legs triggered)
+        - Position quantity changes
+        - Regular order fills
+        """
+        if not isinstance(message, dict):
+            try:
+                if hasattr(message, "to_dict"):
+                    message = message.to_dict()
+                elif isinstance(message, str):
+                    import json
+                    message = json.loads(message)
+                else:
+                    return
+            except Exception:
+                return
+
+        update_type = message.get("update_type", "")
+
+        if update_type == "gtt_order":
+            await self._handle_gtt_order_update(message)
+        elif update_type == "order":
+            await self._handle_order_update(message)
+        elif update_type == "position":
+            await self._handle_position_update(message)
+
+    async def _handle_gtt_order_update(self, data: dict):
+        """
+        Process GTT order status change from portfolio stream.
+
+        When a GTT STOPLOSS or TARGET leg is triggered, the position is effectively
+        closed at the exchange level. We clean up our managed_positions and book PnL.
+        """
+        gtt_id = data.get("gtt_order_id") or data.get("order_id", "")
+        status = str(data.get("status") or "").upper()
+        triggered_strategy = str(data.get("triggered_strategy") or data.get("strategy") or "")
+
+        logger.info(
+            f"📬 GTT update: id={gtt_id} status={status} strategy={triggered_strategy}"
+        )
+
+        # Find the managed position that owns this GTT
+        matched_key = None
+        matched_pos = None
+        for key, pos in self._managed_positions.items():
+            if pos.get("gtt_order_id") == gtt_id:
+                matched_key = key
+                matched_pos = pos
+                break
+
+        if not matched_pos:
+            return
+
+        # If TARGET or STOPLOSS leg was triggered and completed
+        if triggered_strategy in ("TARGET", "STOPLOSS") and status in (
+            "COMPLETE", "COMPLETED", "TRIGGERED", "EXECUTED",
+        ):
+            entry = float(matched_pos.get("entry_price", 0.0))
+            is_long = matched_pos.get("entry_side", "BUY") == "BUY"
+            qty = int(matched_pos.get("quantity_remaining", matched_pos.get("quantity", 1)))
+            strat_name = matched_pos.get("strategy_name", "")
+            is_paper = bool(matched_pos.get("is_paper", True))
+
+            # Try to get the triggered price from the update
+            trigger_price = float(data.get("trigger_price") or data.get("price") or 0.0)
+            if trigger_price <= 0:
+                trigger_price = float(
+                    matched_pos.get("take_profit" if triggered_strategy == "TARGET" else "stop_loss") or entry
+                )
+
+            pnl_per_unit = (trigger_price - entry) if is_long else (entry - trigger_price)
+            pnl = pnl_per_unit * qty + float(matched_pos.get("partial_pnl", 0.0))
+            self._daily_pnl += pnl_per_unit * qty
+
+            exit_side = "SELL" if is_long else "BUY"
+            exit_reason = "GTT_TARGET" if triggered_strategy == "TARGET" else "GTT_STOPLOSS"
+
+            self._trades_today.append({
+                "timestamp": datetime.now(IST).isoformat(),
+                "type": "paper" if is_paper else "live",
+                "strategy": strat_name,
+                "instrument": matched_key,
+                "action": exit_side,
+                "price": trigger_price,
+                "reason": exit_reason,
+                "pnl": pnl,
+                "gtt_order_id": gtt_id,
+            })
+
+            self._close_active_signal_record(matched_key)
+
+            if self.broadcast_callback:
+                asyncio.create_task(self.broadcast_callback({
+                    "type": "trade_executed",
+                    "data": {
+                        "type": "paper" if is_paper else "live",
+                        "strategy": strat_name,
+                        "instrument": matched_key,
+                        "action": exit_side,
+                        "price": trigger_price,
+                        "exit_reason": exit_reason,
+                        "pnl": pnl,
+                        "gtt_order_id": gtt_id,
+                    }
+                }))
+
+            logger.info(
+                f"🎯 GTT {exit_reason}: {matched_key} exited @ {trigger_price:.2f} PnL={pnl:.2f}"
+            )
+            self._managed_positions.pop(matched_key, None)
+
+        # If GTT was cancelled entirely
+        elif status in ("CANCELLED", "CANCELED"):
+            logger.info(f"🗑️ GTT {gtt_id} cancelled for {matched_key}")
+            # Don't auto-remove position — square_off_all handles this
+
+    async def _handle_order_update(self, data: dict):
+        """Process regular order updates from portfolio stream."""
+        order_id = data.get("order_id", "")
+        status = str(data.get("status") or "").upper()
+        logger.debug(f"📬 Order update: id={order_id} status={status}")
+
+    async def _handle_position_update(self, data: dict):
+        """Process position updates from portfolio stream."""
+        instrument = data.get("instrument_token") or data.get("instrument_key", "")
+        qty = data.get("quantity", 0)
+        logger.debug(f"📬 Position update: {instrument} qty={qty}")
 
     # ── Status & Reporting ──────────────────────────────────────
 
@@ -1037,13 +1187,26 @@ class AutomationEngine:
         from app.orders.models import TransactionType
         normalized_action = str(action or "BUY").upper()
         tx_action = TransactionType.SELL if normalized_action == "SELL" else TransactionType.BUY
+        # Fetch live spot price for the instrument
+        spot_price = 0.0
+        if self._market_service:
+            try:
+                ltp = await asyncio.to_thread(
+                    self._market_service.get_ltp, instrument_key
+                )
+                spot_price = float(ltp) if ltp else 0.0
+            except Exception:
+                pass
+        if spot_price <= 0:
+            spot_price = 25000.0  # fallback
+
         signal = TradeSignal(
             strategy_name="Manual Test",
             instrument_key=instrument_key,
             action=tx_action,
-            price=25000.0,  # Arbitrary for test
-            stop_loss=24900.0,
-            take_profit=25300.0,
+            price=spot_price,
+            stop_loss=round(spot_price * 0.996, 2),   # 0.4% SL
+            take_profit=round(spot_price * 1.012, 2),  # 1.2% TP
             confidence_score=5,
         )
         signal.metadata["requested_action"] = normalized_action
@@ -1073,11 +1236,11 @@ class AutomationEngine:
 
         await self._handle_signal(signal, dummy_config)
 
-        entry_order_ids = [str(x) for x in (signal.metadata or {}).get("_entry_order_ids", []) if x]
+        entry_order_ids = [str(x) for x in (signal.metadata or {}).get("_gtt_order_ids", []) if x]
         resolved_key = signal.instrument_key
         for pos_key, pos in self._managed_positions.items():
             if pos_key == resolved_key or pos_key.startswith(f"{resolved_key}#"):
-                oid = (pos or {}).get("entry_order_id")
+                oid = (pos or {}).get("gtt_order_id")
                 if oid:
                     entry_order_ids.append(str(oid))
 
@@ -1099,7 +1262,7 @@ class AutomationEngine:
             "quantity": signal.quantity,
             "force_live": bool(force_live),
             "execution_mode": execution_mode,
-            "entry_order_ids": entry_order_ids,
+            "gtt_order_ids": entry_order_ids,
             "execution_error": (signal.metadata or {}).get("_last_execution_error"),
             "execution_error_code": (signal.metadata or {}).get("_last_execution_error_code"),
         }

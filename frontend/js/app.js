@@ -999,7 +999,7 @@ window.runExecutionProbe = async (action = 'BUY') => {
         const resolvedLeg = triggerResult?.result?.option_side || triggerResult?.result?.resolved_option_side || '-';
         const legCheckPass = resolvedLeg === '-' ? null : resolvedLeg === requestedLeg;
         const executionMode = triggerResult?.result?.execution_mode || 'unknown';
-        const entryOrderIds = Array.isArray(triggerResult?.result?.entry_order_ids) ? triggerResult.result.entry_order_ids : [];
+        const entryOrderIds = Array.isArray(triggerResult?.result?.gtt_order_ids) ? triggerResult.result.gtt_order_ids : [];
         const executionError = triggerResult?.result?.execution_error || null;
         const executionErrorCode = triggerResult?.result?.execution_error_code || null;
         const liveModeNeedsBrokerProof = !after.paperTrading;
@@ -1447,7 +1447,7 @@ window.triggerTestSignalWithAction = async (action = 'BUY') => {
         const underlying = res?.result?.underlying || currentInstrumentKey;
         const resolved = res?.result?.resolved_instrument || 'N/A';
         const execMode = res?.result?.execution_mode || 'unknown';
-        const orderIds = Array.isArray(res?.result?.entry_order_ids) ? res.result.entry_order_ids : [];
+        const orderIds = Array.isArray(res?.result?.gtt_order_ids) ? res.result.gtt_order_ids : [];
         const execError = res?.result?.execution_error || null;
         const execErrorCode = res?.result?.execution_error_code || null;
         setExecutionProbeResult(

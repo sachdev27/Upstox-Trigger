@@ -233,6 +233,37 @@ class ATMResolverProcessor(SignalProcessor):
                         signal.metadata["direction_signal"] = signal.action.value
                         signal.instrument_key = opt["instrument_key"]
 
+                        # ── Recalculate price / SL / TP for the option premium ──
+                        option_ltp = float(opt.get("ltp") or 0.0)
+                        if option_ltp > 0:
+                            old_price = signal.price or spot
+                            # Preserve the original risk-reward *ratio* from the
+                            # underlying signal and translate it into option-premium
+                            # terms.  For long options the SL is a % drop in premium
+                            # and TP is a % rise.
+                            if old_price > 0 and signal.stop_loss > 0:
+                                sl_pct = abs(old_price - signal.stop_loss) / old_price
+                            else:
+                                sl_pct = 0.30  # default 30% SL on premium
+
+                            if old_price > 0 and signal.take_profit > 0:
+                                tp_pct = abs(signal.take_profit - old_price) / old_price
+                            else:
+                                tp_pct = 0.60  # default 60% TP on premium
+
+                            signal.metadata["underlying_price"] = old_price
+                            signal.metadata["underlying_sl"] = signal.stop_loss
+                            signal.metadata["underlying_tp"] = signal.take_profit
+
+                            signal.price = option_ltp
+                            signal.stop_loss = round(option_ltp * (1 - sl_pct), 2)
+                            signal.take_profit = round(option_ltp * (1 + tp_pct), 2)
+                            logger.info(
+                                f"💱 Option price recalc: LTP={option_ltp:.2f}, "
+                                f"SL={signal.stop_loss:.2f} (-{sl_pct*100:.0f}%), "
+                                f"TP={signal.take_profit:.2f} (+{tp_pct*100:.0f}%)"
+                            )
+
                         # Look up lot size for the resolved option contract
                         try:
                             underlying = signal.metadata.get("underlying")
@@ -278,8 +309,7 @@ class ExecutionProcessor(SignalProcessor):
         lot_idx: int = 0,
         swarm_count: int = 1,
         tp_override: float | None = None,
-        entry_order_id: str | None = None,
-        sl_order_id: str | None = None,
+        gtt_order_id: str | None = None,
     ) -> dict:
         """Build the managed_positions dict entry for one lot."""
         meta = signal.metadata or {}
@@ -318,9 +348,9 @@ class ExecutionProcessor(SignalProcessor):
             # Swarm metadata
             "swarm_idx":          lot_idx,
             "swarm_total":        swarm_count,
-            # Broker truth metadata
-            "entry_order_id":      entry_order_id,
-            "sl_order_id":         sl_order_id,
+            # GTT order tracking — SL/TP handled by exchange, not software
+            "gtt_order_id":        gtt_order_id,
+            "is_gtt":              gtt_order_id is not None,
             "require_broker_confirmation": bool((config.params or {}).get("require_broker_fill_confirmation", True)),
         }
 
@@ -338,7 +368,7 @@ class ExecutionProcessor(SignalProcessor):
         meta: dict,
         tp_override: float | None,
     ) -> bool:
-        """Execute a single lot (paper or live) and register in _managed_positions."""
+        """Execute a single lot (paper or live via GTT) and register in _managed_positions."""
         tp_levels = [
             float(meta.get("tp1") or signal.take_profit or 0.0),
             float(meta.get("tp2") or signal.take_profit or 0.0),
@@ -347,8 +377,7 @@ class ExecutionProcessor(SignalProcessor):
         # Each swarm lot gets a progressively further TP
         swarm_tp = tp_levels[min(lot_idx, len(tp_levels) - 1)] if swarm_count > 1 else None
 
-        entry_order_id = None
-        sl_order_id = None
+        gtt_order_id = None
 
         if is_paper:
             logger.info(
@@ -359,43 +388,27 @@ class ExecutionProcessor(SignalProcessor):
             meta.setdefault("_placement_modes", []).append("paper")
         else:
             try:
-                from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
+                # ── GTT Order: single call places ENTRY + TARGET + STOPLOSS ──
+                trailing_gap = float((config.params or {}).get("trailing_gap", 0.0))
                 result = await asyncio.to_thread(
-                    engine._order_service.place_signal, signal
+                    engine._order_service.place_gtt_signal, signal, trailing_gap
                 )
-                entry_order_id = result.get("entry_order_id") if isinstance(result, dict) else None
-                sl_order_id = result.get("sl_order_id") if isinstance(result, dict) else None
-                if entry_order_id:
-                    meta.setdefault("_entry_order_ids", []).append(str(entry_order_id))
+                gtt_order_id = result.get("gtt_order_id") if isinstance(result, dict) else None
+                if gtt_order_id:
+                    meta.setdefault("_gtt_order_ids", []).append(str(gtt_order_id))
                 meta.setdefault("_placement_modes", []).append("live")
 
-                require_confirm = bool((config.params or {}).get("require_broker_fill_confirmation", True))
-                if require_confirm:
-                    if not entry_order_id:
-                        meta["_last_execution_error"] = "broker order id missing"
-                        logger.error(
-                            f"❌ Swarm lot {lot_idx+1} has no broker order_id; "
-                            "cannot confirm fill. Skipping managed position registration."
-                        )
-                        return False
-
-                    conf = await asyncio.to_thread(
-                        engine._order_service.wait_for_terminal_order,
-                        str(entry_order_id),
-                        8.0,
-                        0.5,
+                if not gtt_order_id:
+                    meta["_last_execution_error"] = "GTT order returned no gtt_order_id"
+                    logger.error(
+                        f"❌ Swarm lot {lot_idx+1} GTT placement returned no order_id; "
+                        "skipping managed position registration."
                     )
-                    if not conf.get("is_filled", False):
-                        meta["_last_execution_error"] = f"order not filled (status={conf.get('status')}, timed_out={conf.get('timed_out')})"
-                        logger.error(
-                            f"❌ Swarm lot {lot_idx+1} not filled (status={conf.get('status')}, timed_out={conf.get('timed_out')}). "
-                            "Skipping managed position registration."
-                        )
-                        return False
+                    return False
 
                 logger.info(
-                    f"💰 [LIVE LOT {lot_idx+1}/{swarm_count}] Order confirmed: "
-                    f"entry_order_id={entry_order_id}, sl_order_id={sl_order_id}"
+                    f"💰 [LIVE GTT LOT {lot_idx+1}/{swarm_count}] GTT order placed: "
+                    f"gtt_order_id={gtt_order_id}"
                 )
             except Exception as e:
                 err_text = str(e)
@@ -408,15 +421,15 @@ class ExecutionProcessor(SignalProcessor):
                     meta["_last_execution_error"] = f"{err_code}: {err_msg}"
                     meta["_last_execution_error_code"] = err_code
                 else:
-                    meta["_last_execution_error"] = f"order placement exception: {e}"
-                logger.error(f"❌ Swarm lot {lot_idx+1} order failed: {e}")
+                    meta["_last_execution_error"] = f"GTT order placement exception: {e}"
+                logger.error(f"❌ Swarm lot {lot_idx+1} GTT order failed: {e}")
                 return False
 
         # Register position
         engine._managed_positions[pos_key] = self._build_position_record(
             signal, config, exec_qty, is_paper,
             lot_idx=lot_idx, swarm_count=swarm_count, tp_override=swarm_tp,
-            entry_order_id=entry_order_id, sl_order_id=sl_order_id,
+            gtt_order_id=gtt_order_id,
         )
 
         # DB log
@@ -437,8 +450,7 @@ class ExecutionProcessor(SignalProcessor):
                         "underlying": meta.get("underlying", instrument_key),
                         "swarm_lot": lot_idx + 1,
                         "swarm_total": swarm_count,
-                        "entry_order_id": entry_order_id,
-                        "sl_order_id": sl_order_id,
+                        "gtt_order_id": gtt_order_id,
                         **(signal.metadata or {}),
                     }
                 )
