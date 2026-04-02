@@ -689,6 +689,36 @@ input:checked + .toggle-slider:before {
     letter-spacing: 0.4px;
 }
 
+.execution-probe-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    margin-bottom: 8px;
+}
+
+.execution-probe-chevron {
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    transition: transform 0.2s ease;
+}
+
+.execution-probe-body {
+    display: block;
+}
+
+.execution-probe-card.collapsed .execution-probe-body {
+    display: none;
+}
+
+.execution-probe-card.collapsed .execution-probe-chevron {
+    transform: rotate(-90deg);
+}
+
 .execution-probe-result {
     font-size: 0.72rem;
     line-height: 1.45;

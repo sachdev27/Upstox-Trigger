@@ -153,6 +153,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Set up listeners
     setupEventListeners();
     setupGlobalSearch();
+    applyExecutionProbeState();
 
     // Interval updates
     setInterval(updateClock, 1000);
@@ -162,7 +163,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setInterval(refreshOrderBook, 45000);
     setInterval(refreshActiveSignals, 20000); // Every 20 seconds
     setInterval(() => scheduleOverlayRefresh(false), OVERLAY_REFRESH_MS); // Throttled strategy HUD/overlay
-    setInterval(refreshOcInsight, 60000); // OC insight every 60s
+    setInterval(refreshOcInsight, 20000); // OC insight every 20s
 
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && currentMainView === 'chart') {
@@ -878,6 +879,27 @@ function setExecutionProbeResult(html, state = 'neutral') {
     box.classList.add(`probe-${state}`);
     box.innerHTML = html;
 }
+
+function applyExecutionProbeState() {
+    const card = document.getElementById('execution-probe-card');
+    const toggle = document.querySelector('#execution-probe-card .execution-probe-toggle');
+    if (!card || !toggle) return;
+
+    const collapsed = localStorage.getItem('executionProbeCollapsed') === 'true';
+    card.classList.toggle('collapsed', collapsed);
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+}
+
+window.toggleExecutionProbe = () => {
+    const card = document.getElementById('execution-probe-card');
+    const toggle = document.querySelector('#execution-probe-card .execution-probe-toggle');
+    if (!card || !toggle) return;
+
+    const collapsed = !card.classList.contains('collapsed');
+    card.classList.toggle('collapsed', collapsed);
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    localStorage.setItem('executionProbeCollapsed', String(collapsed));
+};
 
 async function collectExecutionProbeSnapshot() {
     const [statusRes, signalsRes, tradesRes, orderBookRes] = await Promise.allSettled([
@@ -1804,18 +1826,22 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
 // ── OC Insight Panel ────────────────────────────────────────────
 
 let _lastOcKey = null;
+let _lastOcInsightAt = 0;
+const OC_INSIGHT_REFRESH_MS = 20000;
 
 async function refreshOcInsight() {
     const container = document.getElementById("oc-insight-container");
     if (!container || !currentInstrumentKey) return;
+    if (document.visibilityState !== 'visible') return;
 
     // Use the current instrument if it's an index, otherwise default to Nifty 50
     const ocKey = currentInstrumentKey.includes("INDEX")
         ? currentInstrumentKey
         : "NSE_INDEX|Nifty 50";
 
-    // Avoid redundant fetches for the same key
-    if (_lastOcKey === ocKey) return;
+    // Throttle repeated requests while still allowing periodic updates for the same key.
+    const now = Date.now();
+    if (_lastOcKey === ocKey && (now - _lastOcInsightAt) < OC_INSIGHT_REFRESH_MS) return;
 
     container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--accent-primary); font-size: 0.75rem;">⏳ Loading OC analysis...</div>`;
 
@@ -1826,6 +1852,7 @@ async function refreshOcInsight() {
             return;
         }
         _lastOcKey = ocKey;
+        _lastOcInsightAt = now;
         renderOcInsight(res.analysis, res.expiry_date);
     } catch (e) {
         container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--accent-danger); font-size: 0.75rem;">Failed to load OC analysis</div>`;

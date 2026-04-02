@@ -145,6 +145,7 @@ export function renderOcInsight(a, expiry) {
     const oi = a.oi_concentration || {};
     const iv = a.iv_skew || {};
     const oib = a.oi_buildup || {};
+    const vv = a.veteran_view || {};
 
     const biasClass = (b) => b === "BULLISH" ? "oc-tone-bull" : b === "BEARISH" ? "oc-tone-bear" : "oc-tone-neutral";
 
@@ -190,6 +191,15 @@ export function renderOcInsight(a, expiry) {
             html += `<div class="oc-signal-row">${icon} ${s}</div>`;
         });
         html += `</div>`;
+    }
+
+    if (vv && (vv.setup || vv.invalidation || vv.market_regime)) {
+        html += `<div class="oc-signals" style="border-top:1px dashed #5a5a5a; margin-top:2px;">
+            <div class="oc-signal-row"><b>Veteran View:</b> ${vv.market_regime || 'RANGE'}${Number.isFinite(vv.confidence) ? ` | Confidence ${vv.confidence}%` : ''}</div>
+            ${vv.setup ? `<div class="oc-signal-row">🎯 Setup: ${vv.setup}</div>` : ''}
+            ${vv.invalidation ? `<div class="oc-signal-row">🛑 Invalidation: ${vv.invalidation}</div>` : ''}
+            ${vv.execution_note ? `<div class="oc-signal-row">🧭 ${vv.execution_note}</div>` : ''}
+        </div>`;
     }
 
     container.innerHTML = html;

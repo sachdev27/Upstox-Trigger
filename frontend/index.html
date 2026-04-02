@@ -472,18 +472,23 @@
                     Status: <span id="engine-status-text" class="text-warning">Not Initialized</span>
                 </div>
 
-                <div class="execution-probe-card">
-                    <div class="execution-probe-header">Execution Probe</div>
-                    <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                        <button class="btn btn-outline" onclick="triggerTestSignalWithAction('BUY')">Test BUY→CE</button>
-                        <button class="btn btn-outline" onclick="triggerTestSignalWithAction('SELL')">Test SELL→PE</button>
-                    </div>
-                    <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                        <button class="btn btn-primary" onclick="runExecutionProbe('BUY')">Verify BUY Flow</button>
-                        <button class="btn btn-primary" onclick="runExecutionProbe('SELL')">Verify SELL Flow</button>
-                    </div>
-                    <div id="execution-probe-result" class="execution-probe-result probe-neutral">
-                        Run Verify Flow to test signal -> cycle -> order path.
+                <div class="execution-probe-card" id="execution-probe-card">
+                    <button class="execution-probe-header execution-probe-toggle" type="button" onclick="toggleExecutionProbe()" aria-expanded="true" aria-controls="execution-probe-body">
+                        <span>Execution Probe</span>
+                        <span id="execution-probe-chevron" class="execution-probe-chevron">▾</span>
+                    </button>
+                    <div id="execution-probe-body" class="execution-probe-body">
+                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                            <button class="btn btn-outline" onclick="triggerTestSignalWithAction('BUY')">Test BUY→CE</button>
+                            <button class="btn btn-outline" onclick="triggerTestSignalWithAction('SELL')">Test SELL→PE</button>
+                        </div>
+                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                            <button class="btn btn-primary" onclick="runExecutionProbe('BUY')">Verify BUY Flow</button>
+                            <button class="btn btn-primary" onclick="runExecutionProbe('SELL')">Verify SELL Flow</button>
+                        </div>
+                        <div id="execution-probe-result" class="execution-probe-result probe-neutral">
+                            Run Verify Flow to test signal -> cycle -> order path.
+                        </div>
                     </div>
                 </div>
             </div>

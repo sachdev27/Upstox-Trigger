@@ -380,6 +380,46 @@ def analyze_option_chain(chain: list[dict], spot: float) -> dict:
     else:
         sentiment = "NEUTRAL"
 
+    # ── Veteran Trader Interpretation (actionable narrative) ───────────
+    support = oi_conc.get("immediate_support") or 0.0
+    resistance = oi_conc.get("immediate_resistance") or 0.0
+    range_bias = "RANGE"
+    setup = "Wait for cleaner structure"
+
+    if sentiment == "BULLISH":
+        if resistance > 0 and spot < resistance:
+            setup = f"Buy dips above {support:.0f}; watch breakout above {resistance:.0f}"
+            range_bias = "UPSIDE_PRESSURE"
+        else:
+            setup = "Trend continuation likely; avoid chasing far from support"
+            range_bias = "TRENDING_UP"
+    elif sentiment == "BEARISH":
+        if support > 0 and spot > support:
+            setup = f"Sell rallies below {resistance:.0f}; watch breakdown below {support:.0f}"
+            range_bias = "DOWNSIDE_PRESSURE"
+        else:
+            setup = "Trend continuation likely; avoid fresh shorts into support"
+            range_bias = "TRENDING_DOWN"
+    else:
+        if support > 0 and resistance > 0:
+            setup = f"Range trade between {support:.0f} and {resistance:.0f} until OI shifts"
+
+    invalidation = "Reassess if OI walls shift materially"
+    if sentiment == "BULLISH" and support > 0:
+        invalidation = f"Bullish view weakens on sustained spot below {support:.0f}"
+    elif sentiment == "BEARISH" and resistance > 0:
+        invalidation = f"Bearish view weakens on sustained spot above {resistance:.0f}"
+
+    confidence = min(100, max(0, 50 + abs(int(round(score))) // 2))
+
+    veteran_view = {
+        "market_regime": range_bias,
+        "setup": setup,
+        "invalidation": invalidation,
+        "confidence": int(confidence),
+        "execution_note": "Use OC as context; trigger entries only with price-action confirmation.",
+    }
+
     return {
         "pcr": pcr,
         "max_pain": max_pain,
@@ -389,6 +429,7 @@ def analyze_option_chain(chain: list[dict], spot: float) -> dict:
         "sentiment": sentiment,
         "directional_score": int(round(score)),
         "signals": signals,
+        "veteran_view": veteran_view,
         "spot_price": spot,
     }
 
@@ -404,5 +445,12 @@ def _empty_analysis() -> dict:
         "sentiment": "NEUTRAL",
         "directional_score": 0,
         "signals": [],
+        "veteran_view": {
+            "market_regime": "RANGE",
+            "setup": "Insufficient option-chain data",
+            "invalidation": "Wait for fresh data",
+            "confidence": 0,
+            "execution_note": "No actionable edge from OC yet.",
+        },
         "spot_price": 0,
     }
