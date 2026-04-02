@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN: str = ""
     ALGO_NAME: str = ""
     ALGO_ID: str = ""
+    ORDER_API_VERSION: str = "3.0"
+    REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS: bool = True
+    AUTO_SLICE_ORDERS: bool = True
+    DEFAULT_MARKET_PROTECTION: int = -1
 
     # -- Upstox Sandbox ------------------------------------------
     USE_SANDBOX: bool = False
@@ -40,6 +44,7 @@ class Settings(BaseSettings):
     # Some SDK/urllib3 combinations may not support SOCKS directly.
     UPSTOX_PROXY_URL: str = ""
     REQUIRE_UPSTOX_PROXY: bool = False
+    APPLY_PROCESS_PROXY_ENV: bool = False
 
     # Optional proxies for direct `requests` calls (e.g., diagnostics).
     # Example: "socks5h://user:pass@140.245.243.157:1080"
@@ -52,6 +57,8 @@ class Settings(BaseSettings):
 
     # ── Database ────────────────────────────────────────────────
     DATABASE_URL: str = f"sqlite:///{BASE_DIR / 'data' / 'trading.db'}"
+    # When True, values from .env (or process env) are kept and DB overrides are skipped.
+    ENV_OVERRIDE_DB: bool = False
 
     # ── Server ──────────────────────────────────────────────────
     HOST: str = "0.0.0.0"
@@ -97,6 +104,10 @@ class Settings(BaseSettings):
         """
         Override in-memory settings with values from the DB.
         Called on startup and after any settings change.
+
+        When ENV_OVERRIDE_DB is enabled, we still backfill auth tokens from DB
+        if they are currently blank in memory. This avoids websocket/auth 401s
+        after restarts when tokens are intentionally not stored in .env.
         """
         try:
             from sqlalchemy import inspect
@@ -109,17 +120,35 @@ class Settings(BaseSettings):
                 return
 
             db_settings = session.query(ConfigSetting).all()
+
+            token_backfill_keys = {"ACCESS_TOKEN", "SANDBOX_ACCESS_TOKEN", "AUTH_CODE"}
+            env_override = bool(self.ENV_OVERRIDE_DB)
+            if env_override:
+                logger.info("ENV_OVERRIDE_DB=True: applying DB backfill only for blank auth token fields.")
+
             for s in db_settings:
-                if hasattr(self, s.key):
-                    attr_type = type(getattr(self, s.key))
-                    try:
-                        if attr_type == bool:
-                            val = s.value.lower() in ("true", "1", "yes")
-                        else:
-                            val = attr_type(s.value)
-                        setattr(self, s.key, val)
-                    except (ValueError, TypeError):
-                        logger.warning(f"Failed to convert DB setting {s.key}='{s.value}' to {attr_type}")
+                key_name = str(s.key)
+                if not hasattr(self, key_name):
+                    continue
+
+                # Respect env/process values when override is enabled, except
+                # for blank token fields which must be backfilled from DB.
+                if env_override and key_name not in token_backfill_keys:
+                    continue
+
+                current_val = getattr(self, key_name)
+                if env_override and key_name in token_backfill_keys and str(current_val or "").strip():
+                    continue
+
+                attr_type = type(current_val)
+                try:
+                    if attr_type == bool:
+                        val = str(s.value).lower() in ("true", "1", "yes")
+                    else:
+                        val = attr_type(s.value)
+                    setattr(self, key_name, val)
+                except (ValueError, TypeError):
+                    logger.warning(f"Failed to convert DB setting {key_name}='{s.value}' to {attr_type}")
             session.close()
         except Exception as e:
             logger.warning(f"Could not load settings from DB: {e}")

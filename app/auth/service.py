@@ -5,6 +5,7 @@ Tokens are persisted to the database (config_settings table), NOT .env.
 """
 
 import logging
+import json
 from pathlib import Path
 
 import jwt
@@ -83,6 +84,32 @@ class AuthService:
             logger.info(f"Successfully obtained and persisted new {key} to DB.")
         return token
 
+    def validate_token(self, use_sandbox: bool | None = None) -> tuple[bool, str | None]:
+        """
+        Validate token by making a lightweight authenticated API call.
+
+        Returns:
+            (is_valid, reason)
+        """
+        # Keep settings in sync with persisted state before validating.
+        self.settings.load_from_db()
+
+        target_sandbox = use_sandbox if use_sandbox is not None else self.settings.USE_SANDBOX
+        token = self.settings.SANDBOX_ACCESS_TOKEN if target_sandbox else self.settings.ACCESS_TOKEN
+
+        if self._is_token_expired(token):
+            return False, "expired"
+
+        try:
+            config = self._build_sdk_config(access_token=token)
+            api = upstox_client.UserApi(upstox_client.ApiClient(config))
+            api.get_profile(self.settings.API_VERSION)
+            return True, None
+        except Exception as e:
+            if self._is_invalid_token_error(e):
+                return False, "invalid"
+            return False, f"auth_check_failed: {e}"
+
     # ── Internal ────────────────────────────────────────────────
 
     def _is_token_expired(self, token: str) -> bool:
@@ -159,6 +186,28 @@ class AuthService:
         except Exception as e:
             logger.error(f"Token exchange failed: {e}")
             return None
+
+    def _is_invalid_token_error(self, err: Exception) -> bool:
+        """Detect invalid/revoked token responses from Upstox errors."""
+        text = str(err) or ""
+        if "UDAPI100050" in text or "Invalid token" in text:
+            return True
+
+        # Best-effort parse of SDK exception body snippets.
+        marker = "HTTP response body:"
+        if marker in text:
+            try:
+                body = text.split(marker, 1)[1].strip()
+                if body.startswith("b'") and body.endswith("'"):
+                    body = body[2:-1]
+                payload = json.loads(body)
+                errors = payload.get("errors") or []
+                for item in errors:
+                    if str(item.get("errorCode") or item.get("error_code") or "") == "UDAPI100050":
+                        return True
+            except Exception:
+                pass
+        return False
 
     def _build_sdk_config(self, access_token: str | None = None) -> upstox_client.Configuration:
         """Construct SDK configuration with optional token and process-level proxy support."""

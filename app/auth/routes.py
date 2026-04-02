@@ -33,8 +33,9 @@ async def callback(code: str = Query(...)):
 async def auth_status():
     """Check if the current access token is valid."""
     auth = get_auth_service()
-    is_expired = auth._is_token_expired(auth.settings.ACCESS_TOKEN)
+    is_valid, reason = auth.validate_token(use_sandbox=auth.settings.USE_SANDBOX)
     return {
-        "authenticated": not is_expired,
-        "auth_url": auth.get_auth_url() if is_expired else None,
+        "authenticated": is_valid,
+        "reason": reason,
+        "auth_url": auth.get_auth_url() if not is_valid else None,
     }

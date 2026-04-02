@@ -5,7 +5,7 @@ import logging
 import os
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database.connection import get_session, Watchlist, Instrument, ActiveSignal
@@ -52,6 +52,28 @@ def proxy_status(check_ip: bool = Query(False, description="When true, performs 
             result["egress_ip_error"] = str(e)
 
     return {"status": "success", "data": result}
+
+
+@router.get("/streamer/status")
+def streamer_status(request: Request):
+    """Return lightweight diagnostics for SDK market/portfolio streamers."""
+    app_state = request.app.state
+
+    market_streamer = getattr(app_state, "market_streamer", None)
+    portfolio_streamer = getattr(app_state, "portfolio_streamer", None)
+    last_tick = getattr(app_state, "last_market_tick", None)
+
+    market_inner = getattr(market_streamer, "_streamer", None)
+    portfolio_inner = getattr(portfolio_streamer, "_streamer", None)
+
+    data = {
+        "market_streamer_initialized": market_streamer is not None,
+        "portfolio_streamer_initialized": portfolio_streamer is not None,
+        "market_streamer_connected": bool(market_inner),
+        "portfolio_streamer_connected": bool(portfolio_inner),
+        "last_market_tick": last_tick,
+    }
+    return {"status": "success", "data": data}
 
 # Static Nifty 200 list (simplified for this implementation)
 NIFTY200_KEYS = [

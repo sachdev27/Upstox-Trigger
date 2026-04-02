@@ -44,8 +44,8 @@ class OrderRequest:
     trigger_price: float = 0.0
     disclosed_quantity: int = 0
     is_amo: bool = False
-    slice: bool = False
-    market_protection: int = 0
+    slice: bool | None = None
+    market_protection: int | None = None
     tag: str = "upstox-auto"
 
     def to_api_dict(self) -> dict:

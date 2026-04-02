@@ -6,6 +6,7 @@ Refactored from legacy/order/order.py and legacy/connections.py.
 
 import logging
 import time
+import math
 from datetime import datetime, timezone, timedelta
 
 import upstox_client
@@ -22,8 +23,9 @@ class OrderService:
     def __init__(self, configuration: upstox_client.Configuration):
         self.config = configuration
         self.settings = get_settings()
-        self.api_version = self.settings.API_VERSION
+        self.api_version = self.settings.ORDER_API_VERSION
         self.algo_name = (self.settings.ALGO_NAME or "").strip()
+        self.require_algo_name = bool(self.settings.REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS)
         self._daily_pnl: float = 0.0
         self._trade_count: int = 0
 
@@ -46,12 +48,22 @@ class OrderService:
         # Risk checks
         self._check_risk_limits()
 
+        if (not getattr(self.config, "sandbox", False)) and self.require_algo_name and not self.algo_name:
+            raise RuntimeError(
+                "Live order blocked: ALGO_NAME is required for X-Algo-Name header. "
+                "Set ALGO_NAME in settings."
+            )
+
+        self._apply_order_defaults(order)
+
+        order.quantity = self._normalize_to_lot_size(order.instrument_token, int(order.quantity or 0))
+
         api = upstox_client.OrderApi(
             self._get_api_client()
         )
         try:
             response = api.place_order(
-                order.to_api_dict(), "3.0", algo_name=self.algo_name or None
+                order.to_api_dict(), self.api_version, algo_name=self.algo_name or None
             )
             self._trade_count += 1
             result = response.to_dict()
@@ -64,6 +76,55 @@ class OrderService:
         except Exception as e:
             logger.error(f"Order placement failed: {e}")
             raise
+
+    def _apply_order_defaults(self, order: OrderRequest) -> None:
+        """Populate request fields with V3-safe defaults when caller leaves them unset."""
+        if order.slice is None:
+            order.slice = bool(self.settings.AUTO_SLICE_ORDERS)
+        if order.market_protection is None:
+            order.market_protection = int(self.settings.DEFAULT_MARKET_PROTECTION)
+
+        if order.order_type in {OrderType.MARKET, OrderType.SL_M} and int(order.market_protection) == 0:
+            logger.warning(
+                "market_protection=0 may be rejected for MARKET/SL-M orders. "
+                "Prefer -1 (auto) or 1..25."
+            )
+
+    def _normalize_to_lot_size(self, instrument_key: str, requested_qty: int) -> int:
+        """
+        Ensure quantity is a positive multiple of exchange lot size.
+
+        If lot size is known and requested_qty is not aligned, quantity is rounded up
+        to the next valid multiple to avoid broker rejection UDAPI1104.
+        """
+        qty = max(1, int(requested_qty or 1))
+
+        lot_size = 1
+        try:
+            from app.database.connection import get_session, Instrument
+
+            session = get_session()
+            try:
+                inst = session.query(Instrument).filter_by(instrument_key=instrument_key).first()
+                if inst and int(inst.lot_size or 1) > 1:
+                    lot_size = int(inst.lot_size)
+            finally:
+                session.close()
+        except Exception as e:
+            logger.debug(f"Lot size lookup failed for {instrument_key}: {e}")
+
+        if lot_size <= 1:
+            return qty
+
+        if qty % lot_size == 0:
+            return qty
+
+        normalized = int(math.ceil(qty / lot_size) * lot_size)
+        logger.warning(
+            f"Adjusted quantity for {instrument_key}: requested={qty}, "
+            f"lot_size={lot_size}, normalized={normalized}"
+        )
+        return normalized
 
     def place_signal(self, signal: TradeSignal) -> dict:
         """
@@ -87,6 +148,7 @@ class OrderService:
         result = self.place_order(order)
         entry_order_id = self._extract_order_id(result)
         sl_order_id = None
+        quantity = int(order.quantity)
 
         # Place stop-loss if provided
         if signal.stop_loss > 0:
@@ -242,7 +304,7 @@ class OrderService:
             self._get_api_client()
         )
         try:
-            response = api.modify_order(modifications, "3.0", algo_name=self.algo_name or None)
+            response = api.modify_order(modifications, self.api_version, algo_name=self.algo_name or None)
             return response.to_dict()
         except Exception as e:
             logger.error(f"Order modification failed: {e}")
@@ -254,7 +316,7 @@ class OrderService:
             self._get_api_client()
         )
         try:
-            response = api.cancel_order(order_id, "3.0", algo_name=self.algo_name or None)
+            response = api.cancel_order(order_id, self.api_version, algo_name=self.algo_name or None)
             return response.to_dict()
         except Exception as e:
             logger.error(f"Order cancellation failed: {e}")
@@ -268,7 +330,7 @@ class OrderService:
             self._get_api_client()
         )
         try:
-            response = api.get_order_book("3.0")
+            response = api.get_order_book(self.api_version)
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Order book fetch failed: {e}")
@@ -281,7 +343,7 @@ class OrderService:
         )
         try:
             response = api.get_order_details(
-                "3.0", order_id=order_id
+                self.api_version, order_id=order_id
             )
             return response.to_dict()
         except Exception as e:
@@ -294,7 +356,7 @@ class OrderService:
             self._get_api_client()
         )
         try:
-            response = api.get_trade_history("3.0")
+            response = api.get_trade_history(self.api_version)
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Trade history fetch failed: {e}")
@@ -306,7 +368,7 @@ class OrderService:
             self._get_api_client()
         )
         try:
-            response = api.get_positions("3.0")
+            response = api.get_positions(self.api_version)
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Positions fetch failed: {e}")
@@ -318,7 +380,7 @@ class OrderService:
             self._get_api_client()
         )
         try:
-            response = api.get_holdings("3.0")
+            response = api.get_holdings(self.api_version)
             return response.to_dict().get("data", [])
         except Exception as e:
             logger.error(f"Holdings fetch failed: {e}")
@@ -330,7 +392,7 @@ class OrderService:
             self._get_api_client()
         )
         try:
-            response = api.get_user_fund_margin("3.0")
+            response = api.get_user_fund_margin(self.api_version)
             data = response.to_dict().get("data", {})
             # Return equity part by default if both exist
             return data.get("equity", data.get("commodity", {}))

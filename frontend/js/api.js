@@ -4,6 +4,22 @@
 
 const API_BASE = window.location.origin;
 
+async function fetchJsonWithRetry(url, options = {}, retries = 2, retryDelayMs = 250) {
+    let lastError = null;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+        try {
+            const res = await fetch(url, options);
+            return await res.json();
+        } catch (err) {
+            lastError = err;
+            if (attempt < retries) {
+                await new Promise((resolve) => setTimeout(resolve, retryDelayMs * (attempt + 1)));
+            }
+        }
+    }
+    throw lastError;
+}
+
 export async function fetchWithToast(url, options = {}, successMsg = null) {
     try {
         const res = await fetch(url, options);
@@ -157,7 +173,12 @@ export const api = {
     async getActiveSignals(status = null) {
         let url = `${API_BASE}/monitoring/active-signals`;
         if (status) url += `?status=${status}`;
-        return fetch(url).then(r => r.json());
+        try {
+            return await fetchJsonWithRetry(url, {}, 2, 300);
+        } catch (e) {
+            console.warn('Active signals fetch failed after retries:', e);
+            return { status: 'error', data: [] };
+        }
     },
     async closeActiveSignal(id) {
         return fetch(`${API_BASE}/monitoring/active-signals/${id}/close`, {

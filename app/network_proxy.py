@@ -19,6 +19,15 @@ def _set_env_if_value(key: str, value: str):
         os.environ[key] = value
 
 
+def _clear_proxy_env() -> None:
+    for key in (
+        "HTTP_PROXY", "http_proxy",
+        "HTTPS_PROXY", "https_proxy",
+        "ALL_PROXY", "all_proxy",
+    ):
+        os.environ.pop(key, None)
+
+
 def apply_process_proxy_env(settings) -> None:
     """Set process-level proxy env for requests/websocket libraries that honor env vars."""
     upstox_proxy = (settings.UPSTOX_PROXY_URL or "").strip()
@@ -102,7 +111,11 @@ def patch_upstox_sdk_socks_support() -> None:
 
 def configure_network_proxies(settings) -> None:
     """Configure process and SDK to route outbound traffic through configured proxies."""
-    apply_process_proxy_env(settings)
+    if bool(getattr(settings, "APPLY_PROCESS_PROXY_ENV", False)):
+        apply_process_proxy_env(settings)
+    else:
+        _clear_proxy_env()
+        logger.info("Process-level proxy env injection is disabled (APPLY_PROCESS_PROXY_ENV=False).")
     patch_upstox_sdk_socks_support()
 
     configured = (

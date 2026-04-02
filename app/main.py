@@ -5,8 +5,10 @@ Entry point: uvicorn app.main:app --reload --port 8000
 """
 
 import asyncio
+import copy
 import json
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 
@@ -102,15 +104,20 @@ async def lifespan(app: FastAPI):
     app.state.scheduler = scheduler
 
     loop = asyncio.get_running_loop()
+    app.state.last_market_tick = None
+    app.state.last_market_tick_epoch = 0.0
 
     # --- Live Market Data & Portfolio Streamer ---
     from app.market_data.streamer import MarketDataStreamer, PortfolioStreamer
+    from app.market_data.service import MarketDataService
     from app.auth.service import get_auth_service
     from app.database.connection import get_session
 
     auth_service = get_auth_service()
     # Market streamers MUST use Live configuration (Sandbox doesn't support market data)
-    streamer = MarketDataStreamer(auth_service.get_configuration(use_sandbox=False))
+    streamer_config = copy.copy(auth_service.get_configuration(use_sandbox=False))
+    streamer_config.proxy = None
+    streamer = MarketDataStreamer(streamer_config)
 
     async def _handle_market_tick(data):
         """
@@ -170,6 +177,13 @@ async def lifespan(app: FastAPI):
                     int(ds)
                 ]
 
+                app.state.last_market_tick = {
+                    "instrument_key": instrument_key,
+                    "ltp": float(ltp),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                app.state.last_market_tick_epoch = time.monotonic()
+
                 target_clients = instrument_subscriptions.get(instrument_key, set())
                 for client_ws in list(target_clients):
                     try:
@@ -190,7 +204,7 @@ async def lifespan(app: FastAPI):
 
     # Start market data streamer with core indices; additional subscriptions added dynamically
     try:
-        streamer.start(["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"])
+        streamer.start(["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"], mode="ltpc")
         app.state.market_streamer = streamer
         logger.info("📡 Market Data Streamer started with core indices (Nifty/Bank Nifty).")
     except Exception as e:
@@ -198,7 +212,9 @@ async def lifespan(app: FastAPI):
 
     # Start Portfolio Streamer
     # Portfolio streamers MUST use Live configuration for notifications
-    portfolio_streamer = PortfolioStreamer(auth_service.get_configuration(use_sandbox=False))
+    portfolio_streamer_config = copy.copy(auth_service.get_configuration(use_sandbox=False))
+    portfolio_streamer_config.proxy = None
+    portfolio_streamer = PortfolioStreamer(portfolio_streamer_config)
 
     def sync_portfolio_update(message):
         # Broadcast portfolio updates to all WS clients
@@ -217,6 +233,13 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Failed to start portfolio streamer: {e}")
 
     # --- Heartbeat & Periodic Status ---
+    fallback_market_service = None
+    try:
+        fallback_market_service = MarketDataService(auth_service.get_configuration(use_sandbox=False))
+        app.state.ltp_fallback_service = fallback_market_service
+    except Exception as e:
+        logger.warning(f"LTP fallback service unavailable: {e}")
+
     async def _periodic_updates():
         while True:
             try:
@@ -229,8 +252,43 @@ async def lifespan(app: FastAPI):
                 from app.engine import get_engine
                 engine = get_engine()
                 await broadcast_to_clients({"type": "status", "data": engine.get_status()})
+
+                # If streamer ticks are stale, push LTP fallback ticks for subscribed symbols.
+                stale_for = time.monotonic() - float(getattr(app.state, "last_market_tick_epoch", 0.0) or 0.0)
+                if stale_for > 6.0 and fallback_market_service and instrument_subscriptions:
+                    subscribed_keys = list(instrument_subscriptions.keys())
+                    for key in subscribed_keys:
+                        ltp = await asyncio.to_thread(fallback_market_service.get_ltp, key)
+                        if ltp is None:
+                            continue
+
+                        msg = [
+                            "t",
+                            key,
+                            float(ltp),
+                            0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            int(datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp()),
+                        ]
+
+                        app.state.last_market_tick = {
+                            "instrument_key": key,
+                            "ltp": float(ltp),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "source": "ltp_fallback",
+                        }
+                        app.state.last_market_tick_epoch = time.monotonic()
+
+                        target_clients = instrument_subscriptions.get(key, set())
+                        for client_ws in list(target_clients):
+                            try:
+                                await client_ws.send_json(msg)
+                            except Exception:
+                                pass
             except Exception:
-                pass
+                logger.debug("Periodic update loop encountered an error.", exc_info=True)
             await asyncio.sleep(10)
 
     _heartbeat_task = asyncio.create_task(_periodic_updates())
@@ -334,11 +392,30 @@ async def websocket_endpoint(ws: WebSocket):
                         if len(instrument_subscriptions[k]) == 1:
                             if hasattr(app.state, "market_streamer") and app.state.market_streamer:
                                 try:
-                                    # Use mode='full' to get Greeks and Volume as per V3 docs
-                                    app.state.market_streamer.subscribe([k], mode="full")
-                                    logger.info(f"📡 SDK Subscription started (FULL mode) for: {k}")
+                                    app.state.market_streamer.subscribe([k], mode="ltpc")
+                                    logger.info(f"📡 SDK Subscription started (LTPC mode) for: {k}")
                                 except Exception as e:
                                     logger.error(f"Failed to subscribe to {k}: {e}")
+
+                        # Immediate bootstrap tick for chart initialization.
+                        ltp_service = getattr(app.state, "ltp_fallback_service", None)
+                        if ltp_service:
+                            try:
+                                ltp = await asyncio.to_thread(ltp_service.get_ltp, k)
+                                if ltp is not None:
+                                    bootstrap_msg = [
+                                        "t",
+                                        k,
+                                        float(ltp),
+                                        0,
+                                        0.0,
+                                        0.0,
+                                        0.0,
+                                        int(datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp()),
+                                    ]
+                                    await ws.send_json(bootstrap_msg)
+                            except Exception as e:
+                                logger.debug(f"Bootstrap LTP send failed for {k}: {e}")
 
                 elif action == "unsubscribe" and key:
                     keys_to_unsub = [k.strip() for k in key.split(',') if k.strip()]
@@ -425,11 +502,11 @@ async def health():
     from app.auth.service import get_auth_service
 
     auth = get_auth_service()
-    target_token = auth.settings.SANDBOX_ACCESS_TOKEN if auth.settings.USE_SANDBOX else auth.settings.ACCESS_TOKEN
-    token_valid = not auth._is_token_expired(target_token)
+    token_valid, reason = auth.validate_token(use_sandbox=auth.settings.USE_SANDBOX)
 
     return {
         "status": "healthy",
-        "auth": "valid" if token_valid else "expired",
+        "auth": "valid" if token_valid else "invalid",
+        "auth_reason": None if token_valid else reason,
         "api_version": get_settings().API_VERSION,
     }
