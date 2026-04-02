@@ -27,6 +27,8 @@ class SignalProcessor(ABC):
 class RiskGuardProcessor(SignalProcessor):
     """Checks for trading side restrictions and daily loss limits."""
     async def process(self, signal: 'TradeSignal', config: 'StrategyConfig', engine: 'AutomationEngine') -> bool:
+        is_manual_test = (config.name == "Test" and signal.strategy_name == "Manual Test")
+
         # Trading Side check
         if engine.trading_side == "LONG_ONLY" and signal.action.value == "SELL":
             logger.info("🚫 SHORT signal skipped (LONG_ONLY mode)")
@@ -35,15 +37,18 @@ class RiskGuardProcessor(SignalProcessor):
             logger.info("🚫 LONG signal skipped (SHORT_ONLY mode)")
             return False
 
-        # Daily Loss check
-        max_loss_abs = engine.trading_capital * (engine.max_daily_loss_pct / 100)
-        if engine._daily_pnl <= -max_loss_abs:
-            logger.warning(
-                f"🛑 MAX DAILY LOSS HIT ({-engine._daily_pnl:.2f} >= {max_loss_abs:.2f}). "
-                f"Blocking {signal.action.value} on {signal.instrument_key}."
-            )
-            engine.auto_mode = False
-            return False
+        # Daily Loss check — skip for manual test signals
+        if is_manual_test:
+            logger.info("🧪 Manual test signal — bypassing daily loss guard")
+        else:
+            max_loss_abs = engine.trading_capital * (engine.max_daily_loss_pct / 100)
+            if engine._daily_pnl <= -max_loss_abs:
+                logger.warning(
+                    f"🛑 MAX DAILY LOSS HIT ({-engine._daily_pnl:.2f} >= {max_loss_abs:.2f}). "
+                    f"Blocking {signal.action.value} on {signal.instrument_key}."
+                )
+                engine.auto_mode = False
+                return False
         return True
 
 
@@ -227,6 +232,19 @@ class ATMResolverProcessor(SignalProcessor):
                         signal.metadata["strike_price"] = float(chosen_row.get("strike_price"))
                         signal.metadata["direction_signal"] = signal.action.value
                         signal.instrument_key = opt["instrument_key"]
+
+                        # Look up lot size for the resolved option contract
+                        try:
+                            underlying = signal.metadata.get("underlying")
+                            lot_size = engine._market_service.get_lot_size(
+                                signal.instrument_key, underlying_key=underlying
+                            )
+                            if lot_size > 1:
+                                signal.quantity = lot_size
+                                signal.metadata["lot_size"] = lot_size
+                                logger.info(f"📦 Lot size for {signal.instrument_key}: {lot_size}")
+                        except Exception as e:
+                            logger.warning(f"Lot size lookup failed: {e}")
 
                         # Enforce long-options model when configured
                         if buy_only:

@@ -576,7 +576,7 @@ class AutomationEngine:
                             quantity=max(1, qty_remaining),
                             transaction_type=exit_side,
                             order_type=OrderType.MARKET,
-                            product=ProductType.INTRADAY,
+                            product=ProductType.DELIVERY,
                             tag=f"auto-exit-{strat_name}",
                         )
                     )
@@ -664,7 +664,7 @@ class AutomationEngine:
                         quantity=max(1, qty),
                         transaction_type=exit_side,
                         order_type=OrderType.MARKET,
-                        product=ProductType.INTRADAY,
+                        product=ProductType.DELIVERY,
                         tag=f"partial-{label.lower()}-{strat_name}",
                     )
                 )
@@ -911,7 +911,7 @@ class AutomationEngine:
                                 quantity=max(1, qty_remaining),
                                 transaction_type=exit_side,
                                 order_type=OrderType.MARKET,
-                                product=ProductType.INTRADAY,
+                                product=ProductType.DELIVERY,
                                 tag=f"squareoff-{strat_name}",
                             )
                         )
@@ -1095,6 +1095,8 @@ class AutomationEngine:
             "resolved_option_side": signal.metadata.get("option_side"),
             "strike_price": signal.metadata.get("strike_price"),
             "expiry_date": signal.metadata.get("expiry_date"),
+            "lot_size": signal.metadata.get("lot_size"),
+            "quantity": signal.quantity,
             "force_live": bool(force_live),
             "execution_mode": execution_mode,
             "entry_order_ids": entry_order_ids,

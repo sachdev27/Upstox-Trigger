@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import upstox_client
 
 from app.config import get_settings, BASE_DIR
+from app.network_proxy import patch_upstox_sdk_socks_support
 
 logger = logging.getLogger(__name__)
 
@@ -210,24 +211,33 @@ class AuthService:
         return False
 
     def _build_sdk_config(self, access_token: str | None = None) -> upstox_client.Configuration:
-        """Construct SDK configuration with optional token and process-level proxy support."""
+        """Construct SDK configuration with optional token and settings-driven proxy behavior."""
         config = upstox_client.Configuration()
         if access_token:
             config.access_token = access_token
 
+        # Backward-compatible proxy resolution:
+        # - APPLY_UPSTOX_SDK_PROXY explicitly enables SDK proxying.
+        # - REQUIRE_UPSTOX_PROXY also implies SDK proxying for existing deployments.
+        # - UPSTOX_PROXY_URL is preferred, but legacy REQUESTS proxies can still backfill it.
         proxy_url = (
             (self.settings.UPSTOX_PROXY_URL or "").strip()
             or (self.settings.REQUESTS_HTTPS_PROXY or "").strip()
             or (self.settings.REQUESTS_HTTP_PROXY or "").strip()
         )
+        apply_sdk_proxy = bool(
+            getattr(self.settings, "APPLY_UPSTOX_SDK_PROXY", False)
+            or getattr(self.settings, "REQUIRE_UPSTOX_PROXY", False)
+        )
 
-        if self.settings.REQUIRE_UPSTOX_PROXY and not proxy_url:
+        if self.settings.REQUIRE_UPSTOX_PROXY and not (apply_sdk_proxy and proxy_url):
             raise RuntimeError(
-                "REQUIRE_UPSTOX_PROXY=True but no proxy is configured. "
-                "Set UPSTOX_PROXY_URL or REQUESTS_HTTPS_PROXY."
+                "REQUIRE_UPSTOX_PROXY=True but SDK proxy is not enabled/configured. "
+                "Set APPLY_UPSTOX_SDK_PROXY=True and UPSTOX_PROXY_URL."
             )
 
-        if proxy_url:
+        if apply_sdk_proxy and proxy_url:
+            patch_upstox_sdk_socks_support()
             config.proxy = proxy_url
             logger.debug("Upstox SDK proxy is enabled.")
 

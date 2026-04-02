@@ -38,7 +38,7 @@ class OrderRequest:
     quantity: int
     transaction_type: TransactionType
     order_type: OrderType = OrderType.MARKET
-    product: ProductType = ProductType.INTRADAY
+    product: ProductType = ProductType.DELIVERY
     validity: Validity = Validity.DAY
     price: float = 0.0
     trigger_price: float = 0.0

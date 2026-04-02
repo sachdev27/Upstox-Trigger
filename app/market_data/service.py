@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 class MarketDataService:
     """Provides market data: candles, quotes, instruments, portfolio."""
 
+    # Class-level cache for lot sizes: instrument_key -> lot_size
+    _lot_size_cache: dict[str, int] = {}
+
     def __init__(self, configuration: upstox_client.Configuration):
         self.config = configuration
         self.settings = get_settings()
@@ -344,6 +347,111 @@ class MarketDataService:
         except Exception as e:
             logger.error(f"Instrument search failed for '{query}': {e}")
             return []
+
+    # Common underlying display names → Upstox search symbol
+    _UNDERLYING_SYMBOL_MAP = {
+        "Nifty 50": "NIFTY",
+        "Nifty Bank": "BANKNIFTY",
+        "Nifty Fin Service": "FINNIFTY",
+        "NIFTY MID SELECT": "MIDCPNIFTY",
+        "Nifty Next 50": "NIFTYNXT50",
+    }
+
+    def get_lot_size(self, instrument_key: str, underlying_key: str | None = None) -> int:
+        """
+        Look up the lot size for an F&O instrument.
+
+        Args:
+            instrument_key: The option/future instrument key (e.g. 'NSE_FO|40772')
+            underlying_key: Optional underlying key (e.g. 'NSE_INDEX|Nifty 50')
+                            Used to derive the search name for the API.
+
+        Returns lot size (e.g. 65 for NIFTY options), or 1 if lookup fails.
+        """
+        # Check class-level cache
+        if instrument_key in self._lot_size_cache:
+            return self._lot_size_cache[instrument_key]
+
+        # Try local DB first
+        try:
+            from app.database.connection import get_session, Instrument
+            session = get_session()
+            try:
+                inst = session.query(Instrument).filter_by(instrument_key=instrument_key).first()
+                if inst and int(inst.lot_size or 1) > 1:
+                    lot = int(inst.lot_size)
+                    self._lot_size_cache[instrument_key] = lot
+                    return lot
+            finally:
+                session.close()
+        except Exception:
+            pass
+
+        # Fallback: Upstox REST Instrument Search API
+        try:
+            import requests as _requests
+            token = self.config.access_token
+            if not token:
+                logger.warning("No access token for instrument search API")
+                return 1
+
+            # Derive the search query from the underlying key
+            search_name = None
+            if underlying_key:
+                # "NSE_INDEX|Nifty 50" → "Nifty 50" → look up in map → "NIFTY"
+                uname = underlying_key.split("|")[1] if "|" in underlying_key else underlying_key
+                search_name = self._UNDERLYING_SYMBOL_MAP.get(uname, uname)
+
+            if not search_name:
+                # No underlying provided — can't derive a search name from numeric exchange_token
+                logger.debug(f"No underlying_key for lot size lookup of {instrument_key}")
+                return 1
+
+            parts = instrument_key.split("|")
+            exchange = parts[0].split("_")[0] if "_" in parts[0] else "NSE"
+
+            resp = _requests.get(
+                "https://api.upstox.com/v2/instruments/search",
+                params={
+                    "query": search_name,
+                    "exchanges": exchange,
+                    "segments": "FO",
+                    "records": 5,
+                },
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {token}",
+                },
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("data", [])
+
+                # Try exact match first
+                for item in items:
+                    if item.get("instrument_key") == instrument_key:
+                        lot = int(item.get("lot_size", 1))
+                        if lot > 0:
+                            self._lot_size_cache[instrument_key] = lot
+                            logger.info(f"Lot size for {instrument_key}: {lot} (exact match)")
+                            return lot
+
+                # All derivatives of the same underlying share the same lot size,
+                # so take the lot_size from any result matching our search name.
+                for item in items:
+                    if item.get("name", "").upper() == search_name.upper():
+                        lot = int(item.get("lot_size", 1))
+                        if lot > 0:
+                            self._lot_size_cache[instrument_key] = lot
+                            logger.info(f"Lot size for {instrument_key}: {lot} (from {item.get('trading_symbol')})")
+                            return lot
+            else:
+                logger.warning(f"Instrument search API returned {resp.status_code}")
+        except Exception as e:
+            logger.debug(f"Instrument search API fallback failed for {instrument_key}: {e}")
+
+        return 1
 
     # ── Market Status & Holidays ─────────────────────────────────
 

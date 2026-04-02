@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     # Example: "http://user:pass@140.245.243.157:3128"
     # Some SDK/urllib3 combinations may not support SOCKS directly.
     UPSTOX_PROXY_URL: str = ""
+    APPLY_UPSTOX_SDK_PROXY: bool = False
     REQUIRE_UPSTOX_PROXY: bool = False
     APPLY_PROCESS_PROXY_ENV: bool = False
 

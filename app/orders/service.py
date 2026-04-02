@@ -113,6 +113,14 @@ class OrderService:
         except Exception as e:
             logger.debug(f"Lot size lookup failed for {instrument_key}: {e}")
 
+        # Fallback: use MarketDataService API search if DB doesn't have it
+        if lot_size <= 1:
+            try:
+                from app.market_data.service import MarketDataService
+                lot_size = MarketDataService._lot_size_cache.get(instrument_key, 1)
+            except Exception:
+                pass
+
         if lot_size <= 1:
             return qty
 
