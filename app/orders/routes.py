@@ -12,10 +12,22 @@ from app.orders.models import OrderRequest, OrderType, TransactionType, ProductT
 router = APIRouter(prefix="/orders", tags=["Orders"])
 logger = logging.getLogger(__name__)
 
+_order_service_singleton: OrderService | None = None
+_order_service_token: str | None = None
+
 
 def _get_order_service() -> OrderService:
+    global _order_service_singleton, _order_service_token
+
     auth = get_auth_service()
-    return OrderService(auth.get_configuration())
+    config = auth.get_configuration()
+    token = getattr(config, "access_token", None)
+
+    if _order_service_singleton is None or token != _order_service_token:
+        _order_service_singleton = OrderService(config)
+        _order_service_token = token
+
+    return _order_service_singleton
 
 
 @router.post("/place")

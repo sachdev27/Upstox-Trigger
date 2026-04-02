@@ -4,6 +4,8 @@ Market Data API routes — quotes, candles, instruments, option chain.
 NOTE: Positions, holdings, and funds routes live in orders/routes.py.
 """
 
+import time
+
 from fastapi import APIRouter, Query, Request
 
 from app.auth.service import get_auth_service
@@ -11,11 +13,25 @@ from app.market_data.service import MarketDataService
 
 router = APIRouter(prefix="/market", tags=["Market Data"])
 
+_strategy_overlay_cache: dict[tuple, tuple[float, dict]] = {}
+_strategy_overlay_cache_ttl_sec = 10.0
+_strategy_overlay_cache_max_entries = 256
+_market_service_singleton: MarketDataService | None = None
+_market_service_token: str | None = None
+
 
 def _get_market_service() -> MarketDataService:
+    global _market_service_singleton, _market_service_token
+
     auth = get_auth_service()
     config = auth.get_configuration(use_sandbox=False)
-    return MarketDataService(config)
+    token = getattr(config, "access_token", None)
+
+    if _market_service_singleton is None or token != _market_service_token:
+        _market_service_singleton = MarketDataService(config)
+        _market_service_token = token
+
+    return _market_service_singleton
 
 
 @router.get("/ltp")
@@ -169,6 +185,15 @@ async def get_strategy_overlay(
     Accepts arbitrary JSON parameter payloads to adapt to dynamic Web UI forms.
     """
     import json
+
+    cache_key = (instrument_key, timeframe, from_date, to_date, strategy_class, params)
+    now_mono = time.monotonic()
+    cached = _strategy_overlay_cache.get(cache_key)
+    if cached:
+        ts, payload = cached
+        if (now_mono - ts) <= _strategy_overlay_cache_ttl_sec:
+            return payload
+
     svc = _get_market_service()
     candles = svc.get_historical_candles(instrument_key, timeframe, from_date, to_date)
 
@@ -252,7 +277,11 @@ async def get_strategy_overlay(
                 "signal": valid_signals.get(c["time"], None)
             })
 
-        return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
+        payload = {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
+        if len(_strategy_overlay_cache) >= _strategy_overlay_cache_max_entries:
+            _strategy_overlay_cache.clear()
+        _strategy_overlay_cache[cache_key] = (now_mono, payload)
+        return payload
 
     elif strategy_class == "ScalpPro":
         from app.strategies.scalp_pro import ScalpPro
@@ -295,7 +324,11 @@ async def get_strategy_overlay(
                 "signal": valid_signals.get(c["time"], None)
             })
 
-        return {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
+        payload = {"status": "success", "instrument_key": instrument_key, "overlay": overlay, "latest_metrics": metrics}
+        if len(_strategy_overlay_cache) >= _strategy_overlay_cache_max_entries:
+            _strategy_overlay_cache.clear()
+        _strategy_overlay_cache[cache_key] = (now_mono, payload)
+        return payload
 
     else:
         return {"status": "error", "message": f"Strategy class {strategy_class} native graphics overlay not yet supported.", "overlay": []}
@@ -303,9 +336,9 @@ async def get_strategy_overlay(
 
 @router.get("/option-chain")
 async def get_detailed_option_chain(
+    request: Request,
     instrument_key: str = Query(...),
     expiry_date: str | None = Query(None),
-    request: Request = None
 ):
     """
     Get full option chain matrix with LTP and Greeks for a given index/stock and expiry.
@@ -320,7 +353,7 @@ async def get_detailed_option_chain(
 
         svc = _get_market_service()
         # Greeks cache is optional fallback; REST API provides LTP/OI/Volume
-        greeks_cache = getattr(request.app.state, "greeks_cache", {}) if request else {}
+        greeks_cache = getattr(request.app.state, "greeks_cache", {})
         result = await svc.get_detailed_option_chain(instrument_key, expiry_date, greeks_cache)
         return result
 
@@ -332,9 +365,9 @@ async def get_detailed_option_chain(
 
 @router.get("/option-chain/analysis")
 async def get_option_chain_analysis(
+    request: Request,
     instrument_key: str = Query(..., description="e.g. NSE_INDEX|Nifty 50"),
     expiry_date: str | None = Query(None),
-    request: Request = None,
 ):
     """
     Real-time option chain analytics: PCR, OI concentration, Max-Pain, IV Skew.
@@ -351,7 +384,7 @@ async def get_option_chain_analysis(
             instrument_key = "NSE_INDEX|Nifty Bank"
 
         svc = _get_market_service()
-        greeks_cache = getattr(request.app.state, "greeks_cache", {}) if request else {}
+        greeks_cache = getattr(request.app.state, "greeks_cache", {})
         chain_data = await svc.get_detailed_option_chain(instrument_key, expiry_date, greeks_cache)
 
         if chain_data.get("status") != "success" or not chain_data.get("chain"):

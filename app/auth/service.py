@@ -229,7 +229,7 @@ class AuthService:
 
         if proxy_url:
             config.proxy = proxy_url
-            logger.info("Upstox SDK proxy is enabled.")
+            logger.debug("Upstox SDK proxy is enabled.")
 
         return config
 

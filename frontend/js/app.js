@@ -30,7 +30,8 @@ const pendingUpdates = new Map(); // Batching Queue: key -> last_tick_data
 let isFlushing = false;
 let overlayRefreshInFlight = false;
 let lastOverlayRefreshAt = 0;
-const OVERLAY_REFRESH_MS = 10000;
+const OVERLAY_REFRESH_MS = 30000;
+let currentMainView = 'chart';
 
 // Bottom-panel row caches for delta rendering (key -> serialized row state)
 const tradeRowCache = new Map();
@@ -38,6 +39,9 @@ const signalRowCache = new Map();
 
 async function scheduleOverlayRefresh(force = false) {
     if (!currentInstrumentKey) return;
+    if (currentMainView !== 'chart') return;
+    if (document.visibilityState !== 'visible') return;
+
     const now = Date.now();
     if (!force && (overlayRefreshInFlight || (now - lastOverlayRefreshAt) < OVERLAY_REFRESH_MS)) {
         return;
@@ -50,6 +54,14 @@ async function scheduleOverlayRefresh(force = false) {
         lastOverlayRefreshAt = Date.now();
         overlayRefreshInFlight = false;
     }
+}
+
+function isDocumentVisible() {
+    return document.visibilityState === 'visible';
+}
+
+function isBottomTabActive(tabId) {
+    return !!document.getElementById(`tab-${tabId}`)?.classList.contains('active');
 }
 
 // --- IndexedDB Cache System ---
@@ -144,13 +156,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Interval updates
     setInterval(updateClock, 1000);
-    setInterval(refreshAccountSummary, 60000);
+    setInterval(refreshAccountSummary, 120000);
     setInterval(refreshPositions, 30000);
     setInterval(refreshMarketStatus, 60000);
-    setInterval(refreshOrderBook, 30000);
-    setInterval(refreshActiveSignals, 15000); // Every 15 seconds
-    setInterval(() => scheduleOverlayRefresh(false), OVERLAY_REFRESH_MS); // Near-real-time strategy HUD/overlay
+    setInterval(refreshOrderBook, 45000);
+    setInterval(refreshActiveSignals, 20000); // Every 20 seconds
+    setInterval(() => scheduleOverlayRefresh(false), OVERLAY_REFRESH_MS); // Throttled strategy HUD/overlay
     setInterval(refreshOcInsight, 60000); // OC insight every 60s
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && currentMainView === 'chart') {
+            scheduleOverlayRefresh(false);
+        }
+    });
 
     // Initial OC insight fetch
     refreshOcInsight();
@@ -502,6 +520,9 @@ async function refreshAccountSummary() {
 }
 
 async function refreshPositions() {
+    if (!isDocumentVisible()) return;
+    if (!isBottomTabActive('positions')) return;
+
     try {
         const { data } = await api.getPositions();
         const list = document.getElementById("positions-body");
@@ -768,6 +789,9 @@ async function refreshSignals() {
 }
 
 async function refreshOrderBook() {
+    if (!isDocumentVisible()) return;
+    if (!isBottomTabActive('orderbook')) return;
+
     try {
         const { data } = await api.getOrderBook();
         const list = document.getElementById("order-book-body");
@@ -1234,6 +1258,11 @@ function _resolveInstrument(instrumentKey) {
 }
 
 async function refreshActiveSignals() {
+    if (!isDocumentVisible()) return;
+    const showInMainWatchlist = currentMainView === 'watchlist';
+    const showInBottomTab = isBottomTabActive('active-signals');
+    if (!showInMainWatchlist && !showInBottomTab) return;
+
     try {
         const data = await api.getActiveSignals();
         const signals = data.data || [];
@@ -1804,6 +1833,8 @@ async function refreshOcInsight() {
 }
 
 window.switchMainView = (view) => {
+    currentMainView = view;
+
     // Hide all
     const views = ['tvchart', 'option-chain-container', 'watchlist-view-container', 'settings-view-container'];
     views.forEach(id => {
@@ -1851,6 +1882,7 @@ window.switchMainView = (view) => {
     updateElementText('oc-instrument-name', currentInstrumentName);
 
     if (view === 'options') fetchOptionChain();
+    if (view === 'chart') scheduleOverlayRefresh(false);
     if (view === 'settings') {
         refreshStatus();
         loadSettingsIntoUI();
