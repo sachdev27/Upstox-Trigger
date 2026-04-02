@@ -461,6 +461,12 @@ async function selectInstrument(key, name) {
     updateElementText('inst-ltp', '₹--');
     updateElementText('inst-volume', 'Vol: --');
 
+    // Reset OC expiry selector when instrument changes to avoid stale expiry reuse.
+    const ocExpiry = document.getElementById('oc-expiry-select');
+    if (ocExpiry) {
+        ocExpiry.innerHTML = '<option value="">Select Expiry</option>';
+    }
+
     // 2. Unsubscribe from old if appropriate
     if (oldKey && shouldUnsubscribe(oldKey)) {
         ws.send({ action: 'unsubscribe', instrument_key: oldKey });
@@ -2059,9 +2065,10 @@ function renderOptionChain(data) {
     const placeholder = document.getElementById('oc-placeholder');
     if (placeholder) placeholder.style.display = 'none';
 
-    // Populate expiries if not already
+    // Always repopulate expiries for current instrument/response.
     const select = document.getElementById('oc-expiry-select');
-    if (select && select.options.length <= 1 && data.available_expiries) {
+    if (select && Array.isArray(data.available_expiries)) {
+        select.innerHTML = '<option value="">Select Expiry</option>';
         data.available_expiries.forEach(exp => {
             const opt = document.createElement('option');
             opt.value = exp;

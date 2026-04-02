@@ -457,11 +457,32 @@ class MarketDataService:
             if not all_expiries:
                 return {"status": "error", "message": "No expiries found", "chain": []}
 
-            # Select expiry
+            # Select expiry; if requested expiry is unavailable, gracefully fall back.
             target_expiry = expiry_date or all_expiries[0]
+            requested_expiry = expiry_date
+            expiry_fallback_used = False
+
+            if requested_expiry and requested_expiry not in all_expiries:
+                # Prefer the nearest future expiry; otherwise use the first available.
+                future = [e for e in all_expiries if e >= requested_expiry]
+                target_expiry = future[0] if future else all_expiries[0]
+                expiry_fallback_used = True
 
             # Filter contracts for this expiry (compare as strings)
             expiry_contracts = [c for c in contracts if _fmt_expiry(c.get("expiry")) == target_expiry]
+
+            if not expiry_contracts:
+                return {
+                    "status": "success",
+                    "instrument_key": instrument_key,
+                    "spot_price": 0.0,
+                    "expiry_date": target_expiry,
+                    "requested_expiry": requested_expiry,
+                    "expiry_fallback_used": expiry_fallback_used,
+                    "available_expiries": all_expiries,
+                    "chain": [],
+                    "message": "No option contracts found for selected expiry.",
+                }
 
             # 2. Extract spot price from one contract (or fetch separately if needed)
             # Upstox usually includes underlying_key in the contract
@@ -553,6 +574,8 @@ class MarketDataService:
                 "instrument_key": instrument_key,
                 "spot_price": spot_price,
                 "expiry_date": target_expiry,
+                "requested_expiry": requested_expiry,
+                "expiry_fallback_used": expiry_fallback_used,
                 "available_expiries": all_expiries,
                 "chain": matrix
             }
