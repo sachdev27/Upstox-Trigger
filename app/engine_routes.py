@@ -119,10 +119,14 @@ async def trigger_test_signal(payload: dict):
     """Manually trigger a test signal for an instrument."""
     engine = get_engine()
     instrument_key = payload.get("instrument_key")
+    action = str(payload.get("action") or "BUY").upper()
+    force_live = bool(payload.get("force_live", False))
     if not instrument_key:
         return {"status": "error", "message": "Missing instrument_key"}
+    if action not in {"BUY", "SELL"}:
+        return {"status": "error", "message": "action must be BUY or SELL"}
 
-    res = await engine.trigger_test_signal(instrument_key)
+    res = await engine.trigger_test_signal(instrument_key, action=action, force_live=force_live)
     return {"status": "success", "result": res}
 
 

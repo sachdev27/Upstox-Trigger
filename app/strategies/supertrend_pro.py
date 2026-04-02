@@ -118,6 +118,9 @@ class SuperTrendPro(BaseStrategy):
             "oc_confidence_penalty":    15,     # points removed when OC contradicts
             "oc_block_contradictions":  False,  # block signal if OC strongly disagrees
             "oc_block_threshold":       60,     # directional_score threshold for block
+
+            # Broker truth mode
+            "require_broker_fill_confirmation": True,
         }
 
     # ── Auto TF Adaptation (Section 0) ──────────────────────────

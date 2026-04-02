@@ -673,6 +673,78 @@ input:checked + .toggle-slider:before {
     border-color: var(--primary);
 }
 
+.execution-probe-card {
+    margin-top: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.execution-probe-header {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.execution-probe-result {
+    font-size: 0.72rem;
+    line-height: 1.45;
+    border-radius: 6px;
+    padding: 8px;
+}
+
+.probe-neutral {
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-muted);
+}
+
+.probe-pass {
+    background: rgba(0, 208, 132, 0.08);
+    color: #98ffd1;
+}
+
+.probe-fail {
+    background: rgba(255, 71, 87, 0.1);
+    color: #ffd0d5;
+}
+
+.probe-title {
+    font-size: 0.8rem;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.probe-subtitle {
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+.probe-list {
+    margin: 0;
+    padding-left: 16px;
+}
+
+.probe-list li {
+    margin: 2px 0;
+}
+
+.probe-list li.pass {
+    color: #98ffd1;
+}
+
+.probe-list li.fail {
+    color: #ffd0d5;
+    font-weight: 600;
+}
+
+.probe-note {
+    margin-top: 6px;
+    color: var(--text-muted);
+}
+
 /* Buttons */
 .btn {
     display: inline-flex;

@@ -215,6 +215,19 @@ function setupEventListeners() {
     });
 }
 
+function formatOptionLabel(data) {
+    if (!data) return '';
+    const side = data.option_side || data.resolved_option_side;
+    const strike = data.strike_price != null ? Number(data.strike_price) : null;
+    const expiry = data.expiry_date || null;
+    const underlying = data.underlying || null;
+    if (!side && strike == null && !expiry) return '';
+    const strikeTxt = Number.isFinite(strike) ? `${Math.round(strike)}` : '-';
+    const expiryTxt = expiry || '-';
+    const underTxt = underlying || '-';
+    return `${underTxt} ${side || '-'} ${strikeTxt} ${expiryTxt}`;
+}
+
 function handleWsMessage(msg) {
     let d;
     if (Array.isArray(msg) && msg[0] === 't') {
@@ -263,8 +276,10 @@ function handleWsMessage(msg) {
                 const modeTag = td.type === 'paper' ? '📋 Paper' : '🔴 Live';
                 const actionTag = td.action === 'BUY' ? '🟢 BUY' : '🔴 SELL';
                 const symbol = td.instrument?.split('|')[1] || td.instrument || 'Unknown';
-                addLog(`💰 ${modeTag} ${actionTag} ${symbol} @ ₹${formatPrice(td.price)}`, 'success');
-                showToast(`${actionTag} ${symbol} @ ₹${formatPrice(td.price)} (${modeTag})`, 'success');
+                const optLabel = formatOptionLabel(td);
+                const suffix = optLabel ? ` | ${optLabel}` : '';
+                addLog(`💰 ${modeTag} ${actionTag} ${symbol} @ ₹${formatPrice(td.price)}${suffix}`, 'success');
+                showToast(`${actionTag} ${symbol} @ ₹${formatPrice(td.price)} (${modeTag})${optLabel ? ` | ${optLabel}` : ''}`, 'success');
                 // Refresh all order-related panels
                 refreshTrades();
                 refreshPositions();
@@ -561,20 +576,30 @@ async function refreshTrades() {
             time: t.timestamp,
             action: (t.action || '-').toUpperCase(),
             instrument: t.instrument_key?.split('|')[1] || t.instrument_key || '-',
+            instrument_full: t.instrument_key || '-',
             price: t.price,
             stop_loss: t.stop_loss,
             take_profit: t.take_profit,
             mode: '📋 Paper',
+            option_side: t.metadata?.option_side || null,
+            strike_price: t.metadata?.strike_price ?? null,
+            expiry_date: t.metadata?.expiry_date || null,
+            underlying: t.metadata?.underlying || null,
         }));
 
         const normLive = liveTrades.map(t => ({
             time: t.order_timestamp,
             action: (t.transaction_type || t.side || '-').toUpperCase(),
             instrument: t.tradingsymbol || t.instrument_key?.split('|')[1] || t.instrument_token || '-',
+            instrument_full: t.instrument_key || t.instrument_token || '-',
             price: t.average_price ?? t.price,
             stop_loss: null,
             take_profit: null,
             mode: '🔴 Live',
+            option_side: null,
+            strike_price: null,
+            expiry_date: null,
+            underlying: null,
         }));
 
         const merged = [...normLive, ...normPaper].sort((a, b) => {
@@ -614,11 +639,15 @@ async function refreshTrades() {
             const tpTxt = t.take_profit != null && Number.isFinite(Number(t.take_profit))
                 ? `₹${formatPrice(Number(t.take_profit))}`
                 : '-';
+            const optionLabel = formatOptionLabel(t);
+            const instrumentCell = optionLabel
+                ? `${t.instrument || '-'}<br><span class="text-muted" style="font-size:0.65rem">${optionLabel}</span>`
+                : (t.instrument || '-');
 
             const rowHtml = `
                 <td class="text-muted" style="font-size:0.7rem">${timeStr}</td>
                 <td><span class="badge ${sideClass}">${t.action || '-'}</span></td>
-                <td class="mono" style="font-size:0.75rem">${t.instrument || '-'}</td>
+                <td class="mono" style="font-size:0.75rem">${instrumentCell}</td>
                 <td class="mono">${t.price != null ? `₹${formatPrice(Number(t.price))}` : '-'}</td>
                 <td class="mono text-muted" style="font-size:0.75rem">${slTxt}</td>
                 <td class="mono text-muted" style="font-size:0.75rem">${tpTxt}</td>
@@ -813,6 +842,156 @@ function updateEngineStatus(status) {
         renderOcInsight(status.oc_insight);
     }
 }
+
+function setExecutionProbeResult(html, state = 'neutral') {
+    const box = document.getElementById('execution-probe-result');
+    if (!box) return;
+    box.classList.remove('probe-pass', 'probe-fail', 'probe-neutral');
+    box.classList.add(`probe-${state}`);
+    box.innerHTML = html;
+}
+
+async function collectExecutionProbeSnapshot() {
+    const [statusRes, signalsRes, tradesRes, orderBookRes] = await Promise.allSettled([
+        api.getStatus(),
+        api.getSignals(),
+        api.getPaperTrades(),
+        api.getOrderBook(),
+    ]);
+
+    const status = statusRes.status === 'fulfilled' ? statusRes.value : {};
+    const signalList = signalsRes.status === 'fulfilled'
+        ? (signalsRes.value.data || signalsRes.value.signals || [])
+        : [];
+    const tradeList = tradesRes.status === 'fulfilled'
+        ? (tradesRes.value.data || tradesRes.value.trades || [])
+        : [];
+    const orderList = orderBookRes.status === 'fulfilled'
+        ? (orderBookRes.value.data || [])
+        : [];
+
+    const filledOrders = orderList.filter(o => ['COMPLETE', 'FILLED'].includes((o.status || '').toUpperCase())).length;
+    const rejectedOrders = orderList.filter(o => ['REJECTED', 'CANCELLED'].includes((o.status || '').toUpperCase())).length;
+
+    return {
+        status,
+        paperTrading: Boolean(status.paper_trading),
+        signalsToday: Number(status.signals_today ?? signalList.length),
+        tradesToday: Number(status.trades_today ?? tradeList.length),
+        filledOrders,
+        rejectedOrders,
+    };
+}
+
+window.runExecutionProbe = async (action = 'BUY') => {
+    setExecutionProbeResult('Running verification...', 'neutral');
+    showToast('Running execution robustness probe...', 'info');
+
+    try {
+        const before = await collectExecutionProbeSnapshot();
+        const probeAction = String(action || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+        const forceLive = !before.paperTrading;
+
+        const triggerResult = await api.triggerTestSignal(currentInstrumentKey, probeAction, forceLive);
+        await api.runCycle();
+        await new Promise(resolve => setTimeout(resolve, 1400));
+
+        await Promise.all([
+            refreshStatus(),
+            refreshSignals(),
+            refreshTrades(),
+            refreshOrderBook(),
+            refreshPositions(),
+        ]);
+
+        const after = await collectExecutionProbeSnapshot();
+
+        const hasExecutionEvidence =
+            (after.tradesToday > before.tradesToday) || (after.filledOrders > before.filledOrders);
+
+        const checks = [
+            {
+                label: 'Engine initialized',
+                pass: Boolean(after.status.initialized),
+                detail: after.status.initialized ? 'Engine is active' : 'Engine not initialized',
+            },
+            {
+                label: 'Strategy loaded',
+                pass: Array.isArray(after.status.active_strategies) && after.status.active_strategies.length > 0,
+                detail: `Strategies: ${(after.status.active_strategies || []).length}`,
+            },
+            {
+                label: 'Signal recorded',
+                pass: (after.signalsToday > before.signalsToday) || hasExecutionEvidence,
+                detail: `${before.signalsToday} -> ${after.signalsToday}`,
+            },
+            {
+                label: 'Trade or filled order observed',
+                pass: hasExecutionEvidence,
+                detail: `Trades ${before.tradesToday} -> ${after.tradesToday}, Filled ${before.filledOrders} -> ${after.filledOrders}`,
+            },
+            {
+                label: 'No rejection spike',
+                pass: after.rejectedOrders <= before.rejectedOrders,
+                detail: `Rejected ${before.rejectedOrders} -> ${after.rejectedOrders}`,
+            },
+        ];
+
+        const modeText = after.paperTrading ? 'Paper mode' : 'Live mode';
+        const signalStatus = triggerResult?.status || 'unknown';
+        const requestedLeg = probeAction === 'BUY' ? 'CE' : 'PE';
+        const resolvedLeg = triggerResult?.result?.option_side || triggerResult?.result?.resolved_option_side || '-';
+        const legCheckPass = resolvedLeg === '-' ? null : resolvedLeg === requestedLeg;
+        const executionMode = triggerResult?.result?.execution_mode || 'unknown';
+        const entryOrderIds = Array.isArray(triggerResult?.result?.entry_order_ids) ? triggerResult.result.entry_order_ids : [];
+        const executionError = triggerResult?.result?.execution_error || null;
+        const executionErrorCode = triggerResult?.result?.execution_error_code || null;
+        const liveModeNeedsBrokerProof = !after.paperTrading;
+
+        if (legCheckPass !== null) {
+            checks.splice(2, 0, {
+                label: `${probeAction} mapped to ${requestedLeg}`,
+                pass: legCheckPass,
+                detail: `Resolved option side: ${resolvedLeg}`,
+            });
+        }
+
+        if (liveModeNeedsBrokerProof) {
+            checks.splice(4, 0, {
+                label: 'Broker accepted live order',
+                pass: executionMode === 'live' && entryOrderIds.length > 0,
+                detail: entryOrderIds.length > 0
+                    ? `Order IDs: ${entryOrderIds.join(', ')}`
+                    : `No live order ID returned${executionError ? ` (${executionError})` : ''}`,
+            });
+        }
+
+        const failed = checks.filter(c => !c.pass);
+        const isPass = failed.length === 0;
+
+        const lines = [
+            `<div class="probe-title">${isPass ? 'PASS' : 'ATTENTION'} - ${modeText}</div>`,
+            `<div class="probe-subtitle">Instrument: ${currentInstrumentName} | Trigger: ${signalStatus} | Action: ${probeAction}</div>`,
+            '<ul class="probe-list">',
+            ...checks.map(c => `<li class="${c.pass ? 'pass' : 'fail'}">${c.pass ? 'OK' : 'FAIL'} - ${c.label} (${c.detail})</li>`),
+            '</ul>',
+        ];
+
+        if (!after.paperTrading) {
+            lines.push(`<div class="probe-note">Live mode check: order ids ${entryOrderIds.length > 0 ? entryOrderIds.join(', ') : 'not available'}; keep watching Order Book for COMPLETE/FILLED statuses.</div>`);
+            if (executionErrorCode === 'UDAPI1154') {
+                lines.push('<div class="probe-note">Upstox blocked this request due to static IP restriction (UDAPI1154). Add your current public IP to allowed IPs in Upstox app settings or run from an allowed network.</div>');
+            }
+        }
+
+        setExecutionProbeResult(lines.join(''), isPass ? 'pass' : 'fail');
+        showToast(isPass ? 'Execution probe passed' : 'Execution probe found issues', isPass ? 'success' : 'warning');
+    } catch (e) {
+        console.error('Execution probe failed', e);
+        setExecutionProbeResult('Probe failed to run. Check backend logs or auth status.', 'fail');
+        showToast('Execution probe failed', 'error');
+    }
+};
 
 async function checkAuth() {
     try {
@@ -1179,11 +1358,47 @@ window.runCycle = async () => {
 // window.toggleSidebar removed
 
 window.triggerTestSignal = async () => {
+    const action = 'BUY';
     try {
-        showToast("Triggering test signal...", "info");
-        await api.triggerTestSignal(currentInstrumentKey);
+        showToast(`Triggering ${action} test signal...`, "info");
+        const res = await api.triggerTestSignal(currentInstrumentKey, action);
+        await Promise.all([refreshStatus(), refreshSignals()]);
+        const optSide = res?.result?.option_side || res?.result?.resolved_option_side || 'N/A';
+        setExecutionProbeResult(`Manual ${action} signal queued for ${currentInstrumentName}. Option side: ${optSide}.`, 'neutral');
     } catch (e) {
         showToast("Failed to trigger test signal", "error");
+        setExecutionProbeResult('Manual signal failed. Check engine/auth status.', 'fail');
+    }
+};
+
+window.triggerTestSignalWithAction = async (action = 'BUY') => {
+    const side = String(action || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+    try {
+        showToast(`Triggering ${side} test signal...`, 'info');
+        const status = await api.getStatus();
+        const forceLive = status && status.paper_trading === false;
+        const res = await api.triggerTestSignal(currentInstrumentKey, side, forceLive);
+        await Promise.all([refreshStatus(), refreshSignals(), refreshTrades(), refreshOrderBook()]);
+        const requestedLeg = side === 'BUY' ? 'CE' : 'PE';
+        const optSide = res?.result?.option_side || res?.result?.resolved_option_side || 'N/A';
+        const strike = res?.result?.strike_price != null ? Math.round(Number(res.result.strike_price)) : 'N/A';
+        const expiry = res?.result?.expiry_date || 'N/A';
+        const underlying = res?.result?.underlying || currentInstrumentKey;
+        const resolved = res?.result?.resolved_instrument || 'N/A';
+        const execMode = res?.result?.execution_mode || 'unknown';
+        const orderIds = Array.isArray(res?.result?.entry_order_ids) ? res.result.entry_order_ids : [];
+        const execError = res?.result?.execution_error || null;
+        const execErrorCode = res?.result?.execution_error_code || null;
+        setExecutionProbeResult(
+            `Manual ${side} signal queued for ${currentInstrumentName}. Expected ${requestedLeg}, resolved ${optSide}.<br>`
+            + `Underlying: ${underlying} | Strike: ${strike} | Expiry: ${expiry}<br>`
+            + `Contract: ${resolved}<br>`
+            + `Mode: ${execMode}${orderIds.length > 0 ? ` | Order IDs: ${orderIds.join(', ')}` : ''}${execError ? ` | Error: ${execError}` : ''}${execErrorCode ? ` | Code: ${execErrorCode}` : ''}`,
+            'neutral'
+        );
+    } catch (e) {
+        showToast(`Failed to trigger ${side} test signal`, 'error');
+        setExecutionProbeResult(`Manual ${side} signal failed. Check engine/auth status.`, 'fail');
     }
 };
 

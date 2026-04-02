@@ -569,7 +569,7 @@ class AutomationEngine:
                 from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
                 exit_side = TransactionType.SELL if is_long else TransactionType.BUY
                 if not is_paper and self._order_service:
-                    await asyncio.to_thread(
+                    exit_result = await asyncio.to_thread(
                         self._order_service.place_order,
                         OrderRequest(
                             instrument_token=instrument_key,
@@ -580,6 +580,27 @@ class AutomationEngine:
                             tag=f"auto-exit-{strat_name}",
                         )
                     )
+                    require_confirm = bool(pos.get("require_broker_confirmation", True))
+                    if require_confirm:
+                        exit_order_id = self._order_service.extract_order_id(exit_result)
+                        if not exit_order_id:
+                            logger.error(
+                                f"Exit order for {instrument_key} returned no order_id; "
+                                "keeping position open for safety."
+                            )
+                            continue
+                        conf = await asyncio.to_thread(
+                            self._order_service.wait_for_terminal_order,
+                            str(exit_order_id),
+                            8.0,
+                            0.5,
+                        )
+                        if not conf.get("is_filled", False):
+                            logger.error(
+                                f"Exit not confirmed for {instrument_key} "
+                                f"(status={conf.get('status')}, timed_out={conf.get('timed_out')}); keeping position open."
+                            )
+                            continue
 
                 pnl_per_unit = (ltp - entry) if is_long else (entry - ltp)
                 pnl = pnl_per_unit * max(1, qty_remaining)
@@ -636,7 +657,7 @@ class AutomationEngine:
         exit_side = TransactionType.SELL if is_long else TransactionType.BUY
         if not is_paper and self._order_service:
             try:
-                await asyncio.to_thread(
+                exit_result = await asyncio.to_thread(
                     self._order_service.place_order,
                     OrderRequest(
                         instrument_token=instrument_key,
@@ -647,8 +668,27 @@ class AutomationEngine:
                         tag=f"partial-{label.lower()}-{strat_name}",
                     )
                 )
+                require_confirm = bool(pos.get("require_broker_confirmation", True))
+                if require_confirm:
+                    exit_order_id = self._order_service.extract_order_id(exit_result)
+                    if not exit_order_id:
+                        logger.error(f"Partial exit {label} returned no order_id for {instrument_key}; skipping PnL booking")
+                        return
+                    conf = await asyncio.to_thread(
+                        self._order_service.wait_for_terminal_order,
+                        str(exit_order_id),
+                        8.0,
+                        0.5,
+                    )
+                    if not conf.get("is_filled", False):
+                        logger.error(
+                            f"Partial exit {label} not confirmed for {instrument_key} "
+                            f"(status={conf.get('status')}, timed_out={conf.get('timed_out')}); skipping PnL booking"
+                        )
+                        return
             except Exception as e:
                 logger.error(f"Partial exit order failed ({label}): {e}")
+                return
 
         partial_pnl = ((ltp - entry) if is_long else (entry - ltp)) * qty
         pos["partial_pnl"] = float(pos.get("partial_pnl", 0.0)) + partial_pnl
@@ -989,27 +1029,78 @@ class AutomationEngine:
                     return analysis
         return None
 
-    async def trigger_test_signal(self, instrument_key: str) -> dict:
+    async def trigger_test_signal(self, instrument_key: str, action: str = "BUY", force_live: bool = False) -> dict:
         """Force a test signal for debugging."""
         logger.info(f"🧪 [TEST] Triggering manual signal for {instrument_key}")
 
         # Create a fake signal
         from app.orders.models import TransactionType
+        normalized_action = str(action or "BUY").upper()
+        tx_action = TransactionType.SELL if normalized_action == "SELL" else TransactionType.BUY
         signal = TradeSignal(
             strategy_name="Manual Test",
             instrument_key=instrument_key,
-            action=TransactionType.BUY,
+            action=tx_action,
             price=25000.0,  # Arbitrary for test
             stop_loss=24900.0,
             take_profit=25300.0,
             confidence_score=5,
         )
+        signal.metadata["requested_action"] = normalized_action
+        signal.metadata["force_live"] = bool(force_live)
+
+        # Keep status counters consistent with regular strategy-originated signals.
+        self._signals_log.append({
+            "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
+            "strategy": "Manual Test",
+            "strategy_name": "Manual Test",
+            "instrument": instrument_key,
+            "instrument_key": instrument_key,
+            "action": signal.action.value,
+            "price": signal.price,
+            "confidence": signal.confidence_score,
+        })
 
         # Use a dummy strategy config
-        dummy_config = StrategyConfig(name="Test", enabled=True, instruments=[instrument_key], timeframe="1m", paper_trading=True)
+        effective_paper = self.paper_trading and (not force_live)
+        dummy_config = StrategyConfig(
+            name="Test",
+            enabled=True,
+            instruments=[instrument_key],
+            timeframe="1m",
+            paper_trading=effective_paper,
+        )
 
         await self._handle_signal(signal, dummy_config)
-        return {"action": signal.action.value, "instrument": instrument_key}
+
+        entry_order_ids = [str(x) for x in (signal.metadata or {}).get("_entry_order_ids", []) if x]
+        resolved_key = signal.instrument_key
+        for pos_key, pos in self._managed_positions.items():
+            if pos_key == resolved_key or pos_key.startswith(f"{resolved_key}#"):
+                oid = (pos or {}).get("entry_order_id")
+                if oid:
+                    entry_order_ids.append(str(oid))
+
+        # De-duplicate while preserving insertion order.
+        entry_order_ids = list(dict.fromkeys(entry_order_ids))
+
+        placement_modes = (signal.metadata or {}).get("_placement_modes", [])
+        execution_mode = "live" if ("live" in placement_modes and entry_order_ids) else ("paper" if effective_paper else "unknown")
+        return {
+            "requested_action": normalized_action,
+            "executed_action": signal.action.value,
+            "instrument": instrument_key,
+            "underlying": (signal.metadata or {}).get("underlying", instrument_key),
+            "resolved_instrument": signal.instrument_key,
+            "resolved_option_side": signal.metadata.get("option_side"),
+            "strike_price": signal.metadata.get("strike_price"),
+            "expiry_date": signal.metadata.get("expiry_date"),
+            "force_live": bool(force_live),
+            "execution_mode": execution_mode,
+            "entry_order_ids": entry_order_ids,
+            "execution_error": (signal.metadata or {}).get("_last_execution_error"),
+            "execution_error_code": (signal.metadata or {}).get("_last_execution_error_code"),
+        }
 
     def reset_daily(self):
         """Reset daily counters (called post-market)."""

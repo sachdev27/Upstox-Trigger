@@ -32,6 +32,17 @@ class Settings(BaseSettings):
     SANDBOX_API_SECRET: str = ""
     SANDBOX_ACCESS_TOKEN: str = ""
 
+    # -- Network / Proxy -----------------------------------------
+    # Applied to Upstox SDK clients via `upstox_client.Configuration.proxy`.
+    # Example: "http://user:pass@140.245.243.157:3128"
+    # Some SDK/urllib3 combinations may not support SOCKS directly.
+    UPSTOX_PROXY_URL: str = ""
+
+    # Optional proxies for direct `requests` calls (e.g., diagnostics).
+    # Example: "socks5h://user:pass@140.245.243.157:1080"
+    REQUESTS_HTTP_PROXY: str = ""
+    REQUESTS_HTTPS_PROXY: str = ""
+
     # ── Instruments (shortcuts) ─────────────────────────────────
     BANKNIFTY: str = "NSE_INDEX|Nifty Bank"
     NIFTY: str = "NSE_INDEX|Nifty 50"

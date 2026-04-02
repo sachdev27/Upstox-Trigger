@@ -84,11 +84,11 @@ export const api = {
     async getMarketStatus() {
         return fetch(`${API_BASE}/orders/status/market-hours`).then(r => r.json());
     },
-    async triggerTestSignal(instrumentKey) {
+    async triggerTestSignal(instrumentKey, action = 'BUY', forceLive = false) {
         return fetch(`${API_BASE}/engine/test-signal`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ instrument_key: instrumentKey })
+            body: JSON.stringify({ instrument_key: instrumentKey, action, force_live: forceLive })
         }).then(r => r.json());
     },
     async setAutoMode(enabled) {

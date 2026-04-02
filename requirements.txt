@@ -30,6 +30,7 @@ grpcio>=1.60.0
 
 # HTTP
 requests>=2.31.0
+PySocks>=1.7.1
 
 # Environment
 python-dotenv>=1.0.0

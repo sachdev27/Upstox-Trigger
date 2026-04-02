@@ -5,6 +5,7 @@ Refactored from legacy/order/order.py and legacy/connections.py.
 """
 
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 
 import upstox_client
@@ -76,6 +77,8 @@ class OrderService:
         )
 
         result = self.place_order(order)
+        entry_order_id = self._extract_order_id(result)
+        sl_order_id = None
 
         # Place stop-loss if provided
         if signal.stop_loss > 0:
@@ -93,11 +96,137 @@ class OrderService:
                 tag=f"sl-{signal.strategy_name}",
             )
             try:
-                self.place_order(sl_order)
+                sl_result = self.place_order(sl_order)
+                sl_order_id = self._extract_order_id(sl_result)
             except Exception as e:
                 logger.error(f"SL order failed: {e}")
 
-        return result
+        return {
+            "entry": result,
+            "entry_order_id": entry_order_id,
+            "sl_order_id": sl_order_id,
+            "quantity": quantity,
+        }
+
+    def _extract_order_id(self, payload: dict | None) -> str | None:
+        """Extract broker order_id from varied Upstox response shapes."""
+        if not payload:
+            return None
+
+        # Common direct keys
+        for key in ("order_id", "orderId", "id"):
+            val = payload.get(key)
+            if val:
+                return str(val)
+
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("order_id", "orderId", "id"):
+                val = data.get(key)
+                if val:
+                    return str(val)
+            # V3 shape: data.order_ids = ["..."]
+            order_ids = data.get("order_ids")
+            if isinstance(order_ids, list) and order_ids:
+                return str(order_ids[0])
+
+        return None
+
+    def extract_order_id(self, payload: dict | None) -> str | None:
+        """Public wrapper for order-id extraction used by execution pipeline."""
+        return self._extract_order_id(payload)
+
+    def _extract_order_status(self, payload: dict | None) -> str | None:
+        """Extract order status from varied Upstox response shapes."""
+        if not payload:
+            return None
+
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("status", "order_status"):
+                val = data.get(key)
+                if isinstance(val, str) and val:
+                    return val.upper()
+
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                for key in ("status", "order_status"):
+                    val = first.get(key)
+                    if isinstance(val, str) and val:
+                        return val.upper()
+
+        # Fall back to envelope status only if nothing found in data.
+        # SDK wrapper statuses are typically success/error/partial_success.
+        for key in ("status", "order_status"):
+            val = payload.get(key)
+            if isinstance(val, str) and val:
+                up = val.upper()
+                if up not in {"SUCCESS", "ERROR", "PARTIAL_SUCCESS"}:
+                    return up
+
+        return None
+
+    def wait_for_terminal_order(
+        self,
+        order_id: str,
+        timeout_sec: float = 8.0,
+        poll_interval_sec: float = 0.5,
+    ) -> dict:
+        """
+        Poll broker order status until terminal state or timeout.
+
+        Returns:
+            {
+              "order_id": str,
+              "status": str | None,
+              "is_filled": bool,
+              "is_terminal": bool,
+              "timed_out": bool,
+            }
+        """
+        terminal_states = {"COMPLETE", "COMPLETED", "REJECTED", "CANCELLED", "CANCELED"}
+        start = time.monotonic()
+        last_status = None
+
+        while (time.monotonic() - start) < timeout_sec:
+            details = self.get_order_details(order_id)
+            status = self._extract_order_status(details)
+
+            # Fallback: check order book if details endpoint shape changes.
+            if not status:
+                book = self.get_order_book()
+                if isinstance(book, list):
+                    row = next(
+                        (
+                            r for r in book
+                            if str(r.get("order_id") or r.get("orderId") or "") == str(order_id)
+                        ),
+                        None,
+                    )
+                    if row:
+                        status = str(row.get("status") or row.get("order_status") or "").upper() or None
+
+            if status:
+                last_status = status
+                if status in terminal_states:
+                    return {
+                        "order_id": str(order_id),
+                        "status": status,
+                        "is_filled": status in {"COMPLETE", "COMPLETED"},
+                        "is_terminal": True,
+                        "timed_out": False,
+                    }
+
+            time.sleep(poll_interval_sec)
+
+        return {
+            "order_id": str(order_id),
+            "status": last_status,
+            "is_filled": False,
+            "is_terminal": False,
+            "timed_out": True,
+        }
 
     def modify_order(self, order_id: str, modifications: dict) -> dict:
         """Modify an existing order."""

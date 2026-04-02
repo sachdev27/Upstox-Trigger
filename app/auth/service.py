@@ -36,9 +36,7 @@ class AuthService:
 
         if target_sandbox:
             logger.debug("Creating Upstox SANDBOX configuration.")
-            config = upstox_client.Configuration()
-            config.access_token = self.settings.SANDBOX_ACCESS_TOKEN
-            return config
+            return self._build_sdk_config(access_token=self.settings.SANDBOX_ACCESS_TOKEN)
 
         # Live Mode logic (with refresh)
         if self._is_token_expired(self.settings.ACCESS_TOKEN):
@@ -47,8 +45,7 @@ class AuthService:
             if not refreshed and self.settings.ACCESS_TOKEN:
                 logger.info("Proceeding with existing live access token.")
 
-        config = upstox_client.Configuration()
-        config.access_token = self.settings.ACCESS_TOKEN
+        config = self._build_sdk_config(access_token=self.settings.ACCESS_TOKEN)
         self._configuration = config
         return config
 
@@ -143,7 +140,7 @@ class AuthService:
     def _exchange_code_for_token(self, auth_code: str, use_sandbox: bool = False) -> str | None:
         """Call Upstox token endpoint to exchange auth code for access token."""
         try:
-            config = upstox_client.Configuration()
+            config = self._build_sdk_config()
             api_instance = upstox_client.LoginApi(
                 upstox_client.ApiClient(config)
             )
@@ -162,6 +159,19 @@ class AuthService:
         except Exception as e:
             logger.error(f"Token exchange failed: {e}")
             return None
+
+    def _build_sdk_config(self, access_token: str | None = None) -> upstox_client.Configuration:
+        """Construct SDK configuration with optional token and process-level proxy support."""
+        config = upstox_client.Configuration()
+        if access_token:
+            config.access_token = access_token
+
+        proxy_url = (self.settings.UPSTOX_PROXY_URL or "").strip()
+        if proxy_url:
+            config.proxy = proxy_url
+            logger.info("Upstox SDK proxy is enabled.")
+
+        return config
 
 
 # Module-level singleton

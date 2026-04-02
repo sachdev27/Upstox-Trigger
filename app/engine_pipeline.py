@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING
@@ -259,6 +260,8 @@ class ExecutionProcessor(SignalProcessor):
         lot_idx: int = 0,
         swarm_count: int = 1,
         tp_override: float | None = None,
+        entry_order_id: str | None = None,
+        sl_order_id: str | None = None,
     ) -> dict:
         """Build the managed_positions dict entry for one lot."""
         meta = signal.metadata or {}
@@ -297,6 +300,10 @@ class ExecutionProcessor(SignalProcessor):
             # Swarm metadata
             "swarm_idx":          lot_idx,
             "swarm_total":        swarm_count,
+            # Broker truth metadata
+            "entry_order_id":      entry_order_id,
+            "sl_order_id":         sl_order_id,
+            "require_broker_confirmation": bool((config.params or {}).get("require_broker_fill_confirmation", True)),
         }
 
     async def _place_one_lot(
@@ -312,7 +319,7 @@ class ExecutionProcessor(SignalProcessor):
         swarm_count: int,
         meta: dict,
         tp_override: float | None,
-    ):
+    ) -> bool:
         """Execute a single lot (paper or live) and register in _managed_positions."""
         tp_levels = [
             float(meta.get("tp1") or signal.take_profit or 0.0),
@@ -322,27 +329,76 @@ class ExecutionProcessor(SignalProcessor):
         # Each swarm lot gets a progressively further TP
         swarm_tp = tp_levels[min(lot_idx, len(tp_levels) - 1)] if swarm_count > 1 else None
 
+        entry_order_id = None
+        sl_order_id = None
+
         if is_paper:
             logger.info(
                 f"📝 [PAPER LOT {lot_idx+1}/{swarm_count}] "
                 f"{signal.action.value} {instrument_key} @ {signal.price:.2f} "
                 f"TP={swarm_tp or signal.take_profit:.2f}"
             )
+            meta.setdefault("_placement_modes", []).append("paper")
         else:
             try:
                 from app.orders.models import OrderRequest, OrderType, ProductType, TransactionType
                 result = await asyncio.to_thread(
                     engine._order_service.place_signal, signal
                 )
-                logger.info(f"💰 [LIVE LOT {lot_idx+1}/{swarm_count}] Order placed: {result}")
+                entry_order_id = result.get("entry_order_id") if isinstance(result, dict) else None
+                sl_order_id = result.get("sl_order_id") if isinstance(result, dict) else None
+                if entry_order_id:
+                    meta.setdefault("_entry_order_ids", []).append(str(entry_order_id))
+                meta.setdefault("_placement_modes", []).append("live")
+
+                require_confirm = bool((config.params or {}).get("require_broker_fill_confirmation", True))
+                if require_confirm:
+                    if not entry_order_id:
+                        meta["_last_execution_error"] = "broker order id missing"
+                        logger.error(
+                            f"❌ Swarm lot {lot_idx+1} has no broker order_id; "
+                            "cannot confirm fill. Skipping managed position registration."
+                        )
+                        return False
+
+                    conf = await asyncio.to_thread(
+                        engine._order_service.wait_for_terminal_order,
+                        str(entry_order_id),
+                        8.0,
+                        0.5,
+                    )
+                    if not conf.get("is_filled", False):
+                        meta["_last_execution_error"] = f"order not filled (status={conf.get('status')}, timed_out={conf.get('timed_out')})"
+                        logger.error(
+                            f"❌ Swarm lot {lot_idx+1} not filled (status={conf.get('status')}, timed_out={conf.get('timed_out')}). "
+                            "Skipping managed position registration."
+                        )
+                        return False
+
+                logger.info(
+                    f"💰 [LIVE LOT {lot_idx+1}/{swarm_count}] Order confirmed: "
+                    f"entry_order_id={entry_order_id}, sl_order_id={sl_order_id}"
+                )
             except Exception as e:
+                err_text = str(e)
+                code_match = re.search(r'"errorCode"\s*:\s*"([A-Z0-9_]+)"', err_text)
+                msg_match = re.search(r'"message"\s*:\s*"([^"]+)"', err_text)
+                err_code = code_match.group(1) if code_match else None
+                err_msg = msg_match.group(1) if msg_match else None
+
+                if err_code and err_msg:
+                    meta["_last_execution_error"] = f"{err_code}: {err_msg}"
+                    meta["_last_execution_error_code"] = err_code
+                else:
+                    meta["_last_execution_error"] = f"order placement exception: {e}"
                 logger.error(f"❌ Swarm lot {lot_idx+1} order failed: {e}")
-                return
+                return False
 
         # Register position
         engine._managed_positions[pos_key] = self._build_position_record(
             signal, config, exec_qty, is_paper,
             lot_idx=lot_idx, swarm_count=swarm_count, tp_override=swarm_tp,
+            entry_order_id=entry_order_id, sl_order_id=sl_order_id,
         )
 
         # DB log
@@ -363,6 +419,8 @@ class ExecutionProcessor(SignalProcessor):
                         "underlying": meta.get("underlying", instrument_key),
                         "swarm_lot": lot_idx + 1,
                         "swarm_total": swarm_count,
+                        "entry_order_id": entry_order_id,
+                        "sl_order_id": sl_order_id,
                         **(signal.metadata or {}),
                     }
                 )
@@ -376,10 +434,13 @@ class ExecutionProcessor(SignalProcessor):
         except Exception as e:
             logger.error(f"DB session failed: {e}")
 
+        return True
+
     async def process(self, signal: 'TradeSignal', config: 'StrategyConfig', engine: 'AutomationEngine') -> bool:
-        is_paper       = engine.paper_trading or config.paper_trading
         trade_instrument = signal.instrument_key
         meta           = signal.metadata or {}
+        force_live = bool(meta.get("force_live", False))
+        is_paper   = (False if force_live else (engine.paper_trading or config.paper_trading))
 
         # Do not stack duplicate entries on an already managed open position.
         if signal.action.value == "BUY" and trade_instrument in engine._managed_positions:
@@ -388,6 +449,8 @@ class ExecutionProcessor(SignalProcessor):
 
         exec_qty    = max(int(signal.quantity or 0), 1)
         swarm_count = max(1, int(meta.get("swarm_count", 1)))
+
+        executed_any = False
 
         if signal.action.value == "BUY":
             if swarm_count > 1:
@@ -406,11 +469,12 @@ class ExecutionProcessor(SignalProcessor):
                     )
                     for i in range(swarm_count)
                 ]
-                await asyncio.gather(*lot_tasks)
+                results = await asyncio.gather(*lot_tasks)
+                executed_any = any(bool(r) for r in results)
             else:
                 # ── Single lot with optional partial-booking ─────────────────────
                 engine._managed_positions.pop(trade_instrument, None)
-                await self._place_one_lot(
+                executed_any = await self._place_one_lot(
                     trade_instrument, signal, config, engine,
                     exec_qty, is_paper,
                     pos_key=trade_instrument,
@@ -418,7 +482,15 @@ class ExecutionProcessor(SignalProcessor):
                     meta=meta, tp_override=None,
                 )
 
-            engine._paper_positions[trade_instrument] = signal.price
+            if not executed_any:
+                logger.warning(
+                    f"⚠️ Execution skipped for {trade_instrument} ({signal.action.value}): "
+                    f"{meta.get('_last_execution_error', 'no placement confirmation')}"
+                )
+                return False
+
+            if is_paper:
+                engine._paper_positions[trade_instrument] = signal.price
 
         elif signal.action.value == "SELL":
             entry = engine._paper_positions.pop(trade_instrument, None)
@@ -429,6 +501,7 @@ class ExecutionProcessor(SignalProcessor):
                     f"📊 Paper P&L: ₹{pnl:.2f} on {trade_instrument} "
                     f"(daily total: ₹{engine._daily_pnl:.2f})"
                 )
+            executed_any = True
 
         engine._trades_today.append({
             "timestamp":  datetime.now(IST).isoformat(),
@@ -442,7 +515,7 @@ class ExecutionProcessor(SignalProcessor):
             "score":      signal.confidence_score,
             "swarm_count": swarm_count,
         })
-        return True
+        return executed_any
 
 class AlerterProcessor(SignalProcessor):
     """Sends notifications (Email) for trade signals and persists to ActiveSignal."""
@@ -528,6 +601,21 @@ class AlerterProcessor(SignalProcessor):
         is_paper = engine.paper_trading or config.paper_trading
         mode_str = "📋 PAPER" if is_paper else "🔴 LIVE"
         action_emoji = "🟢" if signal.action.value == "BUY" else "🔴"
+        meta = signal.metadata or {}
+        option_side = meta.get("option_side")
+        strike = meta.get("strike_price")
+        expiry = meta.get("expiry_date")
+        underlying = meta.get("underlying")
+        option_line = ""
+        if option_side or strike or expiry:
+            strike_txt = f"{float(strike):.0f}" if strike is not None else "-"
+            option_line = (
+                f"\n🎯 Option Contract:\n"
+                f"   Underlying: {underlying or '-'}\n"
+                f"   Side:       {option_side or '-'}\n"
+                f"   Strike:     {strike_txt}\n"
+                f"   Expiry:     {expiry or '-'}\n"
+            )
 
         subject = f"🎯 {signal.action.value} Signal: {instrument_symbol} ({instrument_name})"
 
@@ -539,6 +627,7 @@ class AlerterProcessor(SignalProcessor):
             f"   Symbol:    {instrument_symbol}\n"
             f"   Name:      {instrument_name}\n"
             f"   Key:       {signal.instrument_key}\n\n"
+            f"{option_line}"
             f"📊 Strategy:  {signal.strategy_name or config.name}\n"
             f"⏱️ Timeframe: {config.timeframe}\n\n"
             f"{'─' * 40}\n"
@@ -566,6 +655,10 @@ class BroadcastProcessor(SignalProcessor):
                     "type": "paper" if is_paper else "live",
                     "strategy": signal.strategy_name or config.name,
                     "instrument": signal.instrument_key,
+                    "underlying": (signal.metadata or {}).get("underlying"),
+                    "option_side": (signal.metadata or {}).get("option_side"),
+                    "strike_price": (signal.metadata or {}).get("strike_price"),
+                    "expiry_date": (signal.metadata or {}).get("expiry_date"),
                     "action": signal.action.value,
                     "price": signal.price
                 }

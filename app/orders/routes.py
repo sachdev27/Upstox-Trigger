@@ -81,6 +81,7 @@ async def get_paper_trades(limit: int = 100):
                     "take_profit": r.take_profit,
                     "status": r.status,
                     "pnl": r.pnl,
+                    "metadata": r.metadata_json if isinstance(r.metadata_json, dict) else {},
                 }
                 for r in rows
             ]

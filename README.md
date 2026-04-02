@@ -50,6 +50,26 @@ uvicorn app.main:app --reload --port 8000
 
 Open `http://localhost:8000/docs` for the interactive Swagger UI.
 
+## Static IP / Proxy Setup (Upstox Compliance)
+
+If your Upstox app requires API orders from a whitelisted static IP, configure your OCI proxy and set environment variables:
+
+```bash
+# Upstox SDK traffic (used by Auth/Orders/MarketData services)
+UPSTOX_PROXY_URL="http://user:pass@140.245.243.157:3128"
+
+# Optional: direct requests() traffic (diagnostics/custom calls)
+REQUESTS_HTTP_PROXY="socks5h://user:pass@140.245.243.157:1080"
+REQUESTS_HTTPS_PROXY="socks5h://user:pass@140.245.243.157:1080"
+```
+
+Verify outbound IP through proxy:
+
+```bash
+./venv/bin/python scripts/verify_proxy_ip.py
+# Expected: 140.245.243.157
+```
+
 ## Key Endpoints
 
 | Endpoint | Description |
