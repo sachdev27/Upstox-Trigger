@@ -61,17 +61,17 @@ export const api = {
         return fetch(`${API_BASE}/orders/trades/paper?limit=${limit}`).then(r => r.json());
     },
     async getOrderBook() {
-        return fetch(`${API_BASE}/orders/book`).then(r => r.json());
+        return fetchJsonWithRetry(`${API_BASE}/orders/book`, {}, 3, 500);
     },
     async placeOrder(payload) {
         const params = new URLSearchParams(payload);
         return fetch(`${API_BASE}/orders/place?${params.toString()}`, { method: 'POST' }).then(r => r.json());
     },
     async getFunds() {
-        return fetch(`${API_BASE}/orders/funds`).then(r => r.json());
+        return fetchJsonWithRetry(`${API_BASE}/orders/funds`, {}, 3, 500);
     },
     async getHoldings() {
-        return fetch(`${API_BASE}/orders/holdings`).then(r => r.json());
+        return fetchJsonWithRetry(`${API_BASE}/orders/holdings`, {}, 3, 500);
     },
 
     // Engine
@@ -92,7 +92,7 @@ export const api = {
         }).then(r => r.json());
     },
     async getPositions() {
-        return fetch(`${API_BASE}/orders/positions`).then(r => r.json());
+        return fetchJsonWithRetry(`${API_BASE}/orders/positions`, {}, 3, 500);
     },
     async getSignals() {
         return fetch(`${API_BASE}/strategies/signals`).then(r => r.json());

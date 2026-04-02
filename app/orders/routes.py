@@ -2,6 +2,7 @@
 Order API routes — place, cancel, view orders.
 """
 
+import logging
 from fastapi import APIRouter, Query
 
 from app.auth.service import get_auth_service
@@ -9,6 +10,7 @@ from app.orders.service import OrderService
 from app.orders.models import OrderRequest, OrderType, TransactionType, ProductType
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
+logger = logging.getLogger(__name__)
 
 
 def _get_order_service() -> OrderService:
@@ -44,15 +46,23 @@ async def place_order(
 @router.get("/book")
 async def get_order_book():
     """Get today's order book."""
-    svc = _get_order_service()
-    return {"data": svc.get_order_book()}
+    try:
+        svc = _get_order_service()
+        return {"status": "success", "data": svc.get_order_book()}
+    except Exception as e:
+        logger.error(f"Order book fetch failed: {e}", exc_info=True)
+        return {"status": "error", "message": str(e), "data": []}
 
 
 @router.get("/trades")
 async def get_trades():
     """Get today's trade history."""
-    svc = _get_order_service()
-    return {"data": svc.get_trade_history()}
+    try:
+        svc = _get_order_service()
+        return {"status": "success", "data": svc.get_trade_history()}
+    except Exception as e:
+        logger.error(f"Trade history fetch failed: {e}", exc_info=True)
+        return {"status": "error", "message": str(e), "data": []}
 
 
 @router.get("/trades/paper")
@@ -94,29 +104,45 @@ async def get_paper_trades(limit: int = 100):
 @router.get("/status/market-hours")
 async def check_market_hours():
     """Check if market is currently open."""
-    svc = _get_order_service()
-    return {"market_open": svc.is_market_hours()}
+    try:
+        svc = _get_order_service()
+        return {"market_open": svc.is_market_hours()}
+    except Exception as e:
+        logger.error(f"Market hours check failed: {e}", exc_info=True)
+        return {"status": "error", "message": str(e), "market_open": False}
 
 
 @router.get("/positions")
 async def get_positions():
     """Get all open positions."""
-    svc = _get_order_service()
-    return {"data": svc.get_positions()}
+    try:
+        svc = _get_order_service()
+        return {"status": "success", "data": svc.get_positions()}
+    except Exception as e:
+        logger.error(f"Positions fetch failed: {e}", exc_info=True)
+        return {"status": "error", "message": str(e), "data": []}
 
 
 @router.get("/holdings")
 async def get_holdings():
     """Get all equity holdings."""
-    svc = _get_order_service()
-    return {"data": svc.get_holdings()}
+    try:
+        svc = _get_order_service()
+        return {"status": "success", "data": svc.get_holdings()}
+    except Exception as e:
+        logger.error(f"Holdings fetch failed: {e}", exc_info=True)
+        return {"status": "error", "message": str(e), "data": []}
 
 
 @router.get("/funds")
 async def get_funds():
     """Get account funds and margin."""
-    svc = _get_order_service()
-    return {"data": svc.get_funds_and_margin()}
+    try:
+        svc = _get_order_service()
+        return {"status": "success", "data": svc.get_funds_and_margin()}
+    except Exception as e:
+        logger.error(f"Funds fetch failed: {e}", exc_info=True)
+        return {"status": "error", "message": str(e), "data": {}}
 
 
 @router.get("/{order_id}")

@@ -334,8 +334,12 @@ function flushUpdates() {
         // 4. Option Chain (Cached)
         const cachedOC = domNodes.get(`oc-${d.instrument_key}`);
         if (cachedOC) {
-            if (cachedOC.ltp) cachedOC.ltp.innerText = formatPrice(d.ltp);
-            if (cachedOC.volume) cachedOC.volume.innerText = (d.volume || 0).toLocaleString();
+            if (cachedOC.ltp && typeof d.ltp === 'number' && Number.isFinite(d.ltp) && d.ltp > 0) {
+                cachedOC.ltp.innerText = formatPrice(d.ltp);
+            }
+            if (cachedOC.volume && typeof d.volume === 'number' && Number.isFinite(d.volume) && d.volume >= 0) {
+                cachedOC.volume.innerText = d.volume.toLocaleString();
+            }
             if (cachedOC.delta && d.delta !== undefined) cachedOC.delta.innerText = d.delta.toFixed(2);
             if (cachedOC.theta && d.theta !== undefined) cachedOC.theta.innerText = d.theta.toFixed(2);
             if (cachedOC.iv && d.iv !== undefined) cachedOC.iv.innerText = `${(d.iv || 0).toFixed(1)}%`;
@@ -1933,10 +1937,28 @@ window.fetchOptionChain = async () => {
         if (res.status === 'success') {
             renderOptionChain(res);
 
-            // Subscribe to visible strikes (±10 around ATM)
+            // Subscribe only to an ATM window to keep WS load bounded and data live.
             if (ws && ws.isConnected()) {
                 const keys = [];
-                res.chain.forEach(row => {
+                const chain = Array.isArray(res.chain) ? res.chain : [];
+                let atmIndex = -1;
+                let closestDiff = Number.POSITIVE_INFINITY;
+
+                chain.forEach((row, idx) => {
+                    const strike = Number(row?.strike_price);
+                    const diff = Math.abs(strike - Number(res.spot_price || 0));
+                    if (Number.isFinite(diff) && diff < closestDiff) {
+                        closestDiff = diff;
+                        atmIndex = idx;
+                    }
+                });
+
+                const windowSize = 12; // total strikes around ATM => up to 24 contracts
+                const start = Math.max(0, atmIndex - Math.floor(windowSize / 2));
+                const end = Math.min(chain.length, start + windowSize);
+                const focusedRows = chain.slice(start, end);
+
+                focusedRows.forEach(row => {
                     if (row.ce?.instrument_key) keys.push(row.ce.instrument_key);
                     if (row.pe?.instrument_key) keys.push(row.pe.instrument_key);
                 });

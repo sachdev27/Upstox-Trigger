@@ -106,6 +106,7 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     app.state.last_market_tick = None
     app.state.last_market_tick_epoch = 0.0
+    app.state.greeks_cache = {}  # {instrument_key: {delta, theta, iv, ...}}
 
     # --- Live Market Data & Portfolio Streamer ---
     from app.market_data.streamer import MarketDataStreamer, PortfolioStreamer
@@ -123,6 +124,7 @@ async def lifespan(app: FastAPI):
         """
         Callback for the streamer.
         'data' is the decoded protobuf to dict from the SDK.
+        Handles ltpc, full, and option_greeks modes.
         """
         if not data:
             return
@@ -141,48 +143,77 @@ async def lifespan(app: FastAPI):
 
         try:
             for instrument_key, feed in feeds.items():
-                # V3 structure from Upstox is nested. Let's try to find ltp anywhere.
-                # Common paths:
-                # Stock: feed['fullFeed']['marketFF']['ltpc']['ltp']
-                # Index: feed['fullFeed']['indexFF']['ltpc']['ltp']
-                # LTQ: feed['ltpc']['ltp'] (some modes)
+                # Handle three modes:
+                # 1. ltpc: feed['ltpc']['ltp']
+                # 2. full: feed['fullFeed']['marketFF']['ltpc']['ltp'] + optionGreeks
+                # 3. option_greeks: feed['optionGreeks'][...] (Greeks only)
 
-                # 1. Fast inner extraction
-                inner = feed.get("fullFeed") or feed.get("ff") or feed
-                if "marketFF" in inner: inner = inner["marketFF"]
-                elif "indexFF" in inner: inner = inner["indexFF"]
+                # 1. Navigate to the feed level (handle nested structure)
+                # option_greeks mode arrives via firstLevelWithGreeks in SDK V3.
+                inner = (
+                    feed.get("fullFeed")
+                    or feed.get("ff")
+                    or feed.get("firstLevelWithGreeks")
+                    or feed.get("first_level_with_greeks")
+                    or feed
+                )
+                if "marketFF" in inner:
+                    inner = inner["marketFF"]
+                elif "indexFF" in inner:
+                    inner = inner["indexFF"]
 
-                # 2. Direct extraction with early exit
+                # 2. Extract LTP (present in ltpc and full modes; absent in option_greeks)
                 ltpc = inner.get("ltpc", {})
                 ltp = ltpc.get("ltp")
-                if not ltp:
-                    continue
 
-                # 3. Optimized metadata extraction
-                greeks = inner.get("optionGreeks", {})
-                volume = inner.get("vtt", 0)
-                iv = inner.get("iv", greeks.get("iv", 0.0))
+                # 3. Extract Greeks (present in full and option_greeks modes)
+                # option_greeks mode: feed['optionGreeks'] directly
+                # full mode: feed['fullFeed']['..']['optionGreeks'] or feed['optionGreeks']
+                greeks = (
+                    inner.get("optionGreeks")
+                    or inner.get("option_greeks")
+                    or feed.get("optionGreeks")
+                    or feed.get("option_greeks")
+                    or {}
+                )
+                delta = float(greeks.get("delta") or 0.0)
+                theta = float(greeks.get("theta") or 0.0)
+                iv = float(inner.get("iv") or greeks.get("iv") or 0.0)
 
-                ds = datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp() # IST timestamp
-                # 4. Packed Array Transport (Binary-lite)
-                # Format: ["t", key, ltp, v, iv, delta, theta, ts]
+                # 4. Extract volume (ltpc/full modes; absent in option_greeks)
+                raw_volume = inner.get("vtt")
+                volume = int(raw_volume) if raw_volume is not None else None
+
+                # 5. Build message in IST timestamp
+                ds = datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp()
                 msg = [
                     "t",
                     instrument_key,
-                    float(ltp),
-                    int(volume),
-                    round(float(iv or 0.0) * 100, 2),
-                    round(float(greeks.get("delta") or 0.0), 4),
-                    round(float(greeks.get("theta") or 0.0), 2),
+                    float(ltp) if ltp is not None else None,
+                    int(volume) if volume is not None else None,
+                    round(iv * 100, 2) if iv else 0.0,
+                    round(delta, 4),
+                    round(theta, 2),
                     int(ds)
                 ]
 
                 app.state.last_market_tick = {
                     "instrument_key": instrument_key,
-                    "ltp": float(ltp),
+                    "ltp": float(ltp) if ltp is not None else None,
+                    "delta": round(delta, 4),
+                    "theta": round(theta, 2),
+                    "iv": round(iv * 100, 2),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
                 app.state.last_market_tick_epoch = time.monotonic()
+
+                # Cache Greeks for option contracts (used by option chain endpoint)
+                if delta or theta or iv:  # Only cache if Greeks are present
+                    app.state.greeks_cache[instrument_key] = {
+                        "delta": round(delta, 4),
+                        "theta": round(theta, 2),
+                        "iv": round(iv * 100, 2),
+                    }
 
                 target_clients = instrument_subscriptions.get(instrument_key, set())
                 for client_ws in list(target_clients):
@@ -379,7 +410,31 @@ async def websocket_endpoint(ws: WebSocket):
                     await ws.send_json({"type": "status", "data": status})
 
                 elif action == "subscribe" and key:
+                    # NOTE: For option chains, prefer REST endpoint /market/option-chain instead.
+                    # WebSocket subscriptions are best used for live-traded instruments (few contracts).
+                    # Option chains contain many contracts; subscribing to all via WebSocket is inefficient.
+
                     keys_to_sub = [k.strip() for k in key.split(',') if k.strip()]
+
+                    # Guard: Keep option subscriptions bounded while still covering an ATM window.
+                    # option_greeks is lightweight, so a moderate cap is safe.
+                    option_keys = [k for k in keys_to_sub if "NSE_FO" in k or "FO|" in k]
+                    max_option_subs = 30
+                    if len(option_keys) > max_option_subs:
+                        logger.warning(
+                            f"⚠️ Attempted to subscribe to {len(option_keys)} option contracts at once. "
+                            f"Capping to {max_option_subs} option contracts for WS option_greeks mode."
+                        )
+                        # Keep all non-option subscriptions + first N option keys
+                        non_option_keys = [k for k in keys_to_sub if k not in option_keys]
+                        keys_to_sub = non_option_keys + option_keys[:max_option_subs]
+                        option_keys = option_keys[:max_option_subs]
+
+                    # Batch subscriptions by mode for efficiency
+                    ltpc_batch = []
+                    greeks_batch = []
+                    full_batch = []
+
                     for k in keys_to_sub:
                         if k not in instrument_subscriptions:
                             instrument_subscriptions[k] = set()
@@ -390,12 +445,38 @@ async def websocket_endpoint(ws: WebSocket):
                         client_subscriptions[ws].add(k)
 
                         if len(instrument_subscriptions[k]) == 1:
-                            if hasattr(app.state, "market_streamer") and app.state.market_streamer:
-                                try:
-                                    app.state.market_streamer.subscribe([k], mode="ltpc")
-                                    logger.info(f"📡 SDK Subscription started (LTPC mode) for: {k}")
-                                except Exception as e:
-                                    logger.error(f"Failed to subscribe to {k}: {e}")
+                            # Smart mode selection based on instrument type
+                            is_option = "NSE_FO" in k or "FO|" in k
+                            if is_option:
+                                # Use option_greeks mode: lightweight, provides only Greeks data
+                                greeks_batch.append(k)
+                            else:
+                                # Indices/stocks: use ltpc (last traded price, lightweight)
+                                ltpc_batch.append(k)
+
+                    # Execute batch subscriptions
+                    if hasattr(app.state, "market_streamer") and app.state.market_streamer:
+                        try:
+                            if ltpc_batch:
+                                app.state.market_streamer.subscribe(ltpc_batch, mode="ltpc")
+                                logger.info(f"📡 Batch subscribed ({len(ltpc_batch)} instruments, LTPC mode)")
+                        except Exception as e:
+                            logger.error(f"Failed to batch subscribe (ltpc): {e}")
+
+                        try:
+                            if greeks_batch:
+                                app.state.market_streamer.subscribe(greeks_batch, mode="option_greeks")
+                                logger.info(f"📡 Batch subscribed ({len(greeks_batch)} option contracts, OPTION_GREEKS mode)")
+                        except Exception as e:
+                            logger.error(f"Failed to batch subscribe (option_greeks): {e}")
+
+                        try:
+                            if full_batch:
+                                app.state.market_streamer.subscribe(full_batch, mode="full")
+                                logger.info(f"📡 Batch subscribed ({len(full_batch)} instruments, FULL mode)")
+                        except Exception as e:
+                            logger.error(f"Failed to batch subscribe (full): {e}")
+
 
                         # Immediate bootstrap tick for chart initialization.
                         ltp_service = getattr(app.state, "ltp_fallback_service", None)

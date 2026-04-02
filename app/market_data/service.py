@@ -429,12 +429,19 @@ class MarketDataService:
             logger.error(f"Brokerage calc failed: {e}")
             return None
     async def get_detailed_option_chain(
-        self, instrument_key: str, expiry_date: str | None = None
+        self, instrument_key: str, expiry_date: str | None = None, greeks_cache: dict | None = None
     ) -> dict:
         """
         High-level helper to fetch a full option chain with LTP and Greeks.
         Can be used by both the API routes and the Automation Engine.
+
+        Args:
+            instrument_key: The index/stock key (e.g., "NSE_INDEX|Nifty 50")
+            expiry_date: Target expiry (format: "YYYY-MM-DD"). If None, uses first expiry.
+            greeks_cache: Dict of {instrument_key: {delta, theta, iv, ...}} from streamer for live Greeks.
         """
+        greeks_cache = greeks_cache or {}
+
         try:
             # 1. Get available contracts
             contracts = self.get_option_contracts(instrument_key)
@@ -515,6 +522,8 @@ class MarketDataService:
                 ltp = q.get("last_price", 0.0)
 
                 # Upstox full quote puts oi, volume, etc. at top level
+                # Note: Greeks (delta, theta, iv) are not available from REST API.
+                # They require full-mode WebSocket streaming. For now, REST provides LTP/OI/Volume.
                 data = {
                     "instrument_key": c["instrument_key"],
                     "ltp": float(ltp or 0),
@@ -525,6 +534,8 @@ class MarketDataService:
                     "theta": float(q.get("theta") or 0.0),
                     "gamma": float(q.get("gamma") or 0.0),
                     "vega": float(q.get("vega") or 0.0),
+                    # Fallback to streamer cache for Greeks if available
+                    **(greeks_cache.get(c["instrument_key"], {}) if greeks_cache else {}),
                 }
 
                 # Classification based on instrument_type (Upstose SDK field)

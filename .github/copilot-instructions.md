@@ -245,6 +245,7 @@ Upstox-Trigger/
 - **Rate Limiting**: Enforced across all endpoints (50 req/sec, 500 req/min, 2000 req/30min)
 - **WebSocket Streaming**: MarketDataStreamerV3 with protobuf decoding
 - **Smart Subscription**: Subscribe/unsubscribe dynamically based on active strategies
+- **Option Chain Live Greeks**: REST provides chain/LTP/OI/Volume, while Greeks are populated from WebSocket `option_greeks` mode via in-memory `greeks_cache`
 
 **Files:**
 - **[market_data/service.py](app/market_data/service.py)**
@@ -265,7 +266,18 @@ Upstox-Trigger/
   - `GET /market/candles?instrument_key=...&interval=...` → Historical data
   - `GET /market/positions` → Open positions
   - `GET /market/holdings` → Delivery holdings
+  - `GET /market/option-chain?instrument_key=...&expiry_date=...` → Detailed option chain with REST market data + streamed Greeks cache
+  - `GET /market/option-chain/analysis?instrument_key=...&expiry_date=...` → PCR, max-pain, OI concentration, IV skew
   - `WebSocket /ws` → Connect for real-time ticks
+
+**Option Chain Data Path (Current):**
+```python
+# 1) Frontend fetches option chain via REST
+# 2) Frontend subscribes only ATM window contracts over WS (bounded list)
+# 3) Backend subscribes options in option_greeks mode (lightweight)
+# 4) main.py parses firstLevelWithGreeks / optionGreeks and updates app.state.greeks_cache
+# 5) /market/option-chain overlays cached Greeks onto REST quote payload
+```
 
 **Cache Strategy:**
 ```python
@@ -954,6 +966,13 @@ frontend/
 - Subscribe to instrument keys dynamically
 - Update last-traded-price (LTP) display
 - Show volume, open interest
+- Uses packed tick payload for low overhead: `["t", instrument_key, ltp, volume, iv, delta, theta, ts]`
+
+**Option Chain Live Updates:**
+- Option chain table is fetched via REST (`/market/option-chain`)
+- Frontend subscribes an ATM-focused window (bounded strikes) instead of full chain blast
+- Backend uses `option_greeks` WS mode for option contracts; indices/stocks remain `ltpc`
+- Greeks are patched into rows from live ticks; LTP remains REST/ltpc-driven when greek-only ticks do not carry LTP
 
 **Interactive Charts:**
 - TradingView Lightweight Charts library
@@ -1014,6 +1033,8 @@ frontend/
 | `/market/candles?instrument_key=...&interval=...` | GET | Historical candles (cached 55s) | `{candles: [{open, high, low, close, volume}, ...]}` |
 | `/market/positions` | GET | Open positions | `{positions: [{symbol, quantity, entry_price, ...}]}` |
 | `/market/holdings` | GET | Delivery holdings | `{holdings: [{symbol, quantity, average_price, ...}]}` |
+| `/market/option-chain?instrument_key=...&expiry_date=...` | GET | Detailed option chain with live Greeks overlay | `{chain: [{strike_price, ce, pe}], spot_price: ...}` |
+| `/market/option-chain/analysis?instrument_key=...&expiry_date=...` | GET | Option-chain analytics summary | `{analysis: {pcr, max_pain, oi_by_strike, iv_skew}}` |
 | `/ws` | WebSocket | Real-time tick stream | Continuous `{symbol, ltp, volume, ...}` JSON messages |
 
 ### Strategies
@@ -1694,9 +1715,10 @@ class UpstoxRateLimiter:
 **Protocol:** Protobuf-encoded messages
 
 **Channels:**
-- `full`: All fields (price, volume, open interest, etc.)
+- `full_d5`: Full market depth (5 levels) + core fields
 - `ltpc`: Last traded price & close only (lighter)
 - `option_greeks`: Greek values for options
+- `full_d30`: Full market depth (30 levels)
 
 **Auto-Reconnection:** Built-in exponential backoff (1s → 30s max)
 

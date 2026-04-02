@@ -4,7 +4,7 @@ Market Data API routes — quotes, candles, instruments, option chain.
 NOTE: Positions, holdings, and funds routes live in orders/routes.py.
 """
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 
 from app.auth.service import get_auth_service
 from app.market_data.service import MarketDataService
@@ -304,10 +304,12 @@ async def get_strategy_overlay(
 @router.get("/option-chain")
 async def get_detailed_option_chain(
     instrument_key: str = Query(...),
-    expiry_date: str | None = Query(None)
+    expiry_date: str | None = Query(None),
+    request: Request = None
 ):
     """
     Get full option chain matrix with LTP and Greeks for a given index/stock and expiry.
+    Uses Greeks from the WebSocket streamer cache for accuracy.
     """
     try:
         # Resolve common index aliases
@@ -317,7 +319,9 @@ async def get_detailed_option_chain(
             instrument_key = "NSE_INDEX|Nifty Bank"
 
         svc = _get_market_service()
-        result = await svc.get_detailed_option_chain(instrument_key, expiry_date)
+        # Greeks cache is optional fallback; REST API provides LTP/OI/Volume
+        greeks_cache = getattr(request.app.state, "greeks_cache", {}) if request else {}
+        result = await svc.get_detailed_option_chain(instrument_key, expiry_date, greeks_cache)
         return result
 
     except Exception as e:
@@ -330,6 +334,7 @@ async def get_detailed_option_chain(
 async def get_option_chain_analysis(
     instrument_key: str = Query(..., description="e.g. NSE_INDEX|Nifty 50"),
     expiry_date: str | None = Query(None),
+    request: Request = None,
 ):
     """
     Real-time option chain analytics: PCR, OI concentration, Max-Pain, IV Skew.
@@ -346,7 +351,8 @@ async def get_option_chain_analysis(
             instrument_key = "NSE_INDEX|Nifty Bank"
 
         svc = _get_market_service()
-        chain_data = await svc.get_detailed_option_chain(instrument_key, expiry_date)
+        greeks_cache = getattr(request.app.state, "greeks_cache", {}) if request else {}
+        chain_data = await svc.get_detailed_option_chain(instrument_key, expiry_date, greeks_cache)
 
         if chain_data.get("status") != "success" or not chain_data.get("chain"):
             return {"status": "error", "message": "No chain data available"}
@@ -355,7 +361,6 @@ async def get_option_chain_analysis(
             chain_data["chain"],
             float(chain_data.get("spot_price") or 0),
         )
-
         return {
             "status": "success",
             "instrument_key": instrument_key,
