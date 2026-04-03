@@ -2443,6 +2443,24 @@ window.saveExecutionSettings = async () => {
     }
 };
 
+window.saveSpeedSettings = async () => {
+    const secRaw = parseInt(document.getElementById('setting-candle-check-seconds')?.value || '5', 10);
+    const payload = {
+        FAST_EXECUTION_MODE: !!document.getElementById('setting-fast-execution-mode')?.checked,
+        FAST_SKIP_OC_INSIGHT: !!document.getElementById('setting-fast-skip-oc-insight')?.checked,
+        FAST_ATM_RESOLVER_LIGHT: !!document.getElementById('setting-fast-atm-resolver-light')?.checked,
+        FAST_ASYNC_ALERTER: !!document.getElementById('setting-fast-async-alerter')?.checked,
+        CANDLE_CHECK_SECONDS: Number.isFinite(secRaw) ? Math.max(1, Math.min(59, secRaw)) : 5,
+    };
+
+    try {
+        await api.saveSettings(payload);
+        showToast('Speed settings saved (restart app to apply scheduler interval)', 'success');
+    } catch (e) {
+        showToast('Failed to save speed settings', 'error');
+    }
+};
+
 // ── Risk Level Multiplier Helpers ──────────────────────────
 
 // Strategy-specific key names for SL/TP/trailing multipliers
@@ -2661,6 +2679,23 @@ async function loadSettingsIntoUI() {
             toggleTrailingGapInput();
         }
         if (document.getElementById('gtt-trailing-gap-value')) document.getElementById('gtt-trailing-gap-value').value = settings.GTT_TRAILING_GAP_VALUE || 0;
+
+        // Speed mode settings
+        if (document.getElementById('setting-fast-execution-mode')) {
+            document.getElementById('setting-fast-execution-mode').checked = settings.FAST_EXECUTION_MODE ?? false;
+        }
+        if (document.getElementById('setting-fast-skip-oc-insight')) {
+            document.getElementById('setting-fast-skip-oc-insight').checked = settings.FAST_SKIP_OC_INSIGHT ?? true;
+        }
+        if (document.getElementById('setting-fast-atm-resolver-light')) {
+            document.getElementById('setting-fast-atm-resolver-light').checked = settings.FAST_ATM_RESOLVER_LIGHT ?? true;
+        }
+        if (document.getElementById('setting-fast-async-alerter')) {
+            document.getElementById('setting-fast-async-alerter').checked = settings.FAST_ASYNC_ALERTER ?? true;
+        }
+        if (document.getElementById('setting-candle-check-seconds')) {
+            document.getElementById('setting-candle-check-seconds').value = settings.CANDLE_CHECK_SECONDS ?? 5;
+        }
 
     } catch (e) {
         console.error("Failed to load settings into UI", e);

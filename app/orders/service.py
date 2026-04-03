@@ -28,13 +28,39 @@ class OrderService:
         self.require_algo_name = bool(self.settings.REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS)
         self._daily_pnl: float = 0.0
         self._trade_count: int = 0
+        self._api_client_cache: upstox_client.ApiClient | None = None
+        self._api_client_token: str | None = None
+        self._order_api_cache: upstox_client.OrderApi | None = None
+        self._order_api_token: str | None = None
+        self._requests_session = None
+        try:
+            import requests as http_requests
+            self._requests_session = http_requests.Session()
+        except Exception:
+            self._requests_session = None
 
     def _get_api_client(self) -> upstox_client.ApiClient:
         """Create an SDK client with required regulatory headers when configured."""
+        token = getattr(self.config, "access_token", None)
+        if self._api_client_cache is not None and token == self._api_client_token:
+            return self._api_client_cache
+
         client = upstox_client.ApiClient(self.config)
         if self.algo_name:
             client.set_default_header("X-Algo-Name", self.algo_name)
+        self._api_client_cache = client
+        self._api_client_token = token
         return client
+
+    def _get_order_api(self) -> upstox_client.OrderApi:
+        """Reuse OrderApi while access token remains unchanged."""
+        token = getattr(self.config, "access_token", None)
+        if self._order_api_cache is not None and token == self._order_api_token:
+            return self._order_api_cache
+
+        self._order_api_cache = upstox_client.OrderApi(self._get_api_client())
+        self._order_api_token = token
+        return self._order_api_cache
 
     # ── Order Execution ─────────────────────────────────────────
 
@@ -58,9 +84,7 @@ class OrderService:
 
         order.quantity = self._normalize_to_lot_size(order.instrument_token, int(order.quantity or 0))
 
-        api = upstox_client.OrderApi(
-            self._get_api_client()
-        )
+        api = self._get_order_api()
         try:
             response = api.place_order(
                 order.to_api_dict(), self.api_version, algo_name=self.algo_name or None
@@ -311,9 +335,7 @@ class OrderService:
 
     def modify_order(self, order_id: str, modifications: dict) -> dict:
         """Modify an existing order."""
-        api = upstox_client.OrderApi(
-            self._get_api_client()
-        )
+        api = self._get_order_api()
         try:
             response = api.modify_order(modifications, self.api_version, algo_name=self.algo_name or None)
             return response.to_dict()
@@ -323,9 +345,7 @@ class OrderService:
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancel an order."""
-        api = upstox_client.OrderApi(
-            self._get_api_client()
-        )
+        api = self._get_order_api()
         try:
             response = api.cancel_order(order_id, self.api_version, algo_name=self.algo_name or None)
             return response.to_dict()
@@ -337,9 +357,7 @@ class OrderService:
 
     def get_order_book(self) -> list:
         """Get all orders for today."""
-        api = upstox_client.OrderApi(
-            self._get_api_client()
-        )
+        api = self._get_order_api()
         try:
             response = api.get_order_book(self.api_version)
             return response.to_dict().get("data", [])
@@ -349,9 +367,7 @@ class OrderService:
 
     def get_order_details(self, order_id: str) -> dict | None:
         """Get details for a specific order."""
-        api = upstox_client.OrderApi(
-            self._get_api_client()
-        )
+        api = self._get_order_api()
         try:
             response = api.get_order_details(
                 self.api_version, order_id=order_id
@@ -363,9 +379,7 @@ class OrderService:
 
     def get_trade_history(self) -> list:
         """Get trade history for today."""
-        api = upstox_client.OrderApi(
-            self._get_api_client()
-        )
+        api = self._get_order_api()
         try:
             response = api.get_trade_history(self.api_version)
             return response.to_dict().get("data", [])
@@ -504,7 +518,8 @@ class OrderService:
         proxies = get_requests_proxies(self.settings)
         if proxies:
             logger.info("Routing GTT request via configured proxy.")
-        resp = http_requests.post(
+        requester = self._requests_session or http_requests
+        resp = requester.post(
             url,
             json=gtt_params,
             headers=self._gtt_headers(),
@@ -646,7 +661,8 @@ class OrderService:
         url = "https://api.upstox.com/v3/order/gtt/cancel"
         payload = {"gtt_order_id": gtt_order_id}
         proxies = get_requests_proxies(self.settings)
-        resp = http_requests.delete(
+        requester = self._requests_session or http_requests
+        resp = requester.delete(
             url,
             json=payload,
             headers=self._gtt_headers(),

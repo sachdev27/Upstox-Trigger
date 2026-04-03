@@ -76,6 +76,11 @@ class EngineSettings(BaseModel, frozen=True):
     PAPER_TRADING: bool
     TRADING_SIDE: str
     MAX_OPEN_TRADES: int
+    CANDLE_CHECK_SECONDS: int
+    FAST_EXECUTION_MODE: bool
+    FAST_SKIP_OC_INSIGHT: bool
+    FAST_ATM_RESOLVER_LIGHT: bool
+    FAST_ASYNC_ALERTER: bool
 
 
 class StrategySettings(BaseModel, frozen=True):
@@ -171,6 +176,11 @@ class Settings(BaseSettings):
     PAPER_TRADING: bool = True
     TRADING_SIDE: str = "BOTH"
     MAX_OPEN_TRADES: int = 3
+    CANDLE_CHECK_SECONDS: int = 5
+    FAST_EXECUTION_MODE: bool = False
+    FAST_SKIP_OC_INSIGHT: bool = True
+    FAST_ATM_RESOLVER_LIGHT: bool = True
+    FAST_ASYNC_ALERTER: bool = True
 
     # ── Strategy Persistence ────────────────────────────────────
     ACTIVE_STRATEGY_CLASS: str = "SuperTrendPro"
@@ -262,6 +272,11 @@ class Settings(BaseSettings):
             PAPER_TRADING=self.PAPER_TRADING,
             TRADING_SIDE=self.TRADING_SIDE,
             MAX_OPEN_TRADES=self.MAX_OPEN_TRADES,
+            CANDLE_CHECK_SECONDS=self.CANDLE_CHECK_SECONDS,
+            FAST_EXECUTION_MODE=self.FAST_EXECUTION_MODE,
+            FAST_SKIP_OC_INSIGHT=self.FAST_SKIP_OC_INSIGHT,
+            FAST_ATM_RESOLVER_LIGHT=self.FAST_ATM_RESOLVER_LIGHT,
+            FAST_ASYNC_ALERTER=self.FAST_ASYNC_ALERTER,
         )
 
     @property

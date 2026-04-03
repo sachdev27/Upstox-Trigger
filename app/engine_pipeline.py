@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
@@ -216,6 +217,8 @@ class ATMResolverProcessor(SignalProcessor):
             try:
                 logger.info(f"🔍 Resolving ATM option for {signal.instrument_key} @ {signal.price}")
                 p = config.params or {}
+                fast_mode = bool(getattr(engine.settings, "FAST_EXECUTION_MODE", False))
+                fast_light_resolver = bool(getattr(engine.settings, "FAST_ATM_RESOLVER_LIGHT", True))
                 expiry_mode = str(p.get("option_expiry_mode", "current")).lower()
                 moneyness_steps = int(p.get("option_moneyness_steps", 0) or 0)
                 buy_only = bool(p.get("option_buy_only", True))
@@ -223,19 +226,28 @@ class ATMResolverProcessor(SignalProcessor):
                 liquidity_window_steps = int(p.get("option_liquidity_window_steps", 2) or 2)
                 distance_penalty = float(p.get("option_distance_penalty", 5.0) or 5.0)
 
+                if fast_mode and fast_light_resolver:
+                    # Speed path: minimize option-selection overhead for faster order submission.
+                    liquidity_filter = False
+                    liquidity_window_steps = 0
+
                 # Initial fetch gets spot + available expiries.
                 chain_data = await engine._market_service.get_detailed_option_chain(signal.instrument_key)
                 if chain_data["status"] == "success" and chain_data["chain"]:
                     available_expiries = chain_data.get("available_expiries", [])
                     selected_expiry = chain_data.get("expiry_date")
-                    if available_expiries:
+                    if available_expiries and not (fast_mode and fast_light_resolver):
                         if expiry_mode == "next" and len(available_expiries) > 1:
                             selected_expiry = available_expiries[1]
                         else:
                             selected_expiry = available_expiries[0]
 
                     # Refetch for selected expiry (if different from default response)
-                    if selected_expiry and selected_expiry != chain_data.get("expiry_date"):
+                    if (
+                        selected_expiry
+                        and selected_expiry != chain_data.get("expiry_date")
+                        and not (fast_mode and fast_light_resolver)
+                    ):
                         refetch = await engine._market_service.get_detailed_option_chain(
                             signal.instrument_key,
                             expiry_date=selected_expiry,
@@ -586,14 +598,19 @@ class ExecutionProcessor(SignalProcessor):
                 f"TP={swarm_tp or signal.take_profit:.2f}"
             )
             meta.setdefault("_placement_modes", []).append("paper")
+            meta["order_submit_ms"] = 0.0
+            signal.metadata.setdefault("latency", {})["order_submit_ms"] = 0.0
         else:
             try:
                 # ── GTT Order: single call places ENTRY + TARGET + STOPLOSS ──
                 trailing_gap = self._derive_trailing_gap(signal, config)
                 meta["execution_trailing_gap"] = trailing_gap
+                submit_t0 = time.perf_counter()
                 result = await asyncio.to_thread(
                     engine._order_service.place_gtt_signal, signal, trailing_gap
                 )
+                meta["order_submit_ms"] = round((time.perf_counter() - submit_t0) * 1000.0, 2)
+                signal.metadata.setdefault("latency", {})["order_submit_ms"] = meta["order_submit_ms"]
                 gtt_order_id = result.get("gtt_order_id") if isinstance(result, dict) else None
                 if isinstance(result, dict):
                     if result.get("gtt_payload"):
@@ -628,6 +645,9 @@ class ExecutionProcessor(SignalProcessor):
                     meta["_last_execution_error_code"] = err_code
                 else:
                     meta["_last_execution_error"] = f"GTT order placement exception: {e}"
+                if "order_submit_ms" not in meta:
+                    meta["order_submit_ms"] = round((time.perf_counter() - submit_t0) * 1000.0, 2)
+                signal.metadata.setdefault("latency", {})["order_submit_ms"] = meta["order_submit_ms"]
                 logger.error(f"❌ Swarm lot {lot_idx+1} GTT order failed: {e}")
                 return False
 

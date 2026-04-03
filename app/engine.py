@@ -986,6 +986,7 @@ class AutomationEngine:
                 self._persist_signal_rejection(rejection_event)
         if signal:
             signal.instrument_key = instrument_key
+            signal.metadata.setdefault("signal_generated_at", datetime.now(IST).isoformat())
             if bar_key:
                 signal.metadata["bar_key"] = bar_key
             self._signals_log.append({
@@ -1021,14 +1022,49 @@ class AutomationEngine:
 
     async def _handle_signal(self, signal: TradeSignal, config: StrategyConfig):
         """Handle a validated trade signal via the processing pipeline."""
+        pipeline_t0 = time.perf_counter()
+        latency = signal.metadata.setdefault("latency", {})
+        latency.setdefault("pipeline_started_at", datetime.now(IST).isoformat())
+        fast_mode = bool(getattr(self.settings, "FAST_EXECUTION_MODE", False))
+        fast_skip_oc = bool(getattr(self.settings, "FAST_SKIP_OC_INSIGHT", True))
+        fast_async_alerter = bool(getattr(self.settings, "FAST_ASYNC_ALERTER", True))
+
         for processor in self._pipeline:
+            p_t0 = time.perf_counter()
+            pname = processor.__class__.__name__
+
+            # Speed mode: trim non-essential pre-execution enrichment on the hot path.
+            if fast_mode and fast_skip_oc and isinstance(processor, OptionChainInsightProcessor):
+                latency[f"{pname}_ms"] = 0.0
+                latency[f"{pname}_skipped"] = True
+                continue
+
+            # Speed mode: run alerter in background so order path does not wait on DB/notify work.
+            if fast_mode and fast_async_alerter and isinstance(processor, AlerterProcessor):
+                asyncio.create_task(processor.process(signal, config, self))
+                latency[f"{pname}_ms"] = 0.0
+                latency[f"{pname}_async"] = True
+                continue
+
             try:
                 should_continue = await processor.process(signal, config, self)
+                latency[f"{pname}_ms"] = round((time.perf_counter() - p_t0) * 1000.0, 2)
                 if not should_continue:
+                    latency["pipeline_stopped_at"] = pname
                     break
             except Exception as e:
+                latency[f"{pname}_ms"] = round((time.perf_counter() - p_t0) * 1000.0, 2)
+                latency["pipeline_error_at"] = pname
                 logger.error(f"Error in pipeline processor {processor.__class__.__name__}: {e}")
                 break
+
+        latency["pipeline_total_ms"] = round((time.perf_counter() - pipeline_t0) * 1000.0, 2)
+        logger.info(
+            "⏱️ Signal pipeline latency: total=%.2fms exec=%.2fms order_submit=%.2fms",
+            float(latency.get("pipeline_total_ms") or 0.0),
+            float(latency.get("ExecutionProcessor_ms") or 0.0),
+            float(latency.get("order_submit_ms") or 0.0),
+        )
 
     # ── Market Close Square-Off ────────────────────────────────
 

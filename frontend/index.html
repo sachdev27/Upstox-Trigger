@@ -472,6 +472,58 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="settings-card">
+                            <h4>Signal Speed Mode</h4>
+                            <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 16px;">
+                                Tune signal-to-order latency. Enable only after validating behavior in paper mode.
+                            </p>
+                            <div class="auto-mode-card" style="margin-bottom: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Fast Execution Mode</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Applies low-latency execution pipeline shortcuts</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-fast-execution-mode">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auto-mode-card" style="margin-bottom: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Skip OC Insight (Fast)</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Bypass option-chain enrichment before execution</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-fast-skip-oc-insight">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auto-mode-card" style="margin-bottom: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Light ATM Resolver (Fast)</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Reduces contract-selection overhead</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-fast-atm-resolver-light">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auto-mode-card" style="margin-bottom: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Async Alerter (Fast)</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Offloads alerts/DB side-work from hot path</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-fast-async-alerter">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="form-group" style="margin-top: 12px;">
+                                <label class="form-label">Candle Check Interval (seconds)</label>
+                                <input type="number" id="setting-candle-check-seconds" class="form-input" min="1" max="59" step="1" value="5">
+                                <small class="text-muted">Lower = faster detection, higher API/CPU usage.</small>
+                            </div>
+                            <button class="btn btn-outline" onclick="saveSpeedSettings()">Save Speed Settings</button>
+                        </div>
                     </div>
                     <!-- Risk Levels — SL / TP / Trailing from active strategy -->
                     <div style="padding: 0 20px;">
