@@ -329,6 +329,7 @@ class ATMResolverProcessor(SignalProcessor):
                         option_ltp = float(opt.get("ltp") or 0.0)
                         if option_ltp > 0:
                             old_price = signal.price or spot
+                            target_enabled = bool(signal.metadata.get("target_enabled", True))
                             # Preserve the original risk-reward *ratio* from the
                             # underlying signal and translate it into option-premium
                             # terms.  For long options the SL is a % drop in premium
@@ -338,7 +339,9 @@ class ATMResolverProcessor(SignalProcessor):
                             else:
                                 sl_pct = 0.30  # default 30% SL on premium
 
-                            if old_price > 0 and signal.take_profit > 0:
+                            if not target_enabled:
+                                tp_pct = 0.0
+                            elif old_price > 0 and signal.take_profit > 0:
                                 tp_pct = abs(signal.take_profit - old_price) / old_price
                             else:
                                 tp_pct = 0.60  # default 60% TP on premium
@@ -350,7 +353,7 @@ class ATMResolverProcessor(SignalProcessor):
 
                             signal.price = option_ltp
                             signal.stop_loss = round(option_ltp * (1 - sl_pct), 2)
-                            signal.take_profit = round(option_ltp * (1 + tp_pct), 2)
+                            signal.take_profit = round(option_ltp * (1 + tp_pct), 2) if target_enabled else 0.0
                             signal.metadata["premium_risk_distance"] = round(abs(signal.price - signal.stop_loss), 2)
                             logger.info(
                                 f"💱 Option price recalc: LTP={option_ltp:.2f}, "

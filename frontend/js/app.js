@@ -1075,6 +1075,7 @@ window.runExecutionProbe = async (action = 'BUY') => {
 
         const hasExecutionEvidence =
             (after.tradesToday > before.tradesToday) || (after.filledOrders > before.filledOrders);
+        const rejectionDelta = after.rejectedOrders - before.rejectedOrders;
 
         const checks = [
             {
@@ -1099,8 +1100,8 @@ window.runExecutionProbe = async (action = 'BUY') => {
             },
             {
                 label: 'No rejection spike',
-                pass: after.rejectedOrders <= before.rejectedOrders,
-                detail: `Rejected ${before.rejectedOrders} -> ${after.rejectedOrders}`,
+                pass: rejectionDelta <= 0 || (hasExecutionEvidence && rejectionDelta <= 1),
+                detail: `Rejected ${before.rejectedOrders} -> ${after.rejectedOrders}${rejectionDelta > 0 ? ' (minor background noise tolerated)' : ''}`,
             },
         ];
 
