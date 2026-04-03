@@ -254,10 +254,12 @@ class ATMResolverProcessor(SignalProcessor):
                             signal.metadata["underlying_price"] = old_price
                             signal.metadata["underlying_sl"] = signal.stop_loss
                             signal.metadata["underlying_tp"] = signal.take_profit
+                            signal.metadata["execution_price_model"] = "option_premium"
 
                             signal.price = option_ltp
                             signal.stop_loss = round(option_ltp * (1 - sl_pct), 2)
                             signal.take_profit = round(option_ltp * (1 + tp_pct), 2)
+                            signal.metadata["premium_risk_distance"] = round(abs(signal.price - signal.stop_loss), 2)
                             logger.info(
                                 f"💱 Option price recalc: LTP={option_ltp:.2f}, "
                                 f"SL={signal.stop_loss:.2f} (-{sl_pct*100:.0f}%), "
@@ -299,6 +301,39 @@ class ExecutionProcessor(SignalProcessor):
       - Swarm execution: N parallel lots per signal, each with its own TP level
       - Partial booking metadata extracted from signal and stored in managed_positions
     """
+
+    def _derive_trailing_gap(self, signal: 'TradeSignal', config: 'StrategyConfig') -> float:
+        """Derive a trailing gap in the execution instrument's price domain.
+
+        For option-premium execution, preserve the relative trail-to-SL ratio rather
+        than reusing the underlying ATR directly.
+        """
+        meta = signal.metadata or {}
+        premium_risk_distance = abs(float(signal.price or 0.0) - float(signal.stop_loss or 0.0))
+        if premium_risk_distance <= 0:
+            return float((config.params or {}).get("trailing_gap", 0.0))
+
+        params = config.params or {}
+        sl_mult = float(
+            meta.get("sl_atr_multiplier")
+            or meta.get("sl_multiplier")
+            or params.get("sl_atr_multiplier")
+            or params.get("sl_multiplier")
+            or 0.0
+        )
+        trail_mult = float(
+            meta.get("trailing_atr_mult")
+            or meta.get("trail_multiplier")
+            or params.get("trailing_atr_mult")
+            or params.get("trail_multiplier")
+            or 0.0
+        )
+
+        if sl_mult > 0 and trail_mult > 0:
+            return round(premium_risk_distance * (trail_mult / sl_mult), 2)
+
+        explicit_gap = float(params.get("trailing_gap", 0.0) or 0.0)
+        return explicit_gap if explicit_gap > 0 else round(premium_risk_distance, 2)
 
     def _build_position_record(
         self,
@@ -351,6 +386,11 @@ class ExecutionProcessor(SignalProcessor):
             # GTT order tracking — SL/TP handled by exchange, not software
             "gtt_order_id":        gtt_order_id,
             "is_gtt":              gtt_order_id is not None,
+            "execution_state":     "entry_pending" if gtt_order_id is not None else "filled",
+            "entry_confirmed":     gtt_order_id is None,
+            "entry_submitted_at":  datetime.now(IST).isoformat(),
+            "entry_timeout_sec":   int((config.params or {}).get("gtt_entry_timeout_sec", 45)),
+            "entry_fill_price":    None,
             "require_broker_confirmation": bool((config.params or {}).get("require_broker_fill_confirmation", True)),
         }
 
@@ -389,19 +429,8 @@ class ExecutionProcessor(SignalProcessor):
         else:
             try:
                 # ── GTT Order: single call places ENTRY + TARGET + STOPLOSS ──
-                # Compute trailing_gap from signal metadata: trailing_atr_mult × ATR.
-                # ScalpPro (and other strategies) store these in metadata at signal time.
-                # Fallback: explicit "trailing_gap" param in config, then 0.0 (which
-                # causes place_gtt_signal to use the full SL distance as the gap).
-                _meta_atr = float(meta.get("atr") or 0.0)
-                _meta_trail_mult = float(
-                    meta.get("trailing_atr_mult")
-                    or (config.params or {}).get("trailing_atr_mult", 0.0)
-                )
-                if _meta_atr > 0 and _meta_trail_mult > 0:
-                    trailing_gap = round(_meta_atr * _meta_trail_mult, 2)
-                else:
-                    trailing_gap = float((config.params or {}).get("trailing_gap", 0.0))
+                trailing_gap = self._derive_trailing_gap(signal, config)
+                meta["execution_trailing_gap"] = trailing_gap
                 result = await asyncio.to_thread(
                     engine._order_service.place_gtt_signal, signal, trailing_gap
                 )
@@ -457,12 +486,13 @@ class ExecutionProcessor(SignalProcessor):
                     price=signal.price,
                     stop_loss=signal.stop_loss,
                     take_profit=swarm_tp or signal.take_profit,
-                    status="paper" if is_paper else "live",
+                    status="paper" if is_paper else ("gtt_pending_entry" if gtt_order_id else "filled"),
                     metadata_json={
                         "underlying": meta.get("underlying", instrument_key),
                         "swarm_lot": lot_idx + 1,
                         "swarm_total": swarm_count,
                         "gtt_order_id": gtt_order_id,
+                        "execution_state": "paper" if is_paper else ("entry_pending" if gtt_order_id else "filled"),
                         **(signal.metadata or {}),
                     }
                 )
@@ -485,7 +515,11 @@ class ExecutionProcessor(SignalProcessor):
         is_paper   = (False if force_live else (engine.paper_trading or config.paper_trading))
 
         # Do not stack duplicate entries on an already managed open position.
-        if signal.action.value == "BUY" and trade_instrument in engine._managed_positions:
+        has_existing_position = any(
+            key == trade_instrument or key.startswith(f"{trade_instrument}#")
+            for key in engine._managed_positions
+        )
+        if signal.action.value == "BUY" and has_existing_position:
             logger.info(f"⏭️ Entry skipped: {trade_instrument} already has an open managed position")
             return False
 

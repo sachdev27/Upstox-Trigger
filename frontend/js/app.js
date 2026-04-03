@@ -868,8 +868,10 @@ function updateEngineStatus(status) {
     const text = document.getElementById("engine-status-text");
     if (!text) return;
 
+    const pendingEntries = Number(status.pending_entries_count || 0);
+
     if (status.initialized) {
-        text.innerText = "Active";
+        text.innerText = pendingEntries > 0 ? `Active (${pendingEntries} pending)` : "Active";
         text.className = "text-success";
         engineActive = true;
     } else {

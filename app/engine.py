@@ -442,8 +442,50 @@ class AutomationEngine:
 
         for instrument_key, pos in list(self._managed_positions.items()):
             try:
-                # GTT positions have SL/TP managed at exchange level — skip software monitoring
                 if pos.get("is_gtt"):
+                    if not pos.get("entry_confirmed", False):
+                        submitted_at = pos.get("entry_submitted_at")
+                        timeout_sec = int(pos.get("entry_timeout_sec") or 45)
+                        try:
+                            submitted_dt = datetime.fromisoformat(str(submitted_at)) if submitted_at else None
+                        except Exception:
+                            submitted_dt = None
+
+                        if submitted_dt is not None:
+                            age_sec = max(0.0, (datetime.now(IST) - submitted_dt).total_seconds())
+                            pos["entry_pending_age_sec"] = round(age_sec, 1)
+                            if age_sec >= timeout_sec:
+                                gtt_order_id = pos.get("gtt_order_id")
+                                logger.warning(
+                                    f"⏳ GTT entry timeout for {instrument_key}: age={age_sec:.1f}s >= {timeout_sec}s"
+                                )
+                                try:
+                                    if gtt_order_id and self._order_service:
+                                        await asyncio.to_thread(
+                                            self._order_service.cancel_gtt_order,
+                                            str(gtt_order_id),
+                                        )
+                                except Exception as e:
+                                    logger.error(f"Failed to cancel stale GTT {gtt_order_id}: {e}")
+
+                                pos["execution_state"] = "entry_timeout_cancelled"
+                                self._append_execution_event(
+                                    instrument_key,
+                                    pos,
+                                    reason="ENTRY_TIMEOUT_CANCELLED",
+                                    price=float(pos.get("entry_price") or 0.0),
+                                    pnl=0.0,
+                                )
+                                self._update_trade_log_status(
+                                    pos.get("gtt_order_id"),
+                                    status="cancelled",
+                                    execution_state="entry_timeout_cancelled",
+                                )
+                                self._close_active_signal_record(instrument_key.split("#", 1)[0])
+                                self._managed_positions.pop(instrument_key, None)
+                        continue
+
+                    # GTT positions with confirmed entry have SL/TP managed at exchange level.
                     continue
 
                 ltp = await asyncio.to_thread(self._market_service.get_ltp, instrument_key)
@@ -697,6 +739,46 @@ class AutomationEngine:
                     "pnl": partial_pnl,
                 }
             }))
+
+    def _append_execution_event(self, instrument_key: str, pos: dict, reason: str, price: float, pnl: float = 0.0):
+        """Append an execution lifecycle event to the trades log."""
+        self._trades_today.append({
+            "timestamp": datetime.now(IST).isoformat(),
+            "type": "paper" if bool(pos.get("is_paper", True)) else "live",
+            "strategy": pos.get("strategy_name", ""),
+            "instrument": instrument_key,
+            "action": pos.get("entry_side", "BUY"),
+            "price": price,
+            "reason": reason,
+            "pnl": pnl,
+            "gtt_order_id": pos.get("gtt_order_id"),
+            "execution_state": pos.get("execution_state"),
+        })
+
+    def _update_trade_log_status(self, gtt_order_id: str | None, status: str, execution_state: str | None = None):
+        """Update the most recent trade log entry matching a GTT order id."""
+        if not gtt_order_id:
+            return
+        try:
+            session = get_session()
+            try:
+                rows = (
+                    session.query(TradeLog)
+                    .filter(TradeLog.metadata_json["gtt_order_id"].as_string() == str(gtt_order_id))
+                    .order_by(TradeLog.timestamp.desc())
+                    .all()
+                )
+                for row in rows:
+                    row.status = status
+                    meta = dict(row.metadata_json or {})
+                    if execution_state:
+                        meta["execution_state"] = execution_state
+                    row.metadata_json = meta
+                session.commit()
+            finally:
+                session.close()
+        except Exception as e:
+            logger.debug(f"Trade log status update skipped for GTT {gtt_order_id}: {e}")
 
     def _close_active_signal_record(self, instrument_key: str):
         """Mark latest active signal as closed once autonomous exit is executed."""
@@ -1011,6 +1093,17 @@ class AutomationEngine:
         if not matched_pos:
             return
 
+        if triggered_strategy in ("ENTRY", "ENTRY_ORDER") and status in (
+            "COMPLETE", "COMPLETED", "TRIGGERED", "EXECUTED",
+        ):
+            fill_price = float(data.get("trigger_price") or data.get("price") or matched_pos.get("entry_price") or 0.0)
+            matched_pos["entry_confirmed"] = True
+            matched_pos["execution_state"] = "entry_filled"
+            matched_pos["entry_fill_price"] = fill_price
+            self._update_trade_log_status(gtt_id, status="filled", execution_state="entry_filled")
+            logger.info(f"✅ GTT ENTRY filled: {matched_key} @ {fill_price:.2f}")
+            return
+
         # If TARGET or STOPLOSS leg was triggered and completed
         if triggered_strategy in ("TARGET", "STOPLOSS") and status in (
             "COMPLETE", "COMPLETED", "TRIGGERED", "EXECUTED",
@@ -1067,12 +1160,17 @@ class AutomationEngine:
             logger.info(
                 f"🎯 GTT {exit_reason}: {matched_key} exited @ {trigger_price:.2f} PnL={pnl:.2f}"
             )
+            self._update_trade_log_status(gtt_id, status="filled", execution_state=exit_reason.lower())
             self._managed_positions.pop(matched_key, None)
 
         # If GTT was cancelled entirely
         elif status in ("CANCELLED", "CANCELED"):
             logger.info(f"🗑️ GTT {gtt_id} cancelled for {matched_key}")
-            # Don't auto-remove position — square_off_all handles this
+            matched_pos["execution_state"] = "cancelled"
+            self._update_trade_log_status(gtt_id, status="cancelled", execution_state="cancelled")
+            if not matched_pos.get("entry_confirmed", False):
+                self._close_active_signal_record(matched_key.split("#", 1)[0])
+                self._managed_positions.pop(matched_key, None)
 
     async def _handle_order_update(self, data: dict):
         """Process regular order updates from portfolio stream."""
@@ -1086,10 +1184,40 @@ class AutomationEngine:
         qty = data.get("quantity", 0)
         logger.debug(f"📬 Position update: {instrument} qty={qty}")
 
+        try:
+            qty_int = int(qty or 0)
+        except Exception:
+            qty_int = 0
+
+        if not instrument or qty_int <= 0:
+            return
+
+        for key, pos in self._managed_positions.items():
+            matches = key == instrument or key.startswith(f"{instrument}#")
+            if matches and pos.get("is_gtt") and not pos.get("entry_confirmed", False):
+                pos["entry_confirmed"] = True
+                pos["execution_state"] = "entry_filled"
+                pos["entry_fill_price"] = float(pos.get("entry_price") or 0.0)
+                self._update_trade_log_status(pos.get("gtt_order_id"), status="filled", execution_state="entry_filled")
+                logger.info(f"✅ Position update confirmed GTT entry for {key}")
+
     # ── Status & Reporting ──────────────────────────────────────
 
     def get_status(self) -> dict:
         """Get current engine status for the dashboard."""
+        managed_positions_summary = [
+            {
+                "instrument": key,
+                "strategy": pos.get("strategy_name"),
+                "is_gtt": bool(pos.get("is_gtt")),
+                "execution_state": pos.get("execution_state", "unknown"),
+                "entry_confirmed": bool(pos.get("entry_confirmed", False)),
+                "gtt_order_id": pos.get("gtt_order_id"),
+                "entry_pending_age_sec": pos.get("entry_pending_age_sec"),
+                "entry_timeout_sec": pos.get("entry_timeout_sec"),
+            }
+            for key, pos in self._managed_positions.items()
+        ]
         return {
             "initialized": self._is_initialized,
             "running": self._is_running,
@@ -1121,6 +1249,9 @@ class AutomationEngine:
             ],
             "signals_today": len(self._signals_log),
             "trades_today": len(self._trades_today),
+            "managed_positions_count": len(self._managed_positions),
+            "pending_entries_count": sum(1 for pos in self._managed_positions.values() if pos.get("execution_state") == "entry_pending"),
+            "managed_positions": managed_positions_summary[-20:],
             "active_signals_count": self._get_active_signal_count(),
             "recent_signals": self._signals_log[-10:],
             "recent_trades": self._trades_today[-10:],

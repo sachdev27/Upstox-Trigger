@@ -631,10 +631,18 @@ class OrderService:
     def cancel_gtt_order(self, gtt_order_id: str) -> dict:
         """Cancel a pending GTT order."""
         import requests as http_requests
+        from app.network_proxy import get_requests_proxies
 
         url = "https://api.upstox.com/v3/order/gtt/cancel"
         payload = {"gtt_order_id": gtt_order_id}
-        resp = http_requests.delete(url, json=payload, headers=self._gtt_headers(), timeout=15)
+        proxies = get_requests_proxies(self.settings)
+        resp = http_requests.delete(
+            url,
+            json=payload,
+            headers=self._gtt_headers(),
+            proxies=proxies or None,
+            timeout=15,
+        )
 
         if resp.status_code >= 400:
             logger.error(f"GTT cancel failed ({resp.status_code}): {resp.text}")
