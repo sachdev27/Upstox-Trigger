@@ -1,8 +1,39 @@
 /**
  * api.js — Centralized API client for the frontend.
+ *
+ * Features:
+ *   - AbortController per resource key — new calls for the same resource
+ *     automatically cancel the previous in-flight request.
+ *   - fetchJsonWithRetry for resilient polling endpoints.
  */
 
 const API_BASE = window.location.origin;
+
+// ── AbortController registry ───────────────────────────────────
+// Maps a resource key (e.g. "candles", "ltp") to its current AbortController.
+// When a new fetch starts for the same key, the old one is aborted.
+const _inflightControllers = new Map();
+
+/**
+ * Get a fresh AbortSignal for the given resource key, aborting any
+ * previous in-flight request for that key.
+ * @param {string} key
+ * @returns {AbortSignal}
+ */
+function _signalFor(key) {
+    const prev = _inflightControllers.get(key);
+    if (prev) prev.abort();
+    const ctrl = new AbortController();
+    _inflightControllers.set(key, ctrl);
+    return ctrl.signal;
+}
+
+/**
+ * Clean up a completed request's controller (prevents stale aborts).
+ */
+function _clearSignal(key) {
+    _inflightControllers.delete(key);
+}
 
 async function fetchJsonWithRetry(url, options = {}, retries = 2, retryDelayMs = 250) {
     let lastError = null;
@@ -11,6 +42,7 @@ async function fetchJsonWithRetry(url, options = {}, retries = 2, retryDelayMs =
             const res = await fetch(url, options);
             return await res.json();
         } catch (err) {
+            if (err.name === 'AbortError') throw err; // Don't retry aborted requests
             lastError = err;
             if (attempt < retries) {
                 await new Promise((resolve) => setTimeout(resolve, retryDelayMs * (attempt + 1)));
@@ -36,21 +68,66 @@ export async function fetchWithToast(url, options = {}, successMsg = null) {
 export const api = {
     // Market Data
     async searchInstruments(query) {
-        return fetch(`${API_BASE}/market/instruments/search?query=${encodeURIComponent(query)}`).then(r => r.json());
+        const signal = _signalFor('instrumentSearch');
+        try {
+            const res = await fetch(
+                `${API_BASE}/market/instruments/search?query=${encodeURIComponent(query)}`,
+                { signal }
+            );
+            const data = await res.json();
+            _clearSignal('instrumentSearch');
+            return data;
+        } catch (e) {
+            if (e.name === 'AbortError') return { instruments: [] };
+            throw e;
+        }
     },
     async getFeaturedInstruments() {
         return fetch(`${API_BASE}/market/instruments/featured`).then(r => r.json());
     },
     async getHistoricalCandles(instrumentKey, interval) {
-        return fetch(`${API_BASE}/market/candles?instrument_key=${instrumentKey}&interval=${interval}`).then(r => r.json());
+        const signal = _signalFor('candles');
+        try {
+            const res = await fetch(
+                `${API_BASE}/market/candles?instrument_key=${instrumentKey}&interval=${interval}`,
+                { signal }
+            );
+            const data = await res.json();
+            _clearSignal('candles');
+            return data;
+        } catch (e) {
+            if (e.name === 'AbortError') return { candles: [] };
+            throw e;
+        }
     },
     async getOptionChain(instrumentKey, expiry = null) {
-        let url = `${API_BASE}/market/option-chain?instrument_key=${instrumentKey}`;
-        if (expiry) url += `&expiry_date=${expiry}`;
-        return fetch(url).then(r => r.json());
+        const signal = _signalFor('optionChain');
+        try {
+            let url = `${API_BASE}/market/option-chain?instrument_key=${instrumentKey}`;
+            if (expiry) url += `&expiry_date=${expiry}`;
+            const res = await fetch(url, { signal });
+            const data = await res.json();
+            _clearSignal('optionChain');
+            return data;
+        } catch (e) {
+            if (e.name === 'AbortError') return { chain: [] };
+            throw e;
+        }
     },
     async getOptionChainAnalysis(instrumentKey) {
-        return fetch(`${API_BASE}/market/option-chain/analysis?instrument_key=${encodeURIComponent(instrumentKey)}`).then(r => r.json());
+        const signal = _signalFor('optionChainAnalysis');
+        try {
+            const res = await fetch(
+                `${API_BASE}/market/option-chain/analysis?instrument_key=${encodeURIComponent(instrumentKey)}`,
+                { signal }
+            );
+            const data = await res.json();
+            _clearSignal('optionChainAnalysis');
+            return data;
+        } catch (e) {
+            if (e.name === 'AbortError') return {};
+            throw e;
+        }
     },
 
     // Orders
@@ -121,7 +198,19 @@ export const api = {
         return fetch(`${API_BASE}/strategies/schema`).then(r => r.json());
     },
     async getStrategyOverlay(instrumentKey, interval, strategyClass, params) {
-        return fetch(`${API_BASE}/market/strategy-overlay?instrument_key=${instrumentKey}&timeframe=${interval}&strategy_class=${strategyClass}&params=${encodeURIComponent(JSON.stringify(params))}`).then(r => r.json());
+        const signal = _signalFor('strategyOverlay');
+        try {
+            const res = await fetch(
+                `${API_BASE}/market/strategy-overlay?instrument_key=${instrumentKey}&timeframe=${interval}&strategy_class=${strategyClass}&params=${encodeURIComponent(JSON.stringify(params))}`,
+                { signal }
+            );
+            const data = await res.json();
+            _clearSignal('strategyOverlay');
+            return data;
+        } catch (e) {
+            if (e.name === 'AbortError') return { overlay: [] };
+            throw e;
+        }
     },
 
     // Settings

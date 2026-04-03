@@ -8,54 +8,16 @@ This is the brain that runs the 24/7 automation loop.
 import asyncio
 import logging
 import time
-from collections import deque
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import pandas as pd
 
-class UpstoxRateLimiter:
-    """
-    Enforces Upstox Historical API Limits:
-    - 50 requests per second (using 45 for safety)
-    - 500 requests per minute (using 450 for safety)
-    - 2000 requests per 30 minutes (using 1900 for safety)
-    """
-    def __init__(self):
-        self.lock = asyncio.Lock()
-        self.history_sec = deque()
-        self.history_min = deque()
-        self.history_30min = deque()
+from app.rate_limiter import UpstoxRateLimiter, get_rate_limiter  # noqa: E402
 
-    async def wait_for_token(self):
-        async with self.lock:
-            while True:
-                now = time.monotonic()
-
-                # Cleanup old requests
-                while self.history_sec and now - self.history_sec[0] > 1.0:
-                    self.history_sec.popleft()
-                while self.history_min and now - self.history_min[0] > 60.0:
-                    self.history_min.popleft()
-                while self.history_30min and now - self.history_30min[0] > 1800.0:
-                    self.history_30min.popleft()
-
-                # Check limits
-                if len(self.history_sec) >= 45:
-                    await asyncio.sleep(1.0 - (now - self.history_sec[0]) + 0.01)
-                    continue
-                if len(self.history_min) >= 450:
-                    await asyncio.sleep(60.0 - (now - self.history_min[0]) + 0.1)
-                    continue
-                if len(self.history_30min) >= 1900:
-                    await asyncio.sleep(1800.0 - (now - self.history_30min[0]) + 1.0)
-                    continue
-
-                # Consume token
-                self.history_sec.append(now)
-                self.history_min.append(now)
-                self.history_30min.append(now)
-                break
+# Maximum number of concurrent instrument evaluations per cycle.
+# Prevents spawning 500+ simultaneous API calls when scanning large watchlists.
+MAX_CONCURRENT_EVALS = 10
 
 from app.config import get_settings
 from app.auth.service import get_auth_service
@@ -196,8 +158,11 @@ class AutomationEngine:
             BroadcastProcessor()
         ]
 
-        # Rate Limiter for Upstox API
-        self.rate_limiter = UpstoxRateLimiter()
+        # Rate Limiter for Upstox API (shared singleton)
+        self.rate_limiter = get_rate_limiter()
+
+        # Semaphore to limit concurrent instrument evaluations per cycle
+        self._eval_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EVALS)
 
         # Load config from DB-backed settings
         self.sync_from_settings()
@@ -316,13 +281,14 @@ class AutomationEngine:
 
     async def _process_instrument_tf(self, strategy: BaseStrategy, tf_config: StrategyConfig, target: str) -> tuple[TradeSignal, StrategyConfig] | None:
         """Evaluate one instrument/timeframe and return candidate signal for ranking."""
-        try:
-            signal = await self._evaluate_instrument(strategy, tf_config, target)
-            if signal:
-                return signal, tf_config
-        except Exception as e:
-            logger.error(f"Error evaluating {target} ({tf_config.timeframe}) with {tf_config.name}: {e}")
-        return None
+        async with self._eval_semaphore:
+            try:
+                signal = await self._evaluate_instrument(strategy, tf_config, target)
+                if signal:
+                    return signal, tf_config
+            except Exception as e:
+                logger.error(f"Error evaluating {target} ({tf_config.timeframe}) with {tf_config.name}: {e}")
+            return None
 
     async def run_cycle(self):
         """

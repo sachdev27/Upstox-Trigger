@@ -4,12 +4,8 @@ Upstox Trading Automation — FastAPI Application.
 Entry point: uvicorn app.main:app --reload --port 8000
 """
 
-import asyncio
-import copy
 import json
 import logging
-import time
-from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -19,7 +15,6 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 
 from app.config import get_settings, BASE_DIR
-from app.database.connection import init_db
 from app.auth.routes import router as auth_router
 from app.market_data.routes import router as market_router
 from app.orders.routes import router as orders_router
@@ -42,7 +37,6 @@ client_subscriptions: dict[WebSocket, set[str]] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown events."""
-    # Startup
     settings = get_settings()
     logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
 
@@ -51,296 +45,17 @@ async def lifespan(app: FastAPI):
     configure_network_proxies(settings)
 
     logger.info("🚀 Starting Upstox Trading Automation...")
-    init_db()
-    logger.info("✅ Database initialized.")
 
-    # Auto-seed from .env on first startup (if config_settings table is empty)
-    from app.database.connection import get_session, ConfigSetting
-    session = get_session()
-    setting_count = session.query(ConfigSetting).count()
-    session.close()
-    if setting_count == 0:
-        logger.info("🌱 First startup detected — seeding settings from .env...")
-        from app.database.seed import seed_settings
-        seed_settings()
+    # ── Startup pipeline (each module is focused & testable) ──
+    from app.startup.database import startup_database
+    from app.startup.engine import startup_engine
+    from app.startup.streams import startup_streams
+    from app.startup.background import startup_background
 
-    # Seed watchlist with Nifty 50 if empty
-    from app.database.seed import seed_watchlist_nifty50
-    seed_watchlist_nifty50()
-
-    # Load dynamic settings from DB → overrides .env defaults
-    settings.load_from_db()
-    logger.info("⚙️ Dynamic settings loaded from database.")
-
-    # Auto-initialize engine services
-    from app.engine import get_engine
-    engine = get_engine()
-    engine.initialize()
-
-    # Start the scheduler
-    from app.scheduler.service import SchedulerService
-
-    scheduler = SchedulerService()
-    engine.broadcast_callback = broadcast_to_clients
-
-    async def _scheduled_run_cycle():
-        """Called automatically every 5 seconds during market hours."""
-        if engine.auto_mode:
-            logger.info("🤖 [AUTO MODE] Running scheduled cycle...")
-            await engine.run_cycle()
-            # Broadcast latest status to frontend
-            await broadcast_to_clients({"type": "status", "data": engine.get_status()})
-
-    scheduler.on("candle_check", _scheduled_run_cycle)
-
-    async def _scheduled_square_off():
-        """Called at market close (3:30 PM IST) to force-exit all open positions."""
-        logger.info("🏁 [MARKET CLOSE] Squaring off all open positions...")
-        await engine.square_off_all()
-        await broadcast_to_clients({"type": "status", "data": engine.get_status()})
-
-    scheduler.on("market_close", _scheduled_square_off)
-    scheduler.start()
-    app.state.scheduler = scheduler
-
-    loop = asyncio.get_running_loop()
-    app.state.last_market_tick = None
-    app.state.last_market_tick_epoch = 0.0
-    app.state.greeks_cache = {}  # {instrument_key: {delta, theta, iv, ...}}
-
-    # --- Live Market Data & Portfolio Streamer ---
-    from app.market_data.streamer import MarketDataStreamer, PortfolioStreamer
-    from app.market_data.service import MarketDataService
-    from app.auth.service import get_auth_service
-    from app.database.connection import get_session
-
-    auth_service = get_auth_service()
-    # Market streamers MUST use Live configuration (Sandbox doesn't support market data)
-    streamer_config = copy.copy(auth_service.get_configuration(use_sandbox=False))
-    streamer_config.proxy = None
-    streamer = MarketDataStreamer(streamer_config)
-
-    async def _handle_market_tick(data):
-        """
-        Callback for the streamer.
-        'data' is the decoded protobuf to dict from the SDK.
-        Handles ltpc, full, and option_greeks modes.
-        """
-        if not data:
-            return
-
-        if not isinstance(data, dict):
-            return
-
-        # SDK V3 usually passes a dict with 'feeds'
-        feeds = data.get("feeds", {})
-        if not feeds:
-            # Fallback: Check if the top-level keys look like instrument keys (e.g. "NSE_EQ|...")
-            if any("|" in k for k in data.keys()):
-                feeds = data
-            else:
-                return
-
-        try:
-            for instrument_key, feed in feeds.items():
-                # Handle three modes:
-                # 1. ltpc: feed['ltpc']['ltp']
-                # 2. full: feed['fullFeed']['marketFF']['ltpc']['ltp'] + optionGreeks
-                # 3. option_greeks: feed['optionGreeks'][...] (Greeks only)
-
-                # 1. Navigate to the feed level (handle nested structure)
-                # option_greeks mode arrives via firstLevelWithGreeks in SDK V3.
-                inner = (
-                    feed.get("fullFeed")
-                    or feed.get("ff")
-                    or feed.get("firstLevelWithGreeks")
-                    or feed.get("first_level_with_greeks")
-                    or feed
-                )
-                if "marketFF" in inner:
-                    inner = inner["marketFF"]
-                elif "indexFF" in inner:
-                    inner = inner["indexFF"]
-
-                # 2. Extract LTP (present in ltpc and full modes; absent in option_greeks)
-                ltpc = inner.get("ltpc", {})
-                ltp = ltpc.get("ltp")
-
-                # 3. Extract Greeks (present in full and option_greeks modes)
-                # option_greeks mode: feed['optionGreeks'] directly
-                # full mode: feed['fullFeed']['..']['optionGreeks'] or feed['optionGreeks']
-                greeks = (
-                    inner.get("optionGreeks")
-                    or inner.get("option_greeks")
-                    or feed.get("optionGreeks")
-                    or feed.get("option_greeks")
-                    or {}
-                )
-                delta = float(greeks.get("delta") or 0.0)
-                theta = float(greeks.get("theta") or 0.0)
-                iv = float(inner.get("iv") or greeks.get("iv") or 0.0)
-
-                # 4. Extract volume (ltpc/full modes; absent in option_greeks)
-                raw_volume = inner.get("vtt")
-                volume = int(raw_volume) if raw_volume is not None else None
-
-                # 5. Build message in IST timestamp
-                ds = datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp()
-                msg = [
-                    "t",
-                    instrument_key,
-                    float(ltp) if ltp is not None else None,
-                    int(volume) if volume is not None else None,
-                    round(iv * 100, 2) if iv else 0.0,
-                    round(delta, 4),
-                    round(theta, 2),
-                    int(ds)
-                ]
-
-                app.state.last_market_tick = {
-                    "instrument_key": instrument_key,
-                    "ltp": float(ltp) if ltp is not None else None,
-                    "delta": round(delta, 4),
-                    "theta": round(theta, 2),
-                    "iv": round(iv * 100, 2),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-                app.state.last_market_tick_epoch = time.monotonic()
-
-                # Cache Greeks for option contracts (used by option chain endpoint)
-                if delta or theta or iv:  # Only cache if Greeks are present
-                    app.state.greeks_cache[instrument_key] = {
-                        "delta": round(delta, 4),
-                        "theta": round(theta, 2),
-                        "iv": round(iv * 100, 2),
-                    }
-
-                target_clients = instrument_subscriptions.get(instrument_key, set())
-                for client_ws in list(target_clients):
-                    try:
-                        await client_ws.send_json(msg)
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.error(f"Error in _handle_market_tick: {e}")
-
-    # We need to run the streamer's event loop in a way that doesn't block FastAPI
-    # The SDK streamer.connect() is often blocking or starts its own thread.
-    # To be safe with FastAPI's async loop, we can wrap the callback
-    def sync_on_tick(message):
-        # Schedule the async broadcast in the main loop
-        asyncio.run_coroutine_threadsafe(_handle_market_tick(message), loop)
-
-    streamer.on_tick = sync_on_tick
-
-    # Start market data streamer with core indices; additional subscriptions added dynamically
-    try:
-        streamer.start(["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"], mode="ltpc")
-        app.state.market_streamer = streamer
-        logger.info("📡 Market Data Streamer started with core indices (Nifty/Bank Nifty).")
-    except Exception as e:
-        logger.error(f"❌ Failed to start market streamer: {e}")
-
-    # Start Portfolio Streamer
-    # Portfolio streamers MUST use Live configuration for notifications
-    portfolio_streamer_config = copy.copy(auth_service.get_configuration(use_sandbox=False))
-    portfolio_streamer_config.proxy = None
-    portfolio_streamer = PortfolioStreamer(portfolio_streamer_config)
-
-    def sync_portfolio_update(message):
-        # Process portfolio updates in the engine (GTT order fills, position changes)
-        asyncio.run_coroutine_threadsafe(
-            _handle_portfolio_update(message),
-            loop
-        )
-
-    async def _handle_portfolio_update(message):
-        """Route portfolio stream events to engine and broadcast to UI."""
-        try:
-            from app.engine import get_engine
-            eng = get_engine()
-            await eng.handle_portfolio_update(message)
-        except Exception as e:
-            logger.error(f"Error processing portfolio update: {e}")
-
-        # Broadcast to all frontend WebSocket clients
-        await broadcast_to_clients({"type": "portfolio_update", "data": message})
-
-    portfolio_streamer.on_update = sync_portfolio_update
-
-    try:
-        portfolio_streamer.start(
-            order_update=True,
-            position_update=True,
-            holding_update=True,
-            gtt_update=True,
-        )
-        app.state.portfolio_streamer = portfolio_streamer
-        logger.info("📡 Portfolio Data Streamer started (with GTT updates).")
-    except Exception as e:
-        logger.error(f"❌ Failed to start portfolio streamer: {e}")
-
-    # --- Heartbeat & Periodic Status ---
-    fallback_market_service = None
-    try:
-        fallback_market_service = MarketDataService(auth_service.get_configuration(use_sandbox=False))
-        app.state.ltp_fallback_service = fallback_market_service
-    except Exception as e:
-        logger.warning(f"LTP fallback service unavailable: {e}")
-
-    async def _periodic_updates():
-        while True:
-            try:
-                # Send a heartbeat every 10 seconds to keep WS alive and show it's working
-                await broadcast_to_clients({
-                    "type": "heartbeat",
-                    "data": {"timestamp": datetime.now().isoformat()}
-                })
-                # Refresh status too
-                from app.engine import get_engine
-                engine = get_engine()
-                await broadcast_to_clients({"type": "status", "data": engine.get_status()})
-
-                # If streamer ticks are stale, push LTP fallback ticks for subscribed symbols.
-                stale_for = time.monotonic() - float(getattr(app.state, "last_market_tick_epoch", 0.0) or 0.0)
-                if stale_for > 6.0 and fallback_market_service and instrument_subscriptions:
-                    subscribed_keys = list(instrument_subscriptions.keys())
-                    for key in subscribed_keys:
-                        ltp = await asyncio.to_thread(fallback_market_service.get_ltp, key)
-                        if ltp is None:
-                            continue
-
-                        msg = [
-                            "t",
-                            key,
-                            float(ltp),
-                            0,
-                            0.0,
-                            0.0,
-                            0.0,
-                            int(datetime.now(timezone(timedelta(hours=5, minutes=30))).timestamp()),
-                        ]
-
-                        app.state.last_market_tick = {
-                            "instrument_key": key,
-                            "ltp": float(ltp),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "source": "ltp_fallback",
-                        }
-                        app.state.last_market_tick_epoch = time.monotonic()
-
-                        target_clients = instrument_subscriptions.get(key, set())
-                        for client_ws in list(target_clients):
-                            try:
-                                await client_ws.send_json(msg)
-                            except Exception:
-                                pass
-            except Exception:
-                logger.debug("Periodic update loop encountered an error.", exc_info=True)
-            await asyncio.sleep(10)
-
-    _heartbeat_task = asyncio.create_task(_periodic_updates())
-    app.state.heartbeat_task = _heartbeat_task
+    await startup_database()
+    await startup_engine(app, broadcast_to_clients)
+    await startup_streams(app, ws_clients, instrument_subscriptions)
+    await startup_background(app, broadcast_to_clients, instrument_subscriptions)
 
     yield
 
@@ -348,7 +63,8 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Shutting down...")
     if hasattr(app.state, "heartbeat_task") and not app.state.heartbeat_task.done():
         app.state.heartbeat_task.cancel()
-    scheduler.stop()
+    if hasattr(app.state, "scheduler"):
+        app.state.scheduler.stop()
     if hasattr(app.state, "market_streamer"):
         app.state.market_streamer.stop()
     if hasattr(app.state, "portfolio_streamer"):
