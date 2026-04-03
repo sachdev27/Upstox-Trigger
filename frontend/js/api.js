@@ -177,6 +177,9 @@ export const api = {
     async getSignals() {
         return fetch(`${API_BASE}/strategies/signals`).then(r => r.json());
     },
+    async getRejections(limit = 50) {
+        return fetch(`${API_BASE}/engine/rejections?limit=${encodeURIComponent(limit)}`).then(r => r.json());
+    },
     async getMarketStatus() {
         return fetch(`${API_BASE}/orders/status/market-hours`).then(r => r.json());
     },

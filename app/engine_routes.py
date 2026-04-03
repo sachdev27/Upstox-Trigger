@@ -157,6 +157,13 @@ async def get_signals():
     return {"signals": engine.get_signals_log()}
 
 
+@router.get("/rejections")
+async def get_rejections(limit: int = 50):
+    """Get recent signal rejections for diagnostics."""
+    engine = get_engine()
+    return {"rejections": engine.get_recent_rejections(limit)}
+
+
 @router.get("/trades")
 async def get_trades():
     """Get all trades executed today."""

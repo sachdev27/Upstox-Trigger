@@ -27,7 +27,7 @@ from app.orders.models import TradeSignal
 from app.strategies.base import BaseStrategy, StrategyConfig
 from app.strategies.supertrend_pro import SuperTrendPro
 from app.strategies.scalp_pro import ScalpPro
-from app.database.connection import get_session, TradeLog
+from app.database.connection import get_session, TradeLog, SignalRejectionLog
 
 from app.engine_pipeline import (
     RiskGuardProcessor, OptionChainInsightProcessor, ATMResolverProcessor,
@@ -128,6 +128,7 @@ class AutomationEngine:
         self._order_service: OrderService | None = None
         self._active_strategies: list[tuple[StrategyConfig, BaseStrategy]] = []
         self._signals_log: list[dict] = []
+        self._signal_rejections: list[dict] = []
         self._trades_today: list[dict] = []
         self._daily_pnl: float = 0.0
         self._paper_positions: dict[str, float] = {}  # instrument_key -> entry_price (paper trading only)
@@ -177,6 +178,70 @@ class AutomationEngine:
         self.risk_per_trade_pct = s.MAX_RISK_PER_TRADE_PCT
         self.max_daily_loss_pct = s.MAX_DAILY_LOSS_PCT
         self.max_open_trades = s.MAX_OPEN_TRADES
+
+    def _persist_signal_rejection(self, event: dict):
+        """Persist a rejection event for historical diagnostics."""
+        try:
+            session = get_session()
+            try:
+                row = SignalRejectionLog(
+                    timestamp=datetime.now(IST),
+                    strategy_name=str(event.get("strategy") or "Unknown"),
+                    instrument_key=str(event.get("instrument_key") or event.get("instrument") or ""),
+                    timeframe=str(event.get("timeframe") or ""),
+                    reason=str(event.get("reason") or "Unknown"),
+                    bar_key=str(event.get("bar_key")) if event.get("bar_key") else None,
+                    metadata_json={
+                        "strategy_name": event.get("strategy_name"),
+                        "instrument": event.get("instrument"),
+                        "timestamp_text": event.get("timestamp"),
+                    },
+                )
+                session.add(row)
+                session.commit()
+            except Exception as e:
+                logger.error(f"Failed to persist signal rejection: {e}")
+                session.rollback()
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Signal rejection DB session failure: {e}")
+
+    def get_recent_rejections(self, limit: int = 50) -> list[dict]:
+        """Return recent rejection events, preferring persisted telemetry."""
+        n = max(1, min(int(limit or 50), 500))
+        try:
+            session = get_session()
+            try:
+                rows = (
+                    session.query(SignalRejectionLog)
+                    .order_by(SignalRejectionLog.timestamp.desc())
+                    .limit(n)
+                    .all()
+                )
+                if rows:
+                    return [
+                        {
+                            "timestamp": (
+                                (r.timestamp.strftime("%H:%M:%S") if getattr(r.timestamp, "tzinfo", None) is None else r.timestamp.astimezone(IST).strftime("%H:%M:%S"))
+                                if r.timestamp else "-"
+                            ),
+                            "strategy": r.strategy_name,
+                            "strategy_name": r.strategy_name,
+                            "instrument": r.instrument_key,
+                            "instrument_key": r.instrument_key,
+                            "timeframe": r.timeframe,
+                            "reason": r.reason,
+                            "bar_key": r.bar_key,
+                        }
+                        for r in rows
+                    ]
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Failed to read persisted rejections: {e}")
+
+        return list(self._signal_rejections[-n:])[::-1]
 
     # ── Initialization ──────────────────────────────────────────
 
@@ -884,6 +949,25 @@ class AutomationEngine:
         signal = strategy.on_candle(df, htf_df=htf_df)
         if hasattr(strategy, 'get_dashboard_state'):
             strategy.latest_metrics = strategy.get_dashboard_state(df, htf_df=htf_df)
+        if not signal:
+            reject_reason = getattr(strategy, "last_reject_reason", None)
+            if not reject_reason and isinstance(getattr(strategy, "latest_metrics", None), dict):
+                reject_reason = strategy.latest_metrics.get("Signal Blocked")
+            if reject_reason:
+                rejection_event = {
+                    "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
+                    "strategy": config.name,
+                    "strategy_name": config.name,
+                    "instrument": instrument_key,
+                    "instrument_key": instrument_key,
+                    "timeframe": config.timeframe,
+                    "reason": str(reject_reason),
+                    "bar_key": bar_key,
+                }
+                self._signal_rejections.append(rejection_event)
+                if len(self._signal_rejections) > 300:
+                    self._signal_rejections = self._signal_rejections[-300:]
+                self._persist_signal_rejection(rejection_event)
         if signal:
             signal.instrument_key = instrument_key
             if bar_key:
@@ -1248,12 +1332,14 @@ class AutomationEngine:
                 for config, strategy in self._active_strategies
             ],
             "signals_today": len(self._signals_log),
+            "rejections_today": len(self._signal_rejections),
             "trades_today": len(self._trades_today),
             "managed_positions_count": len(self._managed_positions),
             "pending_entries_count": sum(1 for pos in self._managed_positions.values() if pos.get("execution_state") == "entry_pending"),
             "managed_positions": managed_positions_summary[-20:],
             "active_signals_count": self._get_active_signal_count(),
             "recent_signals": self._signals_log[-10:],
+            "recent_rejections": self.get_recent_rejections(20),
             "recent_trades": self._trades_today[-10:],
             "market_hours": self._order_service.is_market_hours() if self._order_service else False,
         }
@@ -1399,6 +1485,7 @@ class AutomationEngine:
     def reset_daily(self):
         """Reset daily counters (called post-market)."""
         self._signals_log.clear()
+        self._signal_rejections.clear()
         self._trades_today.clear()
         self._daily_pnl = 0.0
         self._paper_positions.clear()

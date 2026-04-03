@@ -135,7 +135,7 @@
                         <div style="padding: 10px 14px; border-bottom: 1px solid var(--border-color); background: var(--bg-card);">
                             <h3 style="margin: 0; font-size: 0.9rem;">🟢 Active Signals</h3>
                         </div>
-                        <div style="flex: 1; overflow-y: auto;">
+                        <div style="flex: 1; overflow-y: auto; min-height: 240px;">
                             <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem;">
                                 <thead style="position: sticky; top: 0; z-index: 5; background: var(--bg-dark);">
                                     <tr>
@@ -157,6 +157,27 @@
                                     <tr><td colspan="12" style="text-align:center; padding: 30px;" class="text-muted">No active signals</td></tr>
                                 </tbody>
                             </table>
+                        </div>
+                        <div style="border-top: 1px solid var(--border-color); display:flex; flex-direction:column; min-height: 220px; max-height: 280px;">
+                            <div style="padding: 10px 14px; border-bottom: 1px solid var(--border-color); background: var(--bg-card); display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                                <h3 style="margin: 0; font-size: 0.85rem;">🚫 Recent Signal Rejections</h3>
+                                <button class="btn btn-outline" style="padding: 2px 8px; width: auto; font-size: 0.7rem;" onclick="refreshSignalRejections()">Refresh</button>
+                            </div>
+                            <div style="overflow-y:auto; flex:1;">
+                                <table style="width: 100%; border-collapse: collapse; font-size: 0.75rem;">
+                                    <thead style="position: sticky; top: 0; z-index: 5; background: var(--bg-dark);">
+                                        <tr>
+                                            <th style="padding: 6px 8px; text-align: left;">Time</th>
+                                            <th style="padding: 6px 8px; text-align: left;">Strategy</th>
+                                            <th style="padding: 6px 8px; text-align: left;">Instrument</th>
+                                            <th style="padding: 6px 8px; text-align: left;">Reason</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="signal-rejections-body-main">
+                                        <tr><td colspan="4" style="text-align:center; padding: 20px;" class="text-muted">No rejection telemetry yet</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
                 </div>

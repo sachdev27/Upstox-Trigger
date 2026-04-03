@@ -43,6 +43,7 @@ class BaseStrategy(ABC):
         self.name = config.name
         self.params = {**self.default_params(), **config.params}
         self.latest_metrics: dict[str, Any] = {}
+        self.last_reject_reason: str | None = None
 
     @abstractmethod
     def on_candle(self, df: pd.DataFrame) -> TradeSignal | None:
@@ -94,6 +95,15 @@ class BaseStrategy(ABC):
     def get_param(self, key: str, default: Any = None) -> Any:
         """Get a strategy parameter by name."""
         return self.params.get(key, default)
+
+    def set_reject_reason(self, reason: str | None):
+        """Store why a signal was rejected in the latest evaluation."""
+        self.last_reject_reason = reason
+
+    def reject(self, reason: str) -> None:
+        """Helper to record a rejection reason and return no signal."""
+        self.set_reject_reason(reason)
+        return None
 
     def __repr__(self):
         return f"<{self.__class__.__name__} name={self.name!r} tf={self.config.timeframe}>"

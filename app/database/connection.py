@@ -145,6 +145,21 @@ class ActiveSignal(Base):
     metadata_json = Column(JSON, default={})
 
 
+class SignalRejectionLog(Base):
+    """Persisted record of strategy signal rejections for diagnostics and tuning."""
+
+    __tablename__ = "signal_rejection_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, nullable=False, index=True)
+    strategy_name = Column(String, nullable=False, index=True)
+    instrument_key = Column(String, nullable=False, index=True)
+    timeframe = Column(String, default="15m")
+    reason = Column(String, nullable=False)
+    bar_key = Column(String, nullable=True)
+    metadata_json = Column(JSON, default={})
+
+
 # ── Engine & Session ────────────────────────────────────────────
 
 _engine = None
@@ -211,6 +226,10 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_watchlists_instrument_key ON watchlists(instrument_key)",
             # Config reads are frequent at startup/runtime sync
             "CREATE INDEX IF NOT EXISTS idx_config_settings_category ON config_settings(category)",
+            # Rejection telemetry: recent dashboard and tuning queries
+            "CREATE INDEX IF NOT EXISTS idx_signal_rejections_ts ON signal_rejection_logs(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_rejections_strategy_ts ON signal_rejection_logs(strategy_name, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_signal_rejections_instrument_ts ON signal_rejection_logs(instrument_key, timestamp)",
         ]
         for sql in index_sql:
             try:

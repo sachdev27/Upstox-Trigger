@@ -142,6 +142,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     await refreshTrades();
     await refreshSignals();
     await refreshActiveSignals();
+    await refreshSignalRejections();
     await refreshWatchlist();
     await checkAuth();
     await refreshStatus();
@@ -176,6 +177,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setInterval(refreshMarketStatus, 60000);
     setInterval(refreshOrderBook, 45000);
     setInterval(refreshActiveSignals, 20000); // Every 20 seconds
+    setInterval(refreshSignalRejections, 20000);
     setInterval(() => scheduleOverlayRefresh(false), OVERLAY_REFRESH_MS); // Throttled strategy HUD/overlay
     setInterval(refreshOcInsight, 20000); // OC insight every 20s
 
@@ -869,9 +871,13 @@ function updateEngineStatus(status) {
     if (!text) return;
 
     const pendingEntries = Number(status.pending_entries_count || 0);
+    const blockedSignals = Number(status.rejections_today || 0);
 
     if (status.initialized) {
-        text.innerText = pendingEntries > 0 ? `Active (${pendingEntries} pending)` : "Active";
+        const chips = [];
+        if (pendingEntries > 0) chips.push(`${pendingEntries} pending`);
+        if (blockedSignals > 0) chips.push(`${blockedSignals} blocked`);
+        text.innerText = chips.length > 0 ? `Active (${chips.join(", ")})` : "Active";
         text.className = "text-success";
         engineActive = true;
     } else {
@@ -1363,6 +1369,42 @@ async function refreshActiveSignals() {
     }
 }
 
+async function refreshSignalRejections() {
+    if (!isDocumentVisible()) return;
+    const showInMainWatchlist = currentMainView === 'watchlist';
+    if (!showInMainWatchlist) return;
+
+    try {
+        const res = await api.getRejections(40);
+        const rows = res?.rejections || [];
+        const tbody = document.getElementById('signal-rejections-body-main');
+        if (!tbody) return;
+
+        tbody.innerHTML = '';
+        if (!rows.length) {
+            tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; padding: 20px;" class="text-muted">No rejection telemetry yet</td></tr>`;
+            return;
+        }
+
+        rows.forEach((item) => {
+            const tr = document.createElement('tr');
+            const ts = item.timestamp || '-';
+            const strategy = item.strategy_name || item.strategy || '-';
+            const instrument = item.instrument_key || item.instrument || '-';
+            const reason = item.reason || '-';
+            tr.innerHTML = `
+                <td class="text-muted" style="padding: 6px 8px;">${ts}</td>
+                <td style="padding: 6px 8px;">${strategy}</td>
+                <td class="mono" style="padding: 6px 8px;">${instrument}</td>
+                <td style="padding: 6px 8px; color: var(--text-muted);">${reason}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        console.error('Failed to refresh signal rejections', e);
+    }
+}
+
 window.closeActiveSignal = async (id) => {
     try {
         await api.closeActiveSignal(id);
@@ -1382,6 +1424,8 @@ window.deleteActiveSignal = async (id) => {
         showToast('Failed to delete signal', 'error');
     }
 };
+
+window.refreshSignalRejections = refreshSignalRejections;
 
 
 
@@ -2240,6 +2284,7 @@ window.switchMainView = (view) => {
     if (view === 'watchlist') {
         refreshWatchlist();
         refreshActiveSignals();
+        refreshSignalRejections();
     }
 
     // Persist instrument name across view transitions

@@ -106,6 +106,20 @@ class SuperTrendPro(BaseStrategy):
             "option_expiry_mode": "current",   # current | next
             "option_moneyness_steps": 0,        # 0 = ATM, 1 = 1 strike OTM, ...
             "option_buy_only": True,            # BUY signal -> BUY CE, SELL signal -> BUY PE
+            "option_liquidity_filter": True,
+            "option_liquidity_window_steps": 2,
+            "option_distance_penalty": 5.0,
+            "option_min_ltp": 8.0,
+            "option_min_oi": 800.0,
+            "option_min_volume": 80.0,
+            "option_max_spread_pct": 4.0,
+            "option_quality_regime_adaptive": True,
+            "option_high_vol_atr_pct": 1.20,
+            "option_low_vol_atr_pct": 0.35,
+            "option_high_vol_spread_relax_pct": 1.5,
+            "option_low_vol_spread_tighten_pct": 0.8,
+            "option_high_vol_depth_relax_factor": 0.80,
+            "option_low_vol_depth_tighten_factor": 1.20,
 
             # Autonomous management controls
             "enable_trailing_sl": True,
@@ -216,8 +230,9 @@ class SuperTrendPro(BaseStrategy):
             df: Primary timeframe OHLCV DataFrame
             htf_df: Higher timeframe OHLCV DataFrame (optional, for H3 gate)
         """
+        self.set_reject_reason(None)
         if len(df) < 100:
-            return None
+            return self.reject("Insufficient candles for evaluation")
 
         p = self.params
         tf_mins = self._tf_minutes(self.config.timeframe)
@@ -232,25 +247,27 @@ class SuperTrendPro(BaseStrategy):
         sell_signal = trend.iloc[-1] == -1 and trend.iloc[-2] == 1
 
         if not buy_signal and not sell_signal:
-            return None
+            return self.reject("No primary SuperTrend flip on current bar")
 
         # ── Section 2: H1 — Dual ST Agreement ──────────────────
         if p["use_dual_st"]:
             if ind["st_slow"]["trend"].iloc[-1] != trend.iloc[-1]:
-                return None
+                return self.reject("Rejected by H1 dual SuperTrend disagreement")
 
         # ── Section 3: H2 — Consecutive Bar Confirmation ───────
         if p["use_consecutive"]:
             consec_bars_req = auto.get("consec_bars", p["manual_consec_bars"]) if is_auto else p["manual_consec_bars"]
             if ind["consec_bars"].iloc[-1] < consec_bars_req:
-                return None
+                return self.reject("Rejected by H2 consecutive-bar confirmation")
 
         # ── Section 4b: H3 — HTF Trend Filter ──────────────────
         if p["use_htf_filter"]:
             if ind["st_htf"] is not None:
                 htf_trend = ind["st_htf"]["trend"].iloc[-1]
-                if buy_signal and htf_trend != 1: return None
-                if sell_signal and htf_trend != -1: return None
+                if buy_signal and htf_trend != 1:
+                    return self.reject("Rejected by H3 HTF trend filter")
+                if sell_signal and htf_trend != -1:
+                    return self.reject("Rejected by H3 HTF trend filter")
             else:
                 import logging as _log
                 if not getattr(self, "_htf_missing_warned", False):
@@ -307,7 +324,7 @@ class SuperTrendPro(BaseStrategy):
 
         soft_required = auto.get("soft_required", p["manual_soft_required"]) if is_auto else p["manual_soft_required"]
         if soft_score < soft_required:
-            return None
+            return self.reject(f"Soft filters failed ({soft_score}/{soft_required})")
 
         # ── Section 5: Valid Signal! ────────────────────────────
         current_price = df["close"].iloc[-1]
@@ -323,6 +340,7 @@ class SuperTrendPro(BaseStrategy):
             take_profit = self._compute_tp(current_price, atr_val, "SELL")
             action = TransactionType.SELL
 
+        self.set_reject_reason(None)
         return TradeSignal(
             action=action,
             instrument_key=self.config.instruments[0] if self.config.instruments else "",
