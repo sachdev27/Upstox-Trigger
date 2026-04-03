@@ -11,6 +11,7 @@ from typing import Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,17 @@ class SchedulerService:
     """
 
     def __init__(self):
+        self.settings = get_settings()
+        try:
+            self.settings.load_from_db()
+        except Exception:
+            pass
+
+        candle_secs = int(getattr(self.settings, "CANDLE_CHECK_SECONDS", 5) or 5)
+        fast_mode = bool(getattr(self.settings, "FAST_EXECUTION_MODE", False))
+        if fast_mode and candle_secs > 2:
+            candle_secs = 2
+        self._candle_check_seconds = max(1, min(59, candle_secs))
         self.scheduler = AsyncIOScheduler(timezone=IST)
         self._callbacks: dict[str, list[Callable]] = {
             "pre_market": [],
@@ -48,6 +60,7 @@ class SchedulerService:
 
     def start(self):
         """Start the scheduler with all registered tasks."""
+        sec_expr = f"*/{self._candle_check_seconds}"
 
         # Pre-market: 8:45 AM IST, Mon-Fri
         self.scheduler.add_job(
@@ -68,16 +81,16 @@ class SchedulerService:
         )
 
         # Candle check: market hours 9:16 AM – 3:29 PM IST, Mon–Fri
-        # Run every 5 seconds for faster, clock-aligned evaluation in AUTO mode.
+        # Run every N seconds (configurable) for lower signal-detection latency.
         # Job A: 9:16–9:59
         self.scheduler.add_job(
             self._run_callbacks,
             CronTrigger(
-                second="*/5", minute="16-59", hour=9, day_of_week="mon-fri"
+                second=sec_expr, minute="16-59", hour=9, day_of_week="mon-fri"
             ),
             args=["candle_check"],
             id="candle_check_9",
-            name="Candle Check 5s (9:16-9:59)",
+            name=f"Candle Check {self._candle_check_seconds}s (9:16-9:59)",
             coalesce=True,
             max_instances=1,
             misfire_grace_time=30,
@@ -87,11 +100,11 @@ class SchedulerService:
         self.scheduler.add_job(
             self._run_callbacks,
             CronTrigger(
-                second="*/5", minute="*", hour="10-14", day_of_week="mon-fri"
+                second=sec_expr, minute="*", hour="10-14", day_of_week="mon-fri"
             ),
             args=["candle_check"],
             id="candle_check_main",
-            name="Candle Check 5s (10:00-14:59)",
+            name=f"Candle Check {self._candle_check_seconds}s (10:00-14:59)",
             coalesce=True,
             max_instances=1,
             misfire_grace_time=30,
@@ -101,11 +114,11 @@ class SchedulerService:
         self.scheduler.add_job(
             self._run_callbacks,
             CronTrigger(
-                second="*/5", minute="0-29", hour=15, day_of_week="mon-fri"
+                second=sec_expr, minute="0-29", hour=15, day_of_week="mon-fri"
             ),
             args=["candle_check"],
             id="candle_check_afternoon",
-            name="Candle Check 5s (15:00-15:29)",
+            name=f"Candle Check {self._candle_check_seconds}s (15:00-15:29)",
             coalesce=True,
             max_instances=1,
             misfire_grace_time=30,
@@ -130,7 +143,10 @@ class SchedulerService:
         )
 
         self.scheduler.start()
-        logger.info("Scheduler started with market-hours task schedule.")
+        logger.info(
+            "Scheduler started with market-hours task schedule (candle_check=%ss).",
+            self._candle_check_seconds,
+        )
 
     def stop(self):
         """Stop the scheduler."""

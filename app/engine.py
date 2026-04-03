@@ -27,7 +27,7 @@ from app.orders.models import TradeSignal
 from app.strategies.base import BaseStrategy, StrategyConfig
 from app.strategies.supertrend_pro import SuperTrendPro
 from app.strategies.scalp_pro import ScalpPro
-from app.database.connection import get_session, TradeLog
+from app.database.connection import get_session, TradeLog, SignalRejectionLog
 
 from app.engine_pipeline import (
     RiskGuardProcessor, OptionChainInsightProcessor, ATMResolverProcessor,
@@ -128,6 +128,7 @@ class AutomationEngine:
         self._order_service: OrderService | None = None
         self._active_strategies: list[tuple[StrategyConfig, BaseStrategy]] = []
         self._signals_log: list[dict] = []
+        self._signal_rejections: list[dict] = []
         self._trades_today: list[dict] = []
         self._daily_pnl: float = 0.0
         self._paper_positions: dict[str, float] = {}  # instrument_key -> entry_price (paper trading only)
@@ -139,6 +140,13 @@ class AutomationEngine:
 
         # WebSocket broadcast callback (set by main.py)
         self.broadcast_callback = None
+
+        # Cached DB query results for get_status() (avoid hitting DB every 10s)
+        self._cached_active_signal_count: int = 0
+        self._cached_active_signal_count_at: float = 0.0
+        self._cached_rejections: list[dict] = []
+        self._cached_rejections_at: float = 0.0
+        _STATUS_DB_CACHE_TTL = 15.0  # seconds
 
         # Configuration (synced later)
         self.paper_trading: bool = True
@@ -164,9 +172,6 @@ class AutomationEngine:
         # Semaphore to limit concurrent instrument evaluations per cycle
         self._eval_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EVALS)
 
-        # Load config from DB-backed settings
-        self.sync_from_settings()
-
     def sync_from_settings(self):
         """Sync engine runtime config from the DB-backed Settings singleton."""
         s = self.settings
@@ -177,6 +182,77 @@ class AutomationEngine:
         self.risk_per_trade_pct = s.MAX_RISK_PER_TRADE_PCT
         self.max_daily_loss_pct = s.MAX_DAILY_LOSS_PCT
         self.max_open_trades = s.MAX_OPEN_TRADES
+
+    def _persist_signal_rejection(self, event: dict):
+        """Persist a rejection event for historical diagnostics."""
+        try:
+            session = get_session()
+            try:
+                row = SignalRejectionLog(
+                    timestamp=datetime.now(IST),
+                    strategy_name=str(event.get("strategy") or "Unknown"),
+                    instrument_key=str(event.get("instrument_key") or event.get("instrument") or ""),
+                    timeframe=str(event.get("timeframe") or ""),
+                    reason=str(event.get("reason") or "Unknown"),
+                    bar_key=str(event.get("bar_key")) if event.get("bar_key") else None,
+                    metadata_json={
+                        "strategy_name": event.get("strategy_name"),
+                        "instrument": event.get("instrument"),
+                        "timestamp_text": event.get("timestamp"),
+                    },
+                )
+                session.add(row)
+                session.commit()
+                self._cached_rejections_at = 0.0  # invalidate cache
+            except Exception as e:
+                logger.error(f"Failed to persist signal rejection: {e}")
+                session.rollback()
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Signal rejection DB session failure: {e}")
+
+    def get_recent_rejections(self, limit: int = 50) -> list[dict]:
+        """Return recent rejection events, preferring persisted telemetry (cached 15s)."""
+        n = max(1, min(int(limit or 50), 500))
+        now = time.monotonic()
+        if (now - self._cached_rejections_at) < 15.0 and self._cached_rejections:
+            return self._cached_rejections[:n]
+        try:
+            session = get_session()
+            try:
+                rows = (
+                    session.query(SignalRejectionLog)
+                    .order_by(SignalRejectionLog.timestamp.desc())
+                    .limit(n)
+                    .all()
+                )
+                if rows:
+                    result = [
+                        {
+                            "timestamp": (
+                                (r.timestamp.strftime("%H:%M:%S") if getattr(r.timestamp, "tzinfo", None) is None else r.timestamp.astimezone(IST).strftime("%H:%M:%S"))
+                                if r.timestamp else "-"
+                            ),
+                            "strategy": r.strategy_name,
+                            "strategy_name": r.strategy_name,
+                            "instrument": r.instrument_key,
+                            "instrument_key": r.instrument_key,
+                            "timeframe": r.timeframe,
+                            "reason": r.reason,
+                            "bar_key": r.bar_key,
+                        }
+                        for r in rows
+                    ]
+                    self._cached_rejections = result
+                    self._cached_rejections_at = now
+                    return result
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Failed to read persisted rejections: {e}")
+
+        return list(self._signal_rejections[-n:])[::-1]
 
     # ── Initialization ──────────────────────────────────────────
 
@@ -214,9 +290,6 @@ class AutomationEngine:
                 except Exception as e:
                     logger.error(f"Failed to auto-load strategy: {e}")
         try:
-            # Refresh config from DB
-            self.sync_from_settings()
-
             try:
                 # 1. Market Data ALWAYS uses Live configuration (Sandbox doesn't support market data)
                 live_config = self._auth.get_configuration(use_sandbox=False)
@@ -442,8 +515,50 @@ class AutomationEngine:
 
         for instrument_key, pos in list(self._managed_positions.items()):
             try:
-                # GTT positions have SL/TP managed at exchange level — skip software monitoring
                 if pos.get("is_gtt"):
+                    if not pos.get("entry_confirmed", False):
+                        submitted_at = pos.get("entry_submitted_at")
+                        timeout_sec = int(pos.get("entry_timeout_sec") or 45)
+                        try:
+                            submitted_dt = datetime.fromisoformat(str(submitted_at)) if submitted_at else None
+                        except Exception:
+                            submitted_dt = None
+
+                        if submitted_dt is not None:
+                            age_sec = max(0.0, (datetime.now(IST) - submitted_dt).total_seconds())
+                            pos["entry_pending_age_sec"] = round(age_sec, 1)
+                            if age_sec >= timeout_sec:
+                                gtt_order_id = pos.get("gtt_order_id")
+                                logger.warning(
+                                    f"⏳ GTT entry timeout for {instrument_key}: age={age_sec:.1f}s >= {timeout_sec}s"
+                                )
+                                try:
+                                    if gtt_order_id and self._order_service:
+                                        await asyncio.to_thread(
+                                            self._order_service.cancel_gtt_order,
+                                            str(gtt_order_id),
+                                        )
+                                except Exception as e:
+                                    logger.error(f"Failed to cancel stale GTT {gtt_order_id}: {e}")
+
+                                pos["execution_state"] = "entry_timeout_cancelled"
+                                self._append_execution_event(
+                                    instrument_key,
+                                    pos,
+                                    reason="ENTRY_TIMEOUT_CANCELLED",
+                                    price=float(pos.get("entry_price") or 0.0),
+                                    pnl=0.0,
+                                )
+                                self._update_trade_log_status(
+                                    pos.get("gtt_order_id"),
+                                    status="cancelled",
+                                    execution_state="entry_timeout_cancelled",
+                                )
+                                self._close_active_signal_record(instrument_key.split("#", 1)[0])
+                                self._managed_positions.pop(instrument_key, None)
+                        continue
+
+                    # GTT positions with confirmed entry have SL/TP managed at exchange level.
                     continue
 
                 ltp = await asyncio.to_thread(self._market_service.get_ltp, instrument_key)
@@ -698,6 +813,46 @@ class AutomationEngine:
                 }
             }))
 
+    def _append_execution_event(self, instrument_key: str, pos: dict, reason: str, price: float, pnl: float = 0.0):
+        """Append an execution lifecycle event to the trades log."""
+        self._trades_today.append({
+            "timestamp": datetime.now(IST).isoformat(),
+            "type": "paper" if bool(pos.get("is_paper", True)) else "live",
+            "strategy": pos.get("strategy_name", ""),
+            "instrument": instrument_key,
+            "action": pos.get("entry_side", "BUY"),
+            "price": price,
+            "reason": reason,
+            "pnl": pnl,
+            "gtt_order_id": pos.get("gtt_order_id"),
+            "execution_state": pos.get("execution_state"),
+        })
+
+    def _update_trade_log_status(self, gtt_order_id: str | None, status: str, execution_state: str | None = None):
+        """Update the most recent trade log entry matching a GTT order id."""
+        if not gtt_order_id:
+            return
+        try:
+            session = get_session()
+            try:
+                rows = (
+                    session.query(TradeLog)
+                    .filter(TradeLog.metadata_json["gtt_order_id"].as_string() == str(gtt_order_id))
+                    .order_by(TradeLog.timestamp.desc())
+                    .all()
+                )
+                for row in rows:
+                    row.status = status
+                    meta = dict(row.metadata_json or {})
+                    if execution_state:
+                        meta["execution_state"] = execution_state
+                    row.metadata_json = meta
+                session.commit()
+            finally:
+                session.close()
+        except Exception as e:
+            logger.debug(f"Trade log status update skipped for GTT {gtt_order_id}: {e}")
+
     def _close_active_signal_record(self, instrument_key: str):
         """Mark latest active signal as closed once autonomous exit is executed."""
         try:
@@ -747,7 +902,23 @@ class AutomationEngine:
         has_htf = strategy.params.get("use_htf_filter")
         if has_htf:
             htf_tf = strategy.params.get("htf_timeframe", "1D")
-            htf_interval = "day" if htf_tf in ["1D", "D", "W", "1W"] else "60minute" if htf_tf in ["1H", "60m"] else "day"
+            htf_tf_map = {
+                "1m": "1minute",
+                "5m": "5minute",
+                "15m": "15minute",
+                "30m": "30minute",
+                "1H": "60minute",
+                "60m": "60minute",
+                "1hour": "60minute",
+                # Upstox does not provide native 4h bars; use day as conservative HTF fallback.
+                "4H": "day",
+                "1D": "day",
+                "D": "day",
+                "day": "day",
+                "1W": "day",
+                "W": "day",
+            }
+            htf_interval = htf_tf_map.get(str(htf_tf), "day")
             tasks.append(asyncio.to_thread(self._market_service.get_historical_candles, instrument_key, htf_interval))
 
         # 2. Wait for Rate Limit (consume tokens for all tasks in this evaluation)
@@ -802,8 +973,28 @@ class AutomationEngine:
         signal = strategy.on_candle(df, htf_df=htf_df)
         if hasattr(strategy, 'get_dashboard_state'):
             strategy.latest_metrics = strategy.get_dashboard_state(df, htf_df=htf_df)
+        if not signal:
+            reject_reason = getattr(strategy, "last_reject_reason", None)
+            if not reject_reason and isinstance(getattr(strategy, "latest_metrics", None), dict):
+                reject_reason = strategy.latest_metrics.get("Signal Blocked")
+            if reject_reason:
+                rejection_event = {
+                    "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
+                    "strategy": config.name,
+                    "strategy_name": config.name,
+                    "instrument": instrument_key,
+                    "instrument_key": instrument_key,
+                    "timeframe": config.timeframe,
+                    "reason": str(reject_reason),
+                    "bar_key": bar_key,
+                }
+                self._signal_rejections.append(rejection_event)
+                if len(self._signal_rejections) > 300:
+                    self._signal_rejections = self._signal_rejections[-300:]
+                self._persist_signal_rejection(rejection_event)
         if signal:
             signal.instrument_key = instrument_key
+            signal.metadata.setdefault("signal_generated_at", datetime.now(IST).isoformat())
             if bar_key:
                 signal.metadata["bar_key"] = bar_key
             self._signals_log.append({
@@ -839,14 +1030,49 @@ class AutomationEngine:
 
     async def _handle_signal(self, signal: TradeSignal, config: StrategyConfig):
         """Handle a validated trade signal via the processing pipeline."""
+        pipeline_t0 = time.perf_counter()
+        latency = signal.metadata.setdefault("latency", {})
+        latency.setdefault("pipeline_started_at", datetime.now(IST).isoformat())
+        fast_mode = bool(getattr(self.settings, "FAST_EXECUTION_MODE", False))
+        fast_skip_oc = bool(getattr(self.settings, "FAST_SKIP_OC_INSIGHT", True))
+        fast_async_alerter = bool(getattr(self.settings, "FAST_ASYNC_ALERTER", True))
+
         for processor in self._pipeline:
+            p_t0 = time.perf_counter()
+            pname = processor.__class__.__name__
+
+            # Speed mode: trim non-essential pre-execution enrichment on the hot path.
+            if fast_mode and fast_skip_oc and isinstance(processor, OptionChainInsightProcessor):
+                latency[f"{pname}_ms"] = 0.0
+                latency[f"{pname}_skipped"] = True
+                continue
+
+            # Speed mode: run alerter in background so order path does not wait on DB/notify work.
+            if fast_mode and fast_async_alerter and isinstance(processor, AlerterProcessor):
+                asyncio.create_task(processor.process(signal, config, self))
+                latency[f"{pname}_ms"] = 0.0
+                latency[f"{pname}_async"] = True
+                continue
+
             try:
                 should_continue = await processor.process(signal, config, self)
+                latency[f"{pname}_ms"] = round((time.perf_counter() - p_t0) * 1000.0, 2)
                 if not should_continue:
+                    latency["pipeline_stopped_at"] = pname
                     break
             except Exception as e:
+                latency[f"{pname}_ms"] = round((time.perf_counter() - p_t0) * 1000.0, 2)
+                latency["pipeline_error_at"] = pname
                 logger.error(f"Error in pipeline processor {processor.__class__.__name__}: {e}")
                 break
+
+        latency["pipeline_total_ms"] = round((time.perf_counter() - pipeline_t0) * 1000.0, 2)
+        logger.info(
+            "⏱️ Signal pipeline latency: total=%.2fms exec=%.2fms order_submit=%.2fms",
+            float(latency.get("pipeline_total_ms") or 0.0),
+            float(latency.get("ExecutionProcessor_ms") or 0.0),
+            float(latency.get("order_submit_ms") or 0.0),
+        )
 
     # ── Market Close Square-Off ────────────────────────────────
 
@@ -1011,6 +1237,17 @@ class AutomationEngine:
         if not matched_pos:
             return
 
+        if triggered_strategy in ("ENTRY", "ENTRY_ORDER") and status in (
+            "COMPLETE", "COMPLETED", "TRIGGERED", "EXECUTED",
+        ):
+            fill_price = float(data.get("trigger_price") or data.get("price") or matched_pos.get("entry_price") or 0.0)
+            matched_pos["entry_confirmed"] = True
+            matched_pos["execution_state"] = "entry_filled"
+            matched_pos["entry_fill_price"] = fill_price
+            self._update_trade_log_status(gtt_id, status="filled", execution_state="entry_filled")
+            logger.info(f"✅ GTT ENTRY filled: {matched_key} @ {fill_price:.2f}")
+            return
+
         # If TARGET or STOPLOSS leg was triggered and completed
         if triggered_strategy in ("TARGET", "STOPLOSS") and status in (
             "COMPLETE", "COMPLETED", "TRIGGERED", "EXECUTED",
@@ -1067,12 +1304,17 @@ class AutomationEngine:
             logger.info(
                 f"🎯 GTT {exit_reason}: {matched_key} exited @ {trigger_price:.2f} PnL={pnl:.2f}"
             )
+            self._update_trade_log_status(gtt_id, status="filled", execution_state=exit_reason.lower())
             self._managed_positions.pop(matched_key, None)
 
         # If GTT was cancelled entirely
         elif status in ("CANCELLED", "CANCELED"):
             logger.info(f"🗑️ GTT {gtt_id} cancelled for {matched_key}")
-            # Don't auto-remove position — square_off_all handles this
+            matched_pos["execution_state"] = "cancelled"
+            self._update_trade_log_status(gtt_id, status="cancelled", execution_state="cancelled")
+            if not matched_pos.get("entry_confirmed", False):
+                self._close_active_signal_record(matched_key.split("#", 1)[0])
+                self._managed_positions.pop(matched_key, None)
 
     async def _handle_order_update(self, data: dict):
         """Process regular order updates from portfolio stream."""
@@ -1086,10 +1328,40 @@ class AutomationEngine:
         qty = data.get("quantity", 0)
         logger.debug(f"📬 Position update: {instrument} qty={qty}")
 
+        try:
+            qty_int = int(qty or 0)
+        except Exception:
+            qty_int = 0
+
+        if not instrument or qty_int <= 0:
+            return
+
+        for key, pos in self._managed_positions.items():
+            matches = key == instrument or key.startswith(f"{instrument}#")
+            if matches and pos.get("is_gtt") and not pos.get("entry_confirmed", False):
+                pos["entry_confirmed"] = True
+                pos["execution_state"] = "entry_filled"
+                pos["entry_fill_price"] = float(pos.get("entry_price") or 0.0)
+                self._update_trade_log_status(pos.get("gtt_order_id"), status="filled", execution_state="entry_filled")
+                logger.info(f"✅ Position update confirmed GTT entry for {key}")
+
     # ── Status & Reporting ──────────────────────────────────────
 
     def get_status(self) -> dict:
         """Get current engine status for the dashboard."""
+        managed_positions_summary = [
+            {
+                "instrument": key,
+                "strategy": pos.get("strategy_name"),
+                "is_gtt": bool(pos.get("is_gtt")),
+                "execution_state": pos.get("execution_state", "unknown"),
+                "entry_confirmed": bool(pos.get("entry_confirmed", False)),
+                "gtt_order_id": pos.get("gtt_order_id"),
+                "entry_pending_age_sec": pos.get("entry_pending_age_sec"),
+                "entry_timeout_sec": pos.get("entry_timeout_sec"),
+            }
+            for key, pos in self._managed_positions.items()
+        ]
         return {
             "initialized": self._is_initialized,
             "running": self._is_running,
@@ -1120,9 +1392,14 @@ class AutomationEngine:
                 for config, strategy in self._active_strategies
             ],
             "signals_today": len(self._signals_log),
+            "rejections_today": len(self._signal_rejections),
             "trades_today": len(self._trades_today),
+            "managed_positions_count": len(self._managed_positions),
+            "pending_entries_count": sum(1 for pos in self._managed_positions.values() if pos.get("execution_state") == "entry_pending"),
+            "managed_positions": managed_positions_summary[-20:],
             "active_signals_count": self._get_active_signal_count(),
             "recent_signals": self._signals_log[-10:],
+            "recent_rejections": self.get_recent_rejections(20),
             "recent_trades": self._trades_today[-10:],
             "market_hours": self._order_service.is_market_hours() if self._order_service else False,
         }
@@ -1136,15 +1413,20 @@ class AutomationEngine:
         return self._trades_today
 
     def _get_active_signal_count(self) -> int:
-        """Get count of active (non-closed) signals from DB."""
+        """Get count of active (non-closed) signals from DB (cached 15s)."""
+        now = time.monotonic()
+        if (now - self._cached_active_signal_count_at) < 15.0:
+            return self._cached_active_signal_count
         try:
             from app.database.connection import get_session, ActiveSignal
             session = get_session()
             count = session.query(ActiveSignal).filter_by(status="active").count()
             session.close()
+            self._cached_active_signal_count = count
+            self._cached_active_signal_count_at = now
             return count
         except Exception:
-            return 0
+            return self._cached_active_signal_count
 
     def _get_latest_oc_insight(self) -> dict | None:
         """Return the latest cached OC analysis from the pipeline processor."""
@@ -1177,6 +1459,10 @@ class AutomationEngine:
         if spot_price <= 0:
             spot_price = 25000.0  # fallback
 
+        active_params = {}
+        if self._active_strategies:
+            active_params = (self._active_strategies[0][0].params or {})
+
         # Use the active strategy's SL/TP multipliers if available
         sl_price = round(spot_price * 0.996, 2)   # default 0.4% SL
         tp_price = round(spot_price * 1.012, 2)    # default 1.2% TP
@@ -1198,6 +1484,19 @@ class AutomationEngine:
                     sl_price = round(spot_price + sl_dist, 2)
                     tp_price = round(spot_price - tp_dist, 2)
 
+        # Respect strategy target behavior during probe.
+        probe_confidence = int(active_params.get("probe_confidence_score", 75) or 75)
+        target_mode = str(active_params.get("target_mode", "fixed") or "fixed").lower()
+        target_confidence_min = int(active_params.get("target_confidence_min", 72) or 72)
+        target_enabled = True
+        if target_mode == "none":
+            target_enabled = False
+        elif target_mode == "adaptive":
+            target_enabled = probe_confidence >= target_confidence_min
+
+        if not target_enabled:
+            tp_price = 0.0
+
         signal = TradeSignal(
             strategy_name="Manual Test",
             instrument_key=instrument_key,
@@ -1205,10 +1504,13 @@ class AutomationEngine:
             price=spot_price,
             stop_loss=sl_price,
             take_profit=tp_price,
-            confidence_score=5,
+            confidence_score=probe_confidence,
         )
         signal.metadata["requested_action"] = normalized_action
         signal.metadata["force_live"] = bool(force_live)
+        signal.metadata["target_mode"] = target_mode
+        signal.metadata["target_confidence_min"] = target_confidence_min
+        signal.metadata["target_enabled"] = bool(target_enabled)
 
         # Keep status counters consistent with regular strategy-originated signals.
         self._signals_log.append({
@@ -1261,6 +1563,11 @@ class AutomationEngine:
             "force_live": bool(force_live),
             "execution_mode": execution_mode,
             "gtt_order_ids": entry_order_ids,
+            "probe_confidence_score": probe_confidence,
+            "target_mode_applied": target_mode,
+            "target_confidence_min": target_confidence_min,
+            "target_enabled": bool(target_enabled),
+            "take_profit_applied": float(signal.take_profit or 0.0),
             "execution_error": (signal.metadata or {}).get("_last_execution_error"),
             "execution_error_code": (signal.metadata or {}).get("_last_execution_error_code"),
         }
@@ -1268,6 +1575,7 @@ class AutomationEngine:
     def reset_daily(self):
         """Reset daily counters (called post-market)."""
         self._signals_log.clear()
+        self._signal_rejections.clear()
         self._trades_today.clear()
         self._daily_pnl = 0.0
         self._paper_positions.clear()

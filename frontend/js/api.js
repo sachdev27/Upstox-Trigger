@@ -164,6 +164,9 @@ export const api = {
     async runCycle() {
         return fetch(`${API_BASE}/engine/run-cycle`, { method: 'POST' }).then(r => r.json());
     },
+    async squareOffAll() {
+        return fetch(`${API_BASE}/engine/square-off`, { method: 'POST' }).then(r => r.json());
+    },
     async updateConfig(config) {
         return fetch(`${API_BASE}/engine/config`, {
             method: 'POST',
@@ -176,6 +179,9 @@ export const api = {
     },
     async getSignals() {
         return fetch(`${API_BASE}/strategies/signals`).then(r => r.json());
+    },
+    async getRejections(limit = 50) {
+        return fetch(`${API_BASE}/engine/rejections?limit=${encodeURIComponent(limit)}`).then(r => r.json());
     },
     async getMarketStatus() {
         return fetch(`${API_BASE}/orders/status/market-hours`).then(r => r.json());
@@ -228,6 +234,9 @@ export const api = {
         return fetch(`${API_BASE}/notifications/test?channel=${channel}`, {
             method: 'POST'
         }).then(r => r.json());
+    },
+    async getProxyStatus(checkIp = true) {
+        return fetch(`${API_BASE}/monitoring/network/proxy-status?check_ip=${checkIp ? 'true' : 'false'}`).then(r => r.json());
     },
 
     // Watchlist

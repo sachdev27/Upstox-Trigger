@@ -48,6 +48,19 @@ export class EngineWS {
         };
     }
 
+    disconnect() {
+        if (this.ws) {
+            this.ws.onclose = null;
+            this.ws.close();
+            this.ws = null;
+        }
+    }
+
+    reconnect() {
+        this.disconnect();
+        this.connect();
+    }
+
     send(data) {
         if (this.isConnected()) {
             this.ws.send(JSON.stringify(data));

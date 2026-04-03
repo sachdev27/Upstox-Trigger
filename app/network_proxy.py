@@ -48,6 +48,20 @@ def apply_process_proxy_env(settings) -> None:
         os.environ["NO_PROXY"] = "localhost,127.0.0.1"
 
 
+def get_requests_proxies(settings) -> dict[str, str]:
+    """Build explicit requests-compatible proxy mapping from settings."""
+    upstox_proxy = (getattr(settings, "UPSTOX_PROXY_URL", "") or "").strip()
+    http_proxy = (getattr(settings, "REQUESTS_HTTP_PROXY", "") or "").strip() or upstox_proxy
+    https_proxy = (getattr(settings, "REQUESTS_HTTPS_PROXY", "") or "").strip() or upstox_proxy
+
+    proxies: dict[str, str] = {}
+    if http_proxy:
+        proxies["http"] = http_proxy
+    if https_proxy:
+        proxies["https"] = https_proxy
+    return proxies
+
+
 def patch_upstox_sdk_socks_support() -> None:
     """
     Patch Upstox SDK REST client to support SOCKS proxy URLs in config.proxy.

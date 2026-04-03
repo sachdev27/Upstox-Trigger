@@ -10,6 +10,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database.connection import get_session, Watchlist, Instrument, ActiveSignal
 from app.config import get_settings
+from app.auth.service import get_auth_service
+from app.network_proxy import get_requests_proxies
 from typing import List, Optional
 
 import requests
@@ -23,29 +25,32 @@ IST = timezone(timedelta(hours=5, minutes=30))
 def proxy_status(check_ip: bool = Query(False, description="When true, performs ipify egress check")):
     """Show effective proxy and algo-header runtime settings for troubleshooting."""
     settings = get_settings()
+    auth = get_auth_service()
 
     upstox_proxy = (settings.UPSTOX_PROXY_URL or "").strip()
     http_proxy = (settings.REQUESTS_HTTP_PROXY or "").strip()
     https_proxy = (settings.REQUESTS_HTTPS_PROXY or "").strip()
     all_proxy = (os.getenv("ALL_PROXY") or os.getenv("all_proxy") or "").strip()
+    token_valid, token_reason = auth.validate_token(use_sandbox=False)
 
     result = {
+        "apply_upstox_sdk_proxy": bool(settings.APPLY_UPSTOX_SDK_PROXY),
         "require_upstox_proxy": bool(settings.REQUIRE_UPSTOX_PROXY),
         "upstox_proxy_configured": bool(upstox_proxy),
         "requests_http_proxy_configured": bool(http_proxy),
         "requests_https_proxy_configured": bool(https_proxy),
         "all_proxy_env_configured": bool(all_proxy),
+        "requests_proxy_active": bool(get_requests_proxies(settings)),
         "algo_name_configured": bool((settings.ALGO_NAME or "").strip()),
         "algo_name": (settings.ALGO_NAME or "").strip() or None,
+        "token_valid": bool(token_valid),
+        "token_reason": token_reason,
     }
 
     if check_ip:
-        proxies = {
-            "http": http_proxy or https_proxy or upstox_proxy,
-            "https": https_proxy or http_proxy or upstox_proxy,
-        }
+        proxies = get_requests_proxies(settings)
         try:
-            r = requests.get("https://api.ipify.org", proxies=proxies, timeout=15)
+            r = requests.get("https://api.ipify.org", proxies=proxies or None, timeout=15)
             r.raise_for_status()
             result["egress_ip"] = r.text.strip()
         except Exception as e:

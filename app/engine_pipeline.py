@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
@@ -167,28 +168,86 @@ class OptionChainInsightProcessor(SignalProcessor):
 
 class ATMResolverProcessor(SignalProcessor):
     """Resolves index instruments to their closest ATM option contract."""
+
+    @staticmethod
+    def _to_float(value, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except Exception:
+            return default
+
+    def _option_liquidity_score(self, row: dict, opt_side: str, target_strike: float, step_size: float, distance_penalty: float) -> tuple[float, dict]:
+        strike = self._to_float(row.get("strike_price"), target_strike)
+        option_leg = row.get(opt_side) or {}
+        ltp = self._to_float(option_leg.get("ltp"), 0.0)
+        oi = self._to_float(option_leg.get("oi"), 0.0)
+        volume = self._to_float(option_leg.get("volume"), 0.0)
+        bid = self._to_float(option_leg.get("bid_price") or option_leg.get("bid") or option_leg.get("best_bid"), 0.0)
+        ask = self._to_float(option_leg.get("ask_price") or option_leg.get("ask") or option_leg.get("best_ask"), 0.0)
+
+        spread_pct = 999.0
+        if bid > 0 and ask > 0 and ask >= bid:
+            mid = (bid + ask) / 2.0
+            spread_pct = ((ask - bid) / mid) * 100 if mid > 0 else 999.0
+
+        strike_distance_steps = abs(strike - target_strike) / max(step_size, 1.0)
+
+        score = 0.0
+        score += min(30.0, volume / 80.0)
+        score += min(30.0, oi / 1200.0)
+        score += min(20.0, ltp / 10.0)
+        score += 20.0 if spread_pct <= 1.0 else (12.0 if spread_pct <= 2.0 else (6.0 if spread_pct <= 4.0 else 0.0))
+        score -= strike_distance_steps * max(distance_penalty, 0.0)
+
+        return score, {
+            "strike": strike,
+            "ltp": ltp,
+            "oi": oi,
+            "volume": volume,
+            "bid": bid,
+            "ask": ask,
+            "spread_pct": round(spread_pct, 4) if spread_pct < 999 else None,
+            "distance_steps": round(strike_distance_steps, 3),
+        }
+
     async def process(self, signal: 'TradeSignal', config: 'StrategyConfig', engine: 'AutomationEngine') -> bool:
         if ("INDEX" in signal.instrument_key or signal.instrument_key in ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]) and engine._market_service:
             try:
                 logger.info(f"🔍 Resolving ATM option for {signal.instrument_key} @ {signal.price}")
                 p = config.params or {}
+                fast_mode = bool(getattr(engine.settings, "FAST_EXECUTION_MODE", False))
+                fast_light_resolver = bool(getattr(engine.settings, "FAST_ATM_RESOLVER_LIGHT", True))
                 expiry_mode = str(p.get("option_expiry_mode", "current")).lower()
                 moneyness_steps = int(p.get("option_moneyness_steps", 0) or 0)
                 buy_only = bool(p.get("option_buy_only", True))
+                liquidity_filter = bool(p.get("option_liquidity_filter", True))
+                liquidity_window_steps = int(p.get("option_liquidity_window_steps", 2) or 2)
+                distance_penalty = float(p.get("option_distance_penalty", 5.0) or 5.0)
+
+                if fast_mode and fast_light_resolver:
+                    # Speed path: minimize option-selection overhead for faster order submission.
+                    liquidity_filter = False
+                    liquidity_window_steps = 0
 
                 # Initial fetch gets spot + available expiries.
                 chain_data = await engine._market_service.get_detailed_option_chain(signal.instrument_key)
                 if chain_data["status"] == "success" and chain_data["chain"]:
                     available_expiries = chain_data.get("available_expiries", [])
                     selected_expiry = chain_data.get("expiry_date")
-                    if available_expiries:
+                    if available_expiries and not (fast_mode and fast_light_resolver):
                         if expiry_mode == "next" and len(available_expiries) > 1:
                             selected_expiry = available_expiries[1]
                         else:
                             selected_expiry = available_expiries[0]
 
                     # Refetch for selected expiry (if different from default response)
-                    if selected_expiry and selected_expiry != chain_data.get("expiry_date"):
+                    if (
+                        selected_expiry
+                        and selected_expiry != chain_data.get("expiry_date")
+                        and not (fast_mode and fast_light_resolver)
+                    ):
                         refetch = await engine._market_service.get_detailed_option_chain(
                             signal.instrument_key,
                             expiry_date=selected_expiry,
@@ -219,7 +278,37 @@ class ATMResolverProcessor(SignalProcessor):
                     # Pick closest row around target strike that has desired side contract
                     candidate_rows = [r for r in matrix if r.get(opt_side)]
                     if candidate_rows:
-                        chosen_row = min(candidate_rows, key=lambda r: abs(float(r["strike_price"]) - target_strike))
+                        if liquidity_filter:
+                            nearby_rows = [
+                                r for r in candidate_rows
+                                if abs(self._to_float(r.get("strike_price"), target_strike) - target_strike)
+                                <= max(step_size, 1.0) * max(1, liquidity_window_steps)
+                            ]
+                            if not nearby_rows:
+                                nearby_rows = candidate_rows
+
+                            scored_rows = []
+                            for row in nearby_rows:
+                                score, details = self._option_liquidity_score(
+                                    row,
+                                    opt_side,
+                                    target_strike,
+                                    step_size,
+                                    distance_penalty,
+                                )
+                                scored_rows.append((score, row, details))
+
+                            scored_rows.sort(key=lambda x: x[0], reverse=True)
+                            best_score, chosen_row, best_details = scored_rows[0]
+                            signal.metadata["option_selection"] = {
+                                "mode": "liquidity_scored",
+                                "best_score": round(best_score, 3),
+                                "window_steps": max(1, liquidity_window_steps),
+                                "target_strike": target_strike,
+                                "picked": best_details,
+                            }
+                        else:
+                            chosen_row = min(candidate_rows, key=lambda r: abs(float(r["strike_price"]) - target_strike))
                     else:
                         chosen_row = atm_row
 
@@ -232,11 +321,27 @@ class ATMResolverProcessor(SignalProcessor):
                         signal.metadata["strike_price"] = float(chosen_row.get("strike_price"))
                         signal.metadata["direction_signal"] = signal.action.value
                         signal.instrument_key = opt["instrument_key"]
+                        bid = self._to_float(opt.get("bid_price") or opt.get("bid") or opt.get("best_bid"), 0.0)
+                        ask = self._to_float(opt.get("ask_price") or opt.get("ask") or opt.get("best_ask"), 0.0)
+                        spread_pct = None
+                        if bid > 0 and ask > 0 and ask >= bid:
+                            mid = (bid + ask) / 2.0
+                            spread_pct = ((ask - bid) / mid) * 100 if mid > 0 else None
+
+                        signal.metadata["option_snapshot"] = {
+                            "ltp": self._to_float(opt.get("ltp"), 0.0),
+                            "oi": self._to_float(opt.get("oi"), 0.0),
+                            "volume": self._to_float(opt.get("volume"), 0.0),
+                            "bid": bid,
+                            "ask": ask,
+                            "spread_pct": round(spread_pct, 4) if spread_pct is not None else None,
+                        }
 
                         # ── Recalculate price / SL / TP for the option premium ──
                         option_ltp = float(opt.get("ltp") or 0.0)
                         if option_ltp > 0:
                             old_price = signal.price or spot
+                            target_enabled = bool(signal.metadata.get("target_enabled", True))
                             # Preserve the original risk-reward *ratio* from the
                             # underlying signal and translate it into option-premium
                             # terms.  For long options the SL is a % drop in premium
@@ -246,7 +351,9 @@ class ATMResolverProcessor(SignalProcessor):
                             else:
                                 sl_pct = 0.30  # default 30% SL on premium
 
-                            if old_price > 0 and signal.take_profit > 0:
+                            if not target_enabled:
+                                tp_pct = 0.0
+                            elif old_price > 0 and signal.take_profit > 0:
                                 tp_pct = abs(signal.take_profit - old_price) / old_price
                             else:
                                 tp_pct = 0.60  # default 60% TP on premium
@@ -254,10 +361,12 @@ class ATMResolverProcessor(SignalProcessor):
                             signal.metadata["underlying_price"] = old_price
                             signal.metadata["underlying_sl"] = signal.stop_loss
                             signal.metadata["underlying_tp"] = signal.take_profit
+                            signal.metadata["execution_price_model"] = "option_premium"
 
                             signal.price = option_ltp
                             signal.stop_loss = round(option_ltp * (1 - sl_pct), 2)
-                            signal.take_profit = round(option_ltp * (1 + tp_pct), 2)
+                            signal.take_profit = round(option_ltp * (1 + tp_pct), 2) if target_enabled else 0.0
+                            signal.metadata["premium_risk_distance"] = round(abs(signal.price - signal.stop_loss), 2)
                             logger.info(
                                 f"💱 Option price recalc: LTP={option_ltp:.2f}, "
                                 f"SL={signal.stop_loss:.2f} (-{sl_pct*100:.0f}%), "
@@ -299,6 +408,104 @@ class ExecutionProcessor(SignalProcessor):
       - Swarm execution: N parallel lots per signal, each with its own TP level
       - Partial booking metadata extracted from signal and stored in managed_positions
     """
+
+    def _derive_trailing_gap(self, signal: 'TradeSignal', config: 'StrategyConfig') -> float:
+        """Derive a trailing gap in the execution instrument's price domain.
+
+        For option-premium execution, preserve the relative trail-to-SL ratio rather
+        than reusing the underlying ATR directly.
+        """
+        meta = signal.metadata or {}
+        premium_risk_distance = abs(float(signal.price or 0.0) - float(signal.stop_loss or 0.0))
+        if premium_risk_distance <= 0:
+            return float((config.params or {}).get("trailing_gap", 0.0))
+
+        params = config.params or {}
+        sl_mult = float(
+            meta.get("sl_atr_multiplier")
+            or meta.get("sl_multiplier")
+            or params.get("sl_atr_multiplier")
+            or params.get("sl_multiplier")
+            or 0.0
+        )
+        trail_mult = float(
+            meta.get("trailing_atr_mult")
+            or meta.get("trail_multiplier")
+            or params.get("trailing_atr_mult")
+            or params.get("trail_multiplier")
+            or 0.0
+        )
+
+        if sl_mult > 0 and trail_mult > 0:
+            return round(premium_risk_distance * (trail_mult / sl_mult), 2)
+
+        explicit_gap = float(params.get("trailing_gap", 0.0) or 0.0)
+        return explicit_gap if explicit_gap > 0 else round(premium_risk_distance, 2)
+
+    def _passes_option_execution_sanity(self, signal: 'TradeSignal', config: 'StrategyConfig') -> tuple[bool, str | None]:
+        """Validate option contract quality before placing live/paper entry."""
+        meta = signal.metadata or {}
+        option_snapshot = meta.get("option_snapshot") or {}
+        if not option_snapshot:
+            return True, None
+
+        p = config.params or {}
+        min_ltp = float(p.get("option_min_ltp", 8.0) or 0.0)
+        min_oi = float(p.get("option_min_oi", 800.0) or 0.0)
+        min_volume = float(p.get("option_min_volume", 80.0) or 0.0)
+        max_spread_pct = float(p.get("option_max_spread_pct", 4.0) or 0.0)
+
+        # Regime-adaptive quality thresholds for option execution.
+        # High volatility: slightly relax spread/depth constraints to reduce missed fills.
+        # Low volatility: tighten spread/depth constraints to avoid paying edge away in chop.
+        if bool(p.get("option_quality_regime_adaptive", True)):
+            atr_val = float(meta.get("atr") or 0.0)
+            signal_px = float(signal.price or 0.0)
+            atr_pct = (atr_val / max(signal_px, 1e-9)) * 100.0 if atr_val > 0 and signal_px > 0 else 0.0
+
+            high_vol_cutoff = float(p.get("option_high_vol_atr_pct", 1.20) or 1.20)
+            low_vol_cutoff = float(p.get("option_low_vol_atr_pct", 0.35) or 0.35)
+            spread_relax = float(p.get("option_high_vol_spread_relax_pct", 1.5) or 1.5)
+            spread_tighten = float(p.get("option_low_vol_spread_tighten_pct", 0.8) or 0.8)
+            depth_relax_factor = float(p.get("option_high_vol_depth_relax_factor", 0.80) or 0.80)
+            depth_tighten_factor = float(p.get("option_low_vol_depth_tighten_factor", 1.20) or 1.20)
+
+            if atr_pct >= high_vol_cutoff:
+                max_spread_pct = max_spread_pct + spread_relax if max_spread_pct > 0 else max_spread_pct
+                min_oi = min_oi * depth_relax_factor if min_oi > 0 else min_oi
+                min_volume = min_volume * depth_relax_factor if min_volume > 0 else min_volume
+                meta["option_quality_regime"] = "high_vol_relaxed"
+            elif atr_pct > 0 and atr_pct <= low_vol_cutoff:
+                max_spread_pct = max(max_spread_pct - spread_tighten, 0.5) if max_spread_pct > 0 else max_spread_pct
+                min_oi = min_oi * depth_tighten_factor if min_oi > 0 else min_oi
+                min_volume = min_volume * depth_tighten_factor if min_volume > 0 else min_volume
+                meta["option_quality_regime"] = "low_vol_tightened"
+            else:
+                meta["option_quality_regime"] = "normal"
+
+            meta["option_quality_thresholds"] = {
+                "min_ltp": round(min_ltp, 4),
+                "min_oi": round(min_oi, 4),
+                "min_volume": round(min_volume, 4),
+                "max_spread_pct": round(max_spread_pct, 4),
+            }
+
+        ltp = float(option_snapshot.get("ltp") or 0.0)
+        oi = float(option_snapshot.get("oi") or 0.0)
+        volume = float(option_snapshot.get("volume") or 0.0)
+        spread_pct = option_snapshot.get("spread_pct")
+        spread_pct_val = float(spread_pct) if spread_pct is not None else None
+
+        if min_ltp > 0 and ltp < min_ltp:
+            return False, f"Option premium too low ({ltp:.2f} < {min_ltp:.2f})"
+        if min_oi > 0 and oi < min_oi:
+            return False, f"Option OI too low ({oi:.0f} < {min_oi:.0f})"
+        if min_volume > 0 and volume < min_volume:
+            return False, f"Option volume too low ({volume:.0f} < {min_volume:.0f})"
+        if max_spread_pct > 0 and spread_pct_val is not None and spread_pct_val > max_spread_pct:
+            return False, f"Option spread too wide ({spread_pct_val:.2f}% > {max_spread_pct:.2f}%)"
+
+        return True, None
 
     def _build_position_record(
         self,
@@ -351,6 +558,11 @@ class ExecutionProcessor(SignalProcessor):
             # GTT order tracking — SL/TP handled by exchange, not software
             "gtt_order_id":        gtt_order_id,
             "is_gtt":              gtt_order_id is not None,
+            "execution_state":     "entry_pending" if gtt_order_id is not None else "filled",
+            "entry_confirmed":     gtt_order_id is None,
+            "entry_submitted_at":  datetime.now(IST).isoformat(),
+            "entry_timeout_sec":   int((config.params or {}).get("gtt_entry_timeout_sec", 45)),
+            "entry_fill_price":    None,
             "require_broker_confirmation": bool((config.params or {}).get("require_broker_fill_confirmation", True)),
         }
 
@@ -386,26 +598,25 @@ class ExecutionProcessor(SignalProcessor):
                 f"TP={swarm_tp or signal.take_profit:.2f}"
             )
             meta.setdefault("_placement_modes", []).append("paper")
+            meta["order_submit_ms"] = 0.0
+            signal.metadata.setdefault("latency", {})["order_submit_ms"] = 0.0
         else:
             try:
                 # ── GTT Order: single call places ENTRY + TARGET + STOPLOSS ──
-                # Compute trailing_gap from signal metadata: trailing_atr_mult × ATR.
-                # ScalpPro (and other strategies) store these in metadata at signal time.
-                # Fallback: explicit "trailing_gap" param in config, then 0.0 (which
-                # causes place_gtt_signal to use the full SL distance as the gap).
-                _meta_atr = float(meta.get("atr") or 0.0)
-                _meta_trail_mult = float(
-                    meta.get("trailing_atr_mult")
-                    or (config.params or {}).get("trailing_atr_mult", 0.0)
-                )
-                if _meta_atr > 0 and _meta_trail_mult > 0:
-                    trailing_gap = round(_meta_atr * _meta_trail_mult, 2)
-                else:
-                    trailing_gap = float((config.params or {}).get("trailing_gap", 0.0))
+                trailing_gap = self._derive_trailing_gap(signal, config)
+                meta["execution_trailing_gap"] = trailing_gap
+                submit_t0 = time.perf_counter()
                 result = await asyncio.to_thread(
                     engine._order_service.place_gtt_signal, signal, trailing_gap
                 )
+                meta["order_submit_ms"] = round((time.perf_counter() - submit_t0) * 1000.0, 2)
+                signal.metadata.setdefault("latency", {})["order_submit_ms"] = meta["order_submit_ms"]
                 gtt_order_id = result.get("gtt_order_id") if isinstance(result, dict) else None
+                if isinstance(result, dict):
+                    if result.get("gtt_payload"):
+                        meta["gtt_payload"] = result.get("gtt_payload")
+                    if result.get("gtt_execution_settings"):
+                        meta["gtt_execution_settings"] = result.get("gtt_execution_settings")
                 if gtt_order_id:
                     meta.setdefault("_gtt_order_ids", []).append(str(gtt_order_id))
                 meta.setdefault("_placement_modes", []).append("live")
@@ -434,6 +645,9 @@ class ExecutionProcessor(SignalProcessor):
                     meta["_last_execution_error_code"] = err_code
                 else:
                     meta["_last_execution_error"] = f"GTT order placement exception: {e}"
+                if "order_submit_ms" not in meta:
+                    meta["order_submit_ms"] = round((time.perf_counter() - submit_t0) * 1000.0, 2)
+                signal.metadata.setdefault("latency", {})["order_submit_ms"] = meta["order_submit_ms"]
                 logger.error(f"❌ Swarm lot {lot_idx+1} GTT order failed: {e}")
                 return False
 
@@ -457,12 +671,13 @@ class ExecutionProcessor(SignalProcessor):
                     price=signal.price,
                     stop_loss=signal.stop_loss,
                     take_profit=swarm_tp or signal.take_profit,
-                    status="paper" if is_paper else "live",
+                    status="paper" if is_paper else ("gtt_pending_entry" if gtt_order_id else "filled"),
                     metadata_json={
                         "underlying": meta.get("underlying", instrument_key),
                         "swarm_lot": lot_idx + 1,
                         "swarm_total": swarm_count,
                         "gtt_order_id": gtt_order_id,
+                        "execution_state": "paper" if is_paper else ("entry_pending" if gtt_order_id else "filled"),
                         **(signal.metadata or {}),
                     }
                 )
@@ -484,8 +699,18 @@ class ExecutionProcessor(SignalProcessor):
         force_live = bool(meta.get("force_live", False))
         is_paper   = (False if force_live else (engine.paper_trading or config.paper_trading))
 
+        option_ok, option_reason = self._passes_option_execution_sanity(signal, config)
+        if not option_ok:
+            meta["_last_execution_error"] = option_reason
+            logger.warning(f"🚫 Execution sanity blocked {trade_instrument}: {option_reason}")
+            return False
+
         # Do not stack duplicate entries on an already managed open position.
-        if signal.action.value == "BUY" and trade_instrument in engine._managed_positions:
+        has_existing_position = any(
+            key == trade_instrument or key.startswith(f"{trade_instrument}#")
+            for key in engine._managed_positions
+        )
+        if signal.action.value == "BUY" and has_existing_position:
             logger.info(f"⏭️ Entry skipped: {trade_instrument} already has an open managed position")
             return False
 

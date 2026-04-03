@@ -21,7 +21,7 @@
                     Upstox Trading Terminal
                     <span id="sandbox-badge" class="badge live" style="display: none; background: #ff9800; color: white;">SANDBOX</span>
                 </div>
-                <div class="header-subtitle">SuperTrend Pro v6.3 • API <span id="api-version-text">v2</span></div>
+                <!-- <div class="header-subtitle">SuperTrend Pro v6.3 • API <span id="api-version-text">v2</span></div> -->
             </div>
         </div>
         <div class="header-right">
@@ -135,7 +135,7 @@
                         <div style="padding: 10px 14px; border-bottom: 1px solid var(--border-color); background: var(--bg-card);">
                             <h3 style="margin: 0; font-size: 0.9rem;">🟢 Active Signals</h3>
                         </div>
-                        <div style="flex: 1; overflow-y: auto;">
+                        <div style="flex: 1; overflow-y: auto; min-height: 240px;">
                             <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem;">
                                 <thead style="position: sticky; top: 0; z-index: 5; background: var(--bg-dark);">
                                     <tr>
@@ -158,6 +158,27 @@
                                 </tbody>
                             </table>
                         </div>
+                        <div style="border-top: 1px solid var(--border-color); display:flex; flex-direction:column; min-height: 220px; max-height: 280px;">
+                            <div style="padding: 10px 14px; border-bottom: 1px solid var(--border-color); background: var(--bg-card); display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                                <h3 style="margin: 0; font-size: 0.85rem;">🚫 Recent Signal Rejections</h3>
+                                <button class="btn btn-outline" style="padding: 2px 8px; width: auto; font-size: 0.7rem;" onclick="refreshSignalRejections()">Refresh</button>
+                            </div>
+                            <div style="overflow-y:auto; flex:1;">
+                                <table style="width: 100%; border-collapse: collapse; font-size: 0.75rem;">
+                                    <thead style="position: sticky; top: 0; z-index: 5; background: var(--bg-dark);">
+                                        <tr>
+                                            <th style="padding: 6px 8px; text-align: left;">Time</th>
+                                            <th style="padding: 6px 8px; text-align: left;">Strategy</th>
+                                            <th style="padding: 6px 8px; text-align: left;">Instrument</th>
+                                            <th style="padding: 6px 8px; text-align: left;">Reason</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="signal-rejections-body-main">
+                                        <tr><td colspan="4" style="text-align:center; padding: 20px;" class="text-muted">No rejection telemetry yet</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -178,6 +199,10 @@
                         <div class="settings-card">
                             <h4>API Credentials</h4>
                             <div class="form-group">
+                                <label class="form-label">API Version</label>
+                                <input type="text" id="setting-api-version" class="form-input" placeholder="2.0">
+                            </div>
+                            <div class="form-group">
                                 <label class="form-label">Upstox API Key</label>
                                 <input type="text" id="setting-api-key" class="form-input" placeholder="Loading...">
                             </div>
@@ -186,10 +211,33 @@
                                 <input type="password" id="setting-api-secret" class="form-input" placeholder="********">
                             </div>
                             <div class="form-group">
+                                <label class="form-label">Auth Code</label>
+                                <input type="password" id="setting-auth-code" class="form-input" placeholder="********">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Access Token</label>
+                                <input type="password" id="setting-access-token" class="form-input" placeholder="********">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Algo Name</label>
+                                <input type="text" id="setting-algo-name" class="form-input" placeholder="scalpro">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Algo ID</label>
+                                <input type="text" id="setting-algo-id" class="form-input" placeholder="optional">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Order API Version</label>
+                                <input type="text" id="setting-order-api-version" class="form-input" placeholder="3.0">
+                            </div>
+                            <div class="form-group">
                                 <label class="form-label">Redirect URI</label>
                                 <input type="text" id="setting-redirect-uri" class="form-input" placeholder="Loading...">
                             </div>
-                            <button class="btn btn-primary" onclick="saveSettings()">Save API Configuration</button>
+                            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                                <button class="btn btn-primary" onclick="saveSettings()">Save API Configuration</button>
+                                <button class="btn btn-outline" onclick="clearApiCredentials()">Clear API Credentials</button>
+                            </div>
                         </div>
                         <div class="settings-card">
                             <h4>Sandbox Credentials</h4>
@@ -238,6 +286,71 @@
                                 </select>
                             </div>
                             <button class="btn btn-outline" onclick="triggerTestSignal()">🧪 Trigger Manual Test Signal</button>
+                        </div>
+                        <div class="settings-card">
+                            <h4>Network / Proxy</h4>
+                            <div class="auto-mode-card" style="margin-top: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Enable Upstox SDK Proxy</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Routes SDK traffic via proxy URL</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-apply-upstox-sdk-proxy">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auto-mode-card" style="margin-top: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Require Proxy (Fail Fast)</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Blocks startup calls if proxy is missing</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-require-upstox-proxy">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auto-mode-card" style="margin-top: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Apply Process Proxy Env</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Sets HTTP_PROXY / HTTPS_PROXY env vars</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-apply-process-proxy-env">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Upstox SDK Proxy URL</label>
+                                <input type="text" id="setting-upstox-proxy-url" class="form-input" placeholder="socks5h://user:pass@host:1080">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Requests HTTP Proxy</label>
+                                <input type="text" id="setting-requests-http-proxy" class="form-input" placeholder="http://user:pass@host:3128">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Requests HTTPS Proxy</label>
+                                <input type="text" id="setting-requests-https-proxy" class="form-input" placeholder="http://user:pass@host:3128">
+                            </div>
+                            <button class="btn btn-outline" onclick="window.saveNetworkSettings && window.saveNetworkSettings()">Save Network / Proxy Settings</button>
+                            <div class="settings-card" style="background: rgba(33,150,243,0.05); border-color: var(--accent-primary); margin-top: 16px; padding: 16px;">
+                                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px;">
+                                    <h4 style="margin:0; color: var(--accent-primary); font-size: 0.8rem;">Proxy Diagnostics</h4>
+                                    <button class="btn btn-outline" onclick="refreshNetworkDiagnostics()">Refresh Diagnostics</button>
+                                </div>
+                                <div id="network-diag-summary" style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 10px;">Loading diagnostics...</div>
+                                <div id="network-diag-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size:0.75rem;"></div>
+                            </div>
+                        </div>
+                        <div class="settings-card" style="grid-column: span 2;">
+                            <h4>Advanced Settings (JSON)</h4>
+                            <p class="text-muted" style="font-size:0.75rem; margin-bottom:10px;">
+                                Edit any uppercase settings key here (for example: API_VERSION, HOST, PORT, DEBUG, LOG_LEVEL, ENV_OVERRIDE_DB).
+                            </p>
+                            <textarea id="setting-advanced-json" class="form-input" style="min-height: 180px; font-family: monospace;" placeholder='{"API_VERSION":"2.0","LOG_LEVEL":"INFO"}'></textarea>
+                            <div style="display:flex; gap:8px; margin-top:10px;">
+                                <button class="btn btn-outline" onclick="saveAdvancedSettings()">Save Advanced Settings</button>
+                                <button class="btn btn-outline" onclick="loadSettingsIntoUI()">Reload Settings Snapshot</button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -359,6 +472,58 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="settings-card">
+                            <h4>Signal Speed Mode</h4>
+                            <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 16px;">
+                                Tune signal-to-order latency. Enable only after validating behavior in paper mode.
+                            </p>
+                            <div class="auto-mode-card" style="margin-bottom: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Fast Execution Mode</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Applies low-latency execution pipeline shortcuts</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-fast-execution-mode">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auto-mode-card" style="margin-bottom: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Skip OC Insight (Fast)</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Bypass option-chain enrichment before execution</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-fast-skip-oc-insight">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auto-mode-card" style="margin-bottom: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Light ATM Resolver (Fast)</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Reduces contract-selection overhead</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-fast-atm-resolver-light">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="auto-mode-card" style="margin-bottom: 10px;">
+                                <div>
+                                    <div style="font-weight: 600;">Async Alerter (Fast)</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">Offloads alerts/DB side-work from hot path</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="setting-fast-async-alerter">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="form-group" style="margin-top: 12px;">
+                                <label class="form-label">Candle Check Interval (seconds)</label>
+                                <input type="number" id="setting-candle-check-seconds" class="form-input" min="1" max="59" step="1" value="5">
+                                <small class="text-muted">Lower = faster detection, higher API/CPU usage.</small>
+                            </div>
+                            <button class="btn btn-outline" onclick="saveSpeedSettings()">Save Speed Settings</button>
+                        </div>
                     </div>
                     <!-- Risk Levels — SL / TP / Trailing from active strategy -->
                     <div style="padding: 0 20px;">
@@ -389,6 +554,25 @@
                                 <h4 style="color: var(--accent-primary); font-size: 0.8rem; margin-bottom: 6px;">Live Example</h4>
                                 <div id="exec-risk-example-text" style="font-size: 0.75rem; color: var(--text-muted); line-height: 1.6;">
                                     Select a strategy and load it to see computed levels.
+                                </div>
+                            </div>
+                            <div class="settings-card" id="exec-target-card" style="background: rgba(255,152,0,0.05); border-color: #ff9800; margin-top: 12px; padding: 14px;">
+                                <h4 style="color: #ff9800; font-size: 0.8rem; margin-bottom: 8px;">Target Behavior</h4>
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: end;">
+                                    <div class="form-group" style="margin: 0;">
+                                        <label class="form-label">Target Mode</label>
+                                        <select id="exec-target-mode" class="form-input" onchange="toggleExecutionTargetInputs()">
+                                            <option value="adaptive">Adaptive (pattern strength)</option>
+                                            <option value="none">No Target (trailing SL only)</option>
+                                            <option value="fixed">Fixed Target</option>
+                                        </select>
+                                        <small class="text-muted">Adaptive enables TP only when confidence is strong.</small>
+                                    </div>
+                                    <div class="form-group" id="exec-target-confidence-group" style="margin: 0;">
+                                        <label class="form-label">Adaptive Confidence Threshold</label>
+                                        <input type="number" id="exec-target-confidence" class="form-input" min="1" max="100" step="1" value="72">
+                                        <small class="text-muted">TP appears only if score >= this threshold.</small>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -442,188 +626,270 @@
                 </div>
             </div>
 
-            <!-- Bottom Tabs/Tables -->
-            <div id="bottom-panel" class="bottom-panel">
-                <div class="bottom-tabs">
-                    <button class="bottom-tab active" onclick="switchBottomTab('positions')">Positions</button>
-                    <button class="bottom-tab" onclick="switchBottomTab('orderbook')">Order Book</button>
-                    <button class="bottom-tab" onclick="switchBottomTab('trades')">Trade History</button>
-                    <button class="bottom-tab" onclick="clearTradeHistory()" title="Clear trade history" style="margin-left:auto; font-size:0.8rem; padding:4px 8px; min-width:auto;">🗑️</button>
-                    <button class="bottom-tab" onclick="switchBottomTab('signals')">Signals</button>
-                    <button class="bottom-tab" onclick="switchBottomTab('active-signals')">🟢 Active Signals</button>
-                    <button class="bottom-tab" onclick="switchBottomTab('activity')">Activity Log</button>
-                </div>
-
-                <!-- Positions Tab -->
-                <div id="tab-positions" class="bottom-content active">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Instrument</th>
-                                <th>Qty</th>
-                                <th>Side</th>
-                                <th>Avg Price</th>
-                                <th>LTP</th>
-                                <th>P&L</th>
-                            </tr>
-                        </thead>
-                        <tbody id="positions-body">
-                            <tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">No open positions</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Order Book Tab -->
-                <div id="tab-orderbook" class="bottom-content">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Instrument</th>
-                                <th>Side</th>
-                                <th>Qty</th>
-                                <th>Price</th>
-                                <th>Status</th>
-                                <th>Message</th>
-                            </tr>
-                        </thead>
-                        <tbody id="order-book-body">
-                            <tr><td colspan="7" style="text-align:center; padding: 20px;" class="text-muted">No orders today</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Trades Tab -->
-                <div id="tab-trades" class="bottom-content">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Action</th>
-                                <th>Instrument</th>
-                                <th>Price</th>
-                                <th>SL</th>
-                                <th>TP</th>
-                                <th>Mode</th>
-                            </tr>
-                        </thead>
-                        <tbody id="trades-body">
-                            <tr><td colspan="7" style="text-align:center; padding: 20px;" class="text-muted">No trades today</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Signals Tab -->
-                <div id="tab-signals" class="bottom-content">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Action</th>
-                                <th>Instrument</th>
-                                <th>Price</th>
-                                <th>Score</th>
-                            </tr>
-                        </thead>
-                        <tbody id="signals-body">
-                            <tr><td colspan="5" style="text-align:center; padding: 20px;" class="text-muted">No signals generated</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Activity Log -->
-                <div id="tab-activity" class="bottom-content" style="background: var(--bg-dark); overflow-y: auto;">
-                    <div id="activity-log" style="padding: 8px 0;">
-                        <div class="log-line"><span class="log-time">[System]</span> Terminal initialized.</div>
+            <!-- Bottom Intent Panel -->
+            <div id="bottom-panel" class="bottom-panel snap-28">
+                <div class="bottom-toolbar">
+                    <div class="bottom-tabs">
+                        <button class="bottom-tab active" onclick="switchBottomTab('decisions')">Decisions</button>
+                        <button class="bottom-tab" onclick="switchBottomTab('execution')">Execution</button>
+                        <button class="bottom-tab" onclick="switchBottomTab('system')">System</button>
+                    </div>
+                    <div class="bottom-actions">
+                        <button class="btn btn-outline panel-snap-btn" onclick="setBottomPanelSnap('28')">28%</button>
+                        <button class="btn btn-outline panel-snap-btn" onclick="setBottomPanelSnap('45')">45%</button>
+                        <button class="btn btn-outline panel-snap-btn" onclick="setBottomPanelSnap('hidden')">Hide</button>
                     </div>
                 </div>
 
-                <!-- Active Signals Tab -->
-                <div id="tab-active-signals" class="bottom-content">
+                <!-- Decisions Tab -->
+                <div id="tab-decisions" class="bottom-content active">
+                    <div class="decision-filter-row">
+                        <label class="form-label" style="margin:0;">Filter</label>
+                        <select id="decision-filter" class="form-input" style="max-width: 220px;" onchange="refreshDecisionTimeline()">
+                            <option value="all">All events</option>
+                            <option value="blocked">Blocked only</option>
+                            <option value="executed">Executed only</option>
+                            <option value="pending">Pending only</option>
+                            <option value="error">Errors only</option>
+                        </select>
+                    </div>
                     <table>
                         <thead>
                             <tr>
                                 <th>Time</th>
-                                <th>Strategy</th>
-                                <th>Symbol</th>
-                                <th>Name</th>
-                                <th>TF</th>
-                                <th>Action</th>
-                                <th>Price</th>
-                                <th>SL</th>
-                                <th>TP</th>
-                                <th>Score</th>
-                                <th>Status</th>
-                                <th>Actions</th>
+                                <th>Stage</th>
+                                <th>Instrument</th>
+                                <th>Outcome</th>
+                                <th>Reason / Detail</th>
                             </tr>
                         </thead>
-                        <tbody id="active-signals-body">
-                            <tr><td colspan="12" style="text-align:center; padding: 20px;" class="text-muted">No active signals</td></tr>
+                        <tbody id="decision-timeline-body">
+                            <tr><td colspan="5" style="text-align:center; padding: 20px;" class="text-muted">No timeline events yet</td></tr>
                         </tbody>
                     </table>
+                </div>
+
+                <!-- Execution Tab -->
+                <div id="tab-execution" class="bottom-content">
+                    <div class="execution-split-grid">
+                        <div>
+                            <h4 class="panel-mini-title">Active Positions</h4>
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Instrument</th>
+                                        <th>Qty</th>
+                                        <th>Side</th>
+                                        <th>Avg Price</th>
+                                        <th>LTP</th>
+                                        <th>P&L</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="positions-body">
+                                    <tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">No open positions</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div>
+                            <h4 class="panel-mini-title">Pending / Broker Orders</h4>
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Instrument</th>
+                                        <th>Side</th>
+                                        <th>Qty</th>
+                                        <th>Price</th>
+                                        <th>Status</th>
+                                        <th>Message</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="order-book-body">
+                                    <tr><td colspan="7" style="text-align:center; padding: 20px;" class="text-muted">No orders today</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div style="padding: 8px 16px 0; display:flex; justify-content:flex-end;">
+                        <button class="btn btn-outline" onclick="clearTradeHistory()" style="width:auto;">🗑️ Clear Trade History</button>
+                    </div>
+                    <div>
+                        <h4 class="panel-mini-title" style="padding: 8px 16px 0;">Fills</h4>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Action</th>
+                                    <th>Instrument</th>
+                                    <th>Price</th>
+                                    <th>SL</th>
+                                    <th>TP</th>
+                                    <th>Mode</th>
+                                </tr>
+                            </thead>
+                            <tbody id="trades-body">
+                                <tr><td colspan="7" style="text-align:center; padding: 20px;" class="text-muted">No trades today</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div>
+                        <h4 class="panel-mini-title" style="padding: 10px 16px 0;">Order Explain</h4>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Strategy</th>
+                                    <th>Instrument</th>
+                                    <th>Outcome</th>
+                                    <th>Execution Model</th>
+                                    <th>Broker Ref</th>
+                                </tr>
+                            </thead>
+                            <tbody id="order-explain-body">
+                                <tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">No explainable order records yet</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- System Tab -->
+                <div id="tab-system" class="bottom-content">
+                    <div class="system-grid">
+                        <div class="system-card">
+                            <h4>Connectivity</h4>
+                            <div id="system-connectivity-timeline" class="system-timeline">
+                                <div class="system-event">Waiting for system data...</div>
+                            </div>
+                        </div>
+                        <div class="system-card">
+                            <h4>Auth / Proxy / API</h4>
+                            <div id="system-health-timeline" class="system-timeline">
+                                <div class="system-event">Waiting for system data...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="activity-log" style="padding: 8px 0; background: var(--bg-dark); margin-top: 10px; border-top: 1px solid var(--border-color);">
+                        <div class="log-line"><span class="log-time">[System]</span> Terminal initialized.</div>
+                    </div>
                 </div>
             </div>
         </main>
 
-        <!-- ── Right Panel (Controls) ── -->
+        <!-- ── Right Panel (Compact Rail) ── -->
         <aside class="panel-right">
 
-            <div class="panel-header">Engine Control</div>
-            <div class="control-section">
+            <div class="panel-header">Action Bar</div>
+            <div class="control-section rail-action-bar">
+                <button class="btn btn-outline" onclick="pauseEngineNow()">Pause Engine</button>
+                <button class="btn btn-outline" onclick="flattenAllNow()">Flatten All</button>
+                <button class="btn btn-outline" onclick="reloadDataNow()">Reload Data</button>
+                <button class="btn btn-outline" onclick="reconnectWSNow()">Reconnect WS</button>
+            </div>
 
-                <div class="auto-mode-card" id="auto-mode-card">
-                    <div>
-                        <div style="font-weight: 600; font-size: 0.95rem;">Auto Mode</div>
-                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">Trades autonomously</div>
-                    </div>
+            <div class="panel-header">Engine Control</div>
+            <div class="control-section rail-block" id="rail-engine-control">
+                <div class="rail-row">
+                    <span>Auto Mode</span>
                     <label class="toggle">
                         <input type="checkbox" id="toggle-automode" onchange="toggleAutoMode(this.checked)">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
-
-                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                    <button class="btn btn-primary" onclick="initializeEngine()">🚀 Initialize</button>
-                    <button class="btn btn-outline" onclick="runCycle()">🔄 Run 1x</button>
+                <div class="rail-row">
+                    <span>Strategy Enabled</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="toggle-strategy-enabled" onchange="toggleStrategyRuntime(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
                 </div>
-                <div style="font-size: 0.75rem; text-align: center; color: var(--text-muted);">
-                    Status: <span id="engine-status-text" class="text-warning">Not Initialized</span>
+                <div class="rail-row">
+                    <span>Paper Mode</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="toggle-papermode-rail" onchange="togglePaperMode(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
                 </div>
+                <div class="rail-row">
+                    <span>Emergency Halt</span>
+                    <button class="btn btn-outline emergency-btn" onclick="emergencyHaltNow()" style="width:auto;">HALT</button>
+                </div>
+                <div class="rail-status">Status: <span id="engine-status-text" class="text-warning">Not Initialized</span></div>
+            </div>
 
-                <div class="execution-probe-card" id="execution-probe-card">
-                    <button class="execution-probe-header execution-probe-toggle" type="button" onclick="toggleExecutionProbe()" aria-expanded="true" aria-controls="execution-probe-body">
-                        <span>Execution Probe</span>
-                        <span id="execution-probe-chevron" class="execution-probe-chevron">▾</span>
-                    </button>
-                    <div id="execution-probe-body" class="execution-probe-body">
-                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                            <button class="btn btn-outline" onclick="triggerTestSignalWithAction('BUY')">Test BUY→CE</button>
-                            <button class="btn btn-outline" onclick="triggerTestSignalWithAction('SELL')">Test SELL→PE</button>
+            <div class="panel-header">Risk Guardrails</div>
+            <div class="control-section rail-block" id="rail-risk-guardrails">
+                <div class="risk-rail-wrap">
+                    <div class="risk-thermometer">
+                        <div id="risk-thermometer-fill" class="risk-thermometer-fill"></div>
+                    </div>
+                    <div class="risk-metrics">
+                        <div class="rail-kv"><span>Daily Loss Used</span><strong id="rail-daily-loss-used">0%</strong></div>
+                        <div class="rail-kv"><span>Open Risk</span><strong id="rail-open-risk">0</strong></div>
+                        <div class="rail-kv"><span>Max Positions</span><strong id="rail-max-positions">0 / 0</strong></div>
+                    </div>
+                </div>
+                <div id="rail-risk-warning" class="risk-warning-chip">Risk Normal</div>
+                <button class="btn btn-outline emergency-btn" onclick="emergencyHaltNow()">Kill Switch</button>
+            </div>
+
+            <div class="panel-header">Execution Health</div>
+            <div class="control-section rail-block" id="rail-execution-health">
+                <div class="rail-kv"><span>Broker Auth</span><strong id="rail-auth-health">Unknown</strong></div>
+                <div class="rail-kv"><span>Proxy Route</span><strong id="rail-proxy-route">Unknown</strong></div>
+                <div class="rail-kv"><span>Rejection Rate</span><strong id="rail-rejection-rate">0%</strong></div>
+                <div class="rail-kv"><span>Pending Entries</span><strong id="rail-pending-entries">0</strong></div>
+            </div>
+
+            <div class="panel-header">Instrument Context</div>
+            <div class="control-section rail-block" id="rail-instrument-context">
+                <div class="rail-kv"><span>Symbol</span><strong id="rail-symbol">-</strong></div>
+                <div class="rail-kv"><span>LTP</span><strong id="rail-ltp">-</strong></div>
+                <div class="rail-kv"><span>Spread</span><strong id="rail-spread">N/A</strong></div>
+                <div class="rail-kv"><span>Liquidity Score</span><strong id="rail-liquidity-score">N/A</strong></div>
+            </div>
+
+            <details class="rail-advanced" id="rail-advanced">
+                <summary>Advanced</summary>
+                <div class="control-section" style="padding-top: 10px;">
+                    <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                        <button class="btn btn-primary" onclick="initializeEngine()">🚀 Initialize</button>
+                        <button class="btn btn-outline" onclick="runCycle()">🔄 Run 1x</button>
+                    </div>
+                    <div class="execution-probe-card" id="execution-probe-card">
+                        <button class="execution-probe-header execution-probe-toggle" type="button" onclick="toggleExecutionProbe()" aria-expanded="true" aria-controls="execution-probe-body">
+                            <span>Execution Probe</span>
+                            <span id="execution-probe-chevron" class="execution-probe-chevron">▾</span>
+                        </button>
+                        <div id="execution-probe-body" class="execution-probe-body">
+                            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                                <button class="btn btn-outline" onclick="triggerTestSignalWithAction('BUY')">Test BUY→CE</button>
+                                <button class="btn btn-outline" onclick="triggerTestSignalWithAction('SELL')">Test SELL→PE</button>
+                            </div>
+                            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                                <button class="btn btn-primary" onclick="runExecutionProbe('BUY')">Verify BUY Flow</button>
+                                <button class="btn btn-primary" onclick="runExecutionProbe('SELL')">Verify SELL Flow</button>
+                            </div>
+                            <div id="execution-probe-result" class="execution-probe-result probe-neutral">
+                                Run Verify Flow to test signal -> cycle -> order path.
+                            </div>
                         </div>
-                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                            <button class="btn btn-primary" onclick="runExecutionProbe('BUY')">Verify BUY Flow</button>
-                            <button class="btn btn-primary" onclick="runExecutionProbe('SELL')">Verify SELL Flow</button>
+                    </div>
+
+                    <div class="panel-header" style="margin: 12px -16px 0;">Strategy Feedback</div>
+                    <div class="control-section" id="strategy-hud-container" style="padding: 0; background: var(--bg-color);">
+                        <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
+                            Waiting for active strategy...
                         </div>
-                        <div id="execution-probe-result" class="execution-probe-result probe-neutral">
-                            Run Verify Flow to test signal -> cycle -> order path.
+                    </div>
+
+                    <div class="panel-header" style="margin: 12px -16px 0;">OC Insight</div>
+                    <div class="control-section" id="oc-insight-container" style="padding: 0; background: var(--bg-color);">
+                        <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
+                            Select an INDEX instrument to view OC analysis
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <div class="panel-header">Strategy Feedback</div>
-            <div class="control-section" id="strategy-hud-container" style="padding: 0; background: var(--bg-color);">
-                <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
-                    Waiting for active strategy...
-                </div>
-            </div>
-
-            <div class="panel-header">OC Insight</div>
-            <div class="control-section" id="oc-insight-container" style="padding: 0; background: var(--bg-color);">
-                <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
-                    Select an INDEX instrument to view OC analysis
-                </div>
-            </div>
+            </details>
 
         </aside>
     </div>
@@ -650,6 +916,6 @@
 
     <!-- Modularized JS -->
 
-    <script type="module" src="/static/js/app.js?v=9"></script>
+    <script type="module" src="/static/js/app.js?v=13"></script>
 </body>
 </html>

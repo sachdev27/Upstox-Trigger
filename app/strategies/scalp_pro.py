@@ -32,6 +32,8 @@ class ScalpPro(BaseStrategy):
             # ── Risk (single-exit mode) ──────────────────────────
             "sl_atr_multiplier": 1.0,   # stop-loss distance = sl_atr_mult × ATR
             "tp_atr_multiplier": 2.0,   # take-profit distance = tp_atr_mult × ATR
+            "target_mode": "adaptive", # fixed | adaptive | none
+            "target_confidence_min": 72, # adaptive mode: TP only above this confidence
 
             # ── Partial Booking (3-tier scaled exit) ─────────────
             # Enable to book profits progressively instead of all-or-nothing.
@@ -58,6 +60,20 @@ class ScalpPro(BaseStrategy):
             # Number of lots per signal.  Set from the frontend strategy panel.
             # For option buying: set to the number of contracts you want per trade.
             "quantity":             1,
+            "option_liquidity_filter": True,
+            "option_liquidity_window_steps": 2,
+            "option_distance_penalty": 5.0,
+            "option_min_ltp": 8.0,
+            "option_min_oi": 800.0,
+            "option_min_volume": 80.0,
+            "option_max_spread_pct": 4.0,
+            "option_quality_regime_adaptive": True,
+            "option_high_vol_atr_pct": 1.20,
+            "option_low_vol_atr_pct": 0.35,
+            "option_high_vol_spread_relax_pct": 1.5,
+            "option_low_vol_spread_tighten_pct": 0.8,
+            "option_high_vol_depth_relax_factor": 0.80,
+            "option_low_vol_depth_tighten_factor": 1.20,
 
             # ── Hard Quality Gates (block trade BEFORE signal is built) ────────
             # ADX gate — skip when market is choppy/ranging.
@@ -304,8 +320,9 @@ class ScalpPro(BaseStrategy):
         htf_df: "pd.DataFrame | None" = None,
     ) -> "TradeSignal | None":
         p = self.params
+        self.set_reject_reason(None)
         if len(df) < p["slow_ema"]:
-            return None
+            return self.reject("Insufficient candles for EMA crossover")
 
         ind = self._get_indicators(df)
 
@@ -319,7 +336,7 @@ class ScalpPro(BaseStrategy):
         sell_cross = fast_curr < slow_curr and fast_prev >= slow_prev
 
         if not buy_cross and not sell_cross:
-            return None
+            return self.reject("No EMA crossover")
 
         close = float(ind["close"].iloc[-1])
 
@@ -330,7 +347,7 @@ class ScalpPro(BaseStrategy):
             try:
                 adx_now = float(ind["adx"].iloc[-1])
                 if adx_now < adx_thresh:
-                    return None          # market too choppy — skip trade
+                    return self.reject(f"ADX gate failed ({adx_now:.1f} < {adx_thresh:.1f})")
             except Exception:
                 adx_now = 50.0           # fallback: neutral (don't block)
         else:
@@ -344,7 +361,7 @@ class ScalpPro(BaseStrategy):
                 vol_now = float(df["volume"].iloc[-1])
                 vol_avg = float(ind["vol_ma"].iloc[-1])
                 if vol_avg > 0 and vol_now < vol_avg * vol_mult:
-                    return None          # insufficient volume conviction — skip
+                    return self.reject("Volume spike gate failed")
             except Exception:
                 pass                     # if volume data is missing, don't block
 
@@ -363,13 +380,13 @@ class ScalpPro(BaseStrategy):
                 adx_req = float(p.get("vwap_pullback_adx_min", 25))
                 allow_pullback = (tol_abs > 0 and adx_now >= adx_req and close >= (vwap_now - tol_abs))
                 if close < vwap_now and not allow_pullback:
-                    return None
+                    return self.reject("VWAP long filter failed")
             # RSI must exceed momentum threshold
             if rsi_val < p["rsi_buy_thresh"]:
-                return None
+                return self.reject("RSI buy threshold not met")
             # ── RSI extreme-zone protection: don't buy into overbought exhaustion ──
             if overbought_min > 0 and rsi_val >= overbought_min:
-                return None
+                return self.reject("RSI overbought protection blocked BUY")
 
             atr_val  = float(ind["atr"].iloc[-1])
             sl_dist  = atr_val * p["sl_atr_multiplier"]
@@ -384,6 +401,17 @@ class ScalpPro(BaseStrategy):
                 adx_val=adx_now,
             )
 
+            target_mode = str(p.get("target_mode", "adaptive") or "adaptive").lower()
+            adaptive_min = int(p.get("target_confidence_min", 72) or 72)
+            target_enabled = True
+            if target_mode == "none":
+                target_enabled = False
+            elif target_mode == "adaptive":
+                target_enabled = score >= adaptive_min
+
+            take_profit = (close + tp_dist) if target_enabled else 0.0
+
+            self.set_reject_reason(None)
             return TradeSignal(
                 strategy_name=self.config.name,
                 instrument_key="",  # injected by engine
@@ -391,16 +419,18 @@ class ScalpPro(BaseStrategy):
                 price=close,
                 quantity=int(p.get("quantity", 1)),
                 stop_loss=close - sl_dist,
-                take_profit=close + tp_dist,
+                take_profit=take_profit,
                 confidence_score=score,
                 metadata={
                     "atr":                atr_val,
-                    "tp1":                close + atr_val * tp1_mult,
-                    "tp2":                close + atr_val * tp2_mult,
-                    "tp3":                close + tp_dist,
+                    "tp1":                (close + atr_val * tp1_mult) if target_enabled else 0.0,
+                    "tp2":                (close + atr_val * tp2_mult) if target_enabled else 0.0,
+                    "tp3":                take_profit,
                     "tp1_book_pct":       p.get("tp1_book_pct", 40),
                     "tp2_book_pct":       p.get("tp2_book_pct", 40),
-                    "partial_tp_enabled": p.get("partial_tp_enabled", True),
+                    "partial_tp_enabled": bool(p.get("partial_tp_enabled", True)) and target_enabled,
+                    "target_mode":        target_mode,
+                    "target_enabled":     target_enabled,
                     "trailing_atr_mult":  p.get("trailing_atr_mult", 1.0),
                     "swarm_count":        int(p.get("swarm_count", 1)),
                     "score_breakdown":    score_parts,
@@ -418,13 +448,13 @@ class ScalpPro(BaseStrategy):
                 adx_req = float(p.get("vwap_pullback_adx_min", 25))
                 allow_pullback = (tol_abs > 0 and adx_now >= adx_req and close <= (vwap_now + tol_abs))
                 if close > vwap_now and not allow_pullback:
-                    return None
+                    return self.reject("VWAP short filter failed")
             # RSI must be below momentum threshold
             if rsi_val > p["rsi_sell_thresh"]:
-                return None
+                return self.reject("RSI sell threshold not met")
             # ── RSI extreme-zone protection: don't short into deeply oversold territory ──
             if oversold_max > 0 and rsi_val <= oversold_max:
-                return None
+                return self.reject("RSI oversold protection blocked SELL")
 
             atr_val  = float(ind["atr"].iloc[-1])
             sl_dist  = atr_val * p["sl_atr_multiplier"]
@@ -439,6 +469,17 @@ class ScalpPro(BaseStrategy):
                 adx_val=adx_now,
             )
 
+            target_mode = str(p.get("target_mode", "adaptive") or "adaptive").lower()
+            adaptive_min = int(p.get("target_confidence_min", 72) or 72)
+            target_enabled = True
+            if target_mode == "none":
+                target_enabled = False
+            elif target_mode == "adaptive":
+                target_enabled = score >= adaptive_min
+
+            take_profit = (close - tp_dist) if target_enabled else 0.0
+
+            self.set_reject_reason(None)
             return TradeSignal(
                 strategy_name=self.config.name,
                 instrument_key="",
@@ -446,23 +487,25 @@ class ScalpPro(BaseStrategy):
                 price=close,
                 quantity=int(p.get("quantity", 1)),
                 stop_loss=close + sl_dist,
-                take_profit=close - tp_dist,
+                take_profit=take_profit,
                 confidence_score=score,
                 metadata={
                     "atr":                atr_val,
-                    "tp1":                close - atr_val * tp1_mult,
-                    "tp2":                close - atr_val * tp2_mult,
-                    "tp3":                close - tp_dist,
+                    "tp1":                (close - atr_val * tp1_mult) if target_enabled else 0.0,
+                    "tp2":                (close - atr_val * tp2_mult) if target_enabled else 0.0,
+                    "tp3":                take_profit,
                     "tp1_book_pct":       p.get("tp1_book_pct", 40),
                     "tp2_book_pct":       p.get("tp2_book_pct", 40),
-                    "partial_tp_enabled": p.get("partial_tp_enabled", True),
+                    "partial_tp_enabled": bool(p.get("partial_tp_enabled", True)) and target_enabled,
+                    "target_mode":        target_mode,
+                    "target_enabled":     target_enabled,
                     "trailing_atr_mult":  p.get("trailing_atr_mult", 1.0),
                     "swarm_count":        int(p.get("swarm_count", 1)),
                     "score_breakdown":    score_parts,
                 },
             )
 
-        return None
+        return self.reject("Signal conditions not satisfied")
 
     def compute_exit(
         self,

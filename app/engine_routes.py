@@ -22,8 +22,8 @@ async def initialize_engine():
 
 @router.post("/load-strategy")
 async def load_strategy(
-    strategy_class: str = "SuperTrendPro",
-    name: str = "SuperTrend Pro v6.3",
+    strategy_class: str = "ScalpPro",
+    name: str = "ScalpPro v1.0",
     instruments: str = "NSE_INDEX|Nifty 50",
     timeframe: str = "15m",
     paper_trading: bool = True,
@@ -79,6 +79,14 @@ async def run_cycle():
         "signals": engine.get_signals_log()[-5:],
         "trades": engine.get_trades_log()[-5:],
     }
+
+
+@router.post("/square-off")
+async def square_off_all():
+    """Force-exit all managed positions immediately."""
+    engine = get_engine()
+    await engine.square_off_all()
+    return {"status": "success"}
 
 
 @router.post("/auto-mode")
@@ -155,6 +163,13 @@ async def get_signals():
     """Get all signals generated today."""
     engine = get_engine()
     return {"signals": engine.get_signals_log()}
+
+
+@router.get("/rejections")
+async def get_rejections(limit: int = 50):
+    """Get recent signal rejections for diagnostics."""
+    engine = get_engine()
+    return {"rejections": engine.get_recent_rejections(limit)}
 
 
 @router.get("/trades")

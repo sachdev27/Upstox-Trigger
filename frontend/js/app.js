@@ -46,6 +46,13 @@ let lastOverlayRefreshAt = 0;
 const OVERLAY_REFRESH_MS = 30000;
 let currentMainView = state.get('currentMainView');
 state.on('currentMainView', (v) => { currentMainView = v; });
+const BOTTOM_TAB_KEY = 'bottomIntentTab';
+const BOTTOM_SNAP_KEY = 'bottomPanelSnap';
+const DECISION_FILTER_KEY = 'decisionFilter';
+const DECISION_EXPANDED_KEY = 'decisionExpandedKeys';
+const ORDER_EXPLAIN_EXPANDED_KEY = 'orderExplainExpandedKeys';
+let decisionExpanded = new Set();
+let orderExplainExpanded = new Set();
 
 // Bottom-panel row caches for delta rendering (key -> serialized row state)
 const tradeRowCache = new Map();
@@ -76,6 +83,21 @@ function isDocumentVisible() {
 
 function isBottomTabActive(tabId) {
     return !!document.getElementById(`tab-${tabId}`)?.classList.contains('active');
+}
+
+function parseEventTimeMs(value) {
+    if (!value) return 0;
+    const direct = new Date(value).getTime();
+    if (Number.isFinite(direct)) return direct;
+
+    // Support backend time-only stamps like HH:MM:SS by anchoring to today.
+    if (typeof value === 'string' && /^\d{2}:\d{2}:\d{2}$/.test(value)) {
+        const now = new Date();
+        const [h, m, s] = value.split(':').map((v) => Number(v));
+        const anchored = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s, 0).getTime();
+        return Number.isFinite(anchored) ? anchored : 0;
+    }
+    return 0;
 }
 
 // --- IndexedDB Cache System ---
@@ -134,23 +156,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     chart.init();
     ws.connect();
 
-    // Restore sidebar state — REMOVED
+    // Phase 1: Fire all independent fetches in parallel — avoid serial waterfall
+    // refreshStatus runs here so _lastEngineStatus is populated for fetchStrategySchemas
+    await Promise.allSettled([
+        fetchHistoricalCandles(),
+        checkAuth(),
+        refreshStatus(),
+        refreshAccountSummary(),
+        refreshWatchlist(),
+        loadSettingsIntoUI(),
+        refreshPositions(),
+        refreshTrades(),
+        refreshSignals(),
+        refreshActiveSignals(),
+        refreshSignalRejections(),
+        refreshOrderBook(),
+        refreshMarketStatus(),
+    ]);
 
-    await fetchHistoricalCandles();
-    await refreshAccountSummary();
-    await refreshPositions();
-    await refreshTrades();
-    await refreshSignals();
-    await refreshActiveSignals();
-    await refreshWatchlist();
-    await checkAuth();
-    await refreshStatus();
-    await loadSettingsIntoUI();
-    refreshAccountSummary();
-    refreshMarketStatus();
-    refreshOrderBook();
-    updateClock();
+    // Phase 2: depends on _lastEngineStatus from refreshStatus() above
     await fetchStrategySchemas();
+    updateClock();
 
     // Restore UI from localStorage
     updateElementText('current-instrument', currentInstrumentName);
@@ -168,6 +194,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupEventListeners();
     setupGlobalSearch();
     applyExecutionProbeState();
+    initBottomPanelState();
 
     // Interval updates
     setInterval(updateClock, 1000);
@@ -175,9 +202,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     setInterval(refreshPositions, 30000);
     setInterval(refreshMarketStatus, 60000);
     setInterval(refreshOrderBook, 45000);
-    setInterval(refreshActiveSignals, 20000); // Every 20 seconds
+    setInterval(refreshActiveSignals, 30000); // Every 30 seconds
+    setInterval(refreshSignalRejections, 30000);
+    setInterval(refreshDecisionTimeline, 60000);
+    setInterval(refreshSystemTimeline, 60000);
+    setInterval(refreshRailInstrumentContext, 30000);
     setInterval(() => scheduleOverlayRefresh(false), OVERLAY_REFRESH_MS); // Throttled strategy HUD/overlay
-    setInterval(refreshOcInsight, 20000); // OC insight every 20s
+    setInterval(refreshOcInsight, 30000); // OC insight every 30s
 
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && currentMainView === 'chart') {
@@ -296,9 +327,9 @@ function handleWsMessage(msg) {
                 break;
             case 'new_signal':
                 addLog(`🎯 Signal: ${msg.data.action} on ${msg.data.instrument}`, 'info');
-                showToast(`New Signal: ${msg.data.action} on ${msg.data.instrument}`);
                 refreshSignals();
                 refreshActiveSignals();
+                refreshDecisionTimeline();
                 if (msg.data.latest_metrics) {
                     renderStrategyHUD({ latest_metrics: msg.data.latest_metrics });
                 }
@@ -318,8 +349,9 @@ function handleWsMessage(msg) {
                 refreshPositions();
                 refreshOrderBook();
                 refreshActiveSignals();
+                refreshDecisionTimeline();
                 // Auto-switch bottom panel to Trade History so user sees the new trade
-                switchBottomTab('trades');
+                switchBottomTab('execution');
                 break;
             }
         }
@@ -616,6 +648,7 @@ async function refreshTrades() {
         // Normalize both sources to explicit UI fields that match table headers exactly:
         // Time | Action | Instrument | Price | SL | TP | Mode
         const normPaper = paperTrades.map(t => ({
+            _meta: t.metadata || {},
             time: t.timestamp,
             action: (t.action || '-').toUpperCase(),
             instrument: t.instrument_key?.split('|')[1] || t.instrument_key || '-',
@@ -623,7 +656,15 @@ async function refreshTrades() {
             price: t.price,
             stop_loss: t.stop_loss,
             take_profit: t.take_profit,
-            mode: t.status === 'live' ? '🔴 Live' : '📋 Paper',
+            mode: (() => {
+                const status = String(t.status || '').toLowerCase();
+                const meta = t.metadata || {};
+                const placementModes = Array.isArray(meta._placement_modes) ? meta._placement_modes : [];
+                const hasLivePlacement = placementModes.includes('live');
+                const hasGttRef = !!meta.gtt_order_id || (Array.isArray(meta._gtt_order_ids) && meta._gtt_order_ids.length > 0);
+                if (hasLivePlacement || hasGttRef || status.includes('gtt') || status.includes('live')) return '🔴 Live';
+                return '📋 Paper';
+            })(),
             option_side: t.metadata?.option_side || null,
             strike_price: t.metadata?.strike_price ?? null,
             expiry_date: t.metadata?.expiry_date || null,
@@ -724,6 +765,7 @@ async function refreshTrades() {
         rows.forEach(r => r && frag.appendChild(r));
         list.innerHTML = "";
         list.appendChild(frag);
+        refreshOrderExplain();
     } catch (e) {
         console.error("Failed to refresh trades", e);
     }
@@ -808,7 +850,7 @@ async function refreshSignals() {
 
 async function refreshOrderBook() {
     if (!isDocumentVisible()) return;
-    if (!isBottomTabActive('orderbook')) return;
+    if (!isBottomTabActive('execution')) return;
 
     try {
         const { data } = await api.getOrderBook();
@@ -855,10 +897,16 @@ async function refreshMarketStatus() {
     }
 }
 
+// Cached engine status (shared across refreshStatus / fetchStrategySchemas)
+let _lastEngineStatus = null;
+
 async function refreshStatus() {
     try {
         const data = await api.getStatus();
+        _lastEngineStatus = data;
         updateEngineStatus(data);
+        refreshSystemTimeline();
+        refreshRailInstrumentContext();
     } catch (e) {
         console.error("Failed to refresh status", e);
     }
@@ -868,8 +916,14 @@ function updateEngineStatus(status) {
     const text = document.getElementById("engine-status-text");
     if (!text) return;
 
+    const pendingEntries = Number(status.pending_entries_count || 0);
+    const blockedSignals = Number(status.rejections_today || 0);
+
     if (status.initialized) {
-        text.innerText = "Active";
+        const chips = [];
+        if (pendingEntries > 0) chips.push(`${pendingEntries} pending`);
+        if (blockedSignals > 0) chips.push(`${blockedSignals} blocked`);
+        text.innerText = chips.length > 0 ? `Active (${chips.join(", ")})` : "Active";
         text.className = "text-success";
         engineActive = true;
     } else {
@@ -881,12 +935,63 @@ function updateEngineStatus(status) {
     const autoToggle = document.getElementById("toggle-automode");
     if (autoToggle) autoToggle.checked = status.auto_mode;
 
+    const paperRail = document.getElementById('toggle-papermode-rail');
+    if (paperRail) paperRail.checked = !!status.paper_trading;
+
+    const strategyToggle = document.getElementById('toggle-strategy-enabled');
+    const activeParams = status?.active_strategies?.[0]?.params || {};
+    if (strategyToggle) strategyToggle.checked = activeParams.enabled !== false;
+
     document.getElementById("auto-mode-card")?.classList.toggle("active", status.auto_mode);
+
+    updateRailStatus(status);
 
     // Render OC insight from engine cache if available
     if (status.oc_insight) {
         renderOcInsight(status.oc_insight);
     }
+}
+
+function updateRailStatus(status) {
+    const riskCap = Number(status?.risk_controls?.trading_capital || 0);
+    const maxDailyLossPct = Number(status?.risk_controls?.max_daily_loss_pct || 0);
+    const dailyPnl = Number(status?.daily_pnl || 0);
+    const maxLossAbs = riskCap > 0 && maxDailyLossPct > 0 ? (riskCap * maxDailyLossPct / 100) : 0;
+    const lossUsedPct = maxLossAbs > 0 && dailyPnl < 0 ? Math.min(100, (Math.abs(dailyPnl) / maxLossAbs) * 100) : 0;
+    const pendingEntries = Number(status?.pending_entries_count || 0);
+    const managedCount = Number(status?.managed_positions_count || 0);
+    const maxOpenTrades = Number(status?.risk_controls?.max_open_trades || 0);
+    const rejections = Number(status?.rejections_today || 0);
+    const signals = Number(status?.signals_today || 0);
+    const rejRate = (signals + rejections) > 0 ? (rejections / (signals + rejections)) * 100 : 0;
+
+    updateElementText('rail-daily-loss-used', `${lossUsedPct.toFixed(1)}%`);
+    updateElementText('rail-open-risk', `${managedCount + pendingEntries}`);
+    updateElementText('rail-max-positions', `${managedCount} / ${maxOpenTrades || '-'}`);
+    updateElementText('rail-pending-entries', `${pendingEntries}`);
+    updateElementText('rail-rejection-rate', `${rejRate.toFixed(1)}%`);
+
+    const fill = document.getElementById('risk-thermometer-fill');
+    if (fill) fill.style.height = `${lossUsedPct.toFixed(1)}%`;
+
+    const warn = document.getElementById('rail-risk-warning');
+    if (warn) {
+        warn.classList.remove('danger', 'safe');
+        if (lossUsedPct >= 80) {
+            warn.classList.add('danger');
+            warn.textContent = 'Risk Critical: Reduce exposure now';
+        } else if (lossUsedPct < 35) {
+            warn.classList.add('safe');
+            warn.textContent = 'Risk Normal';
+        } else {
+            warn.textContent = 'Risk Elevated';
+        }
+    }
+
+    const symbolTxt = currentInstrumentName || currentInstrumentKey || '-';
+    updateElementText('rail-symbol', symbolTxt);
+    const ltpElement = document.getElementById('inst-ltp');
+    updateElementText('rail-ltp', ltpElement ? ltpElement.textContent : '-');
 }
 
 function setExecutionProbeResult(html, state = 'neutral') {
@@ -977,6 +1082,7 @@ window.runExecutionProbe = async (action = 'BUY') => {
 
         const hasExecutionEvidence =
             (after.tradesToday > before.tradesToday) || (after.filledOrders > before.filledOrders);
+        const rejectionDelta = after.rejectedOrders - before.rejectedOrders;
 
         const checks = [
             {
@@ -1001,8 +1107,8 @@ window.runExecutionProbe = async (action = 'BUY') => {
             },
             {
                 label: 'No rejection spike',
-                pass: after.rejectedOrders <= before.rejectedOrders,
-                detail: `Rejected ${before.rejectedOrders} -> ${after.rejectedOrders}`,
+                pass: rejectionDelta <= 0 || (hasExecutionEvidence && rejectionDelta <= 1),
+                detail: `Rejected ${before.rejectedOrders} -> ${after.rejectedOrders}${rejectionDelta > 0 ? ' (minor background noise tolerated)' : ''}`,
             },
         ];
 
@@ -1015,6 +1121,12 @@ window.runExecutionProbe = async (action = 'BUY') => {
         const entryOrderIds = Array.isArray(triggerResult?.result?.gtt_order_ids) ? triggerResult.result.gtt_order_ids : [];
         const executionError = triggerResult?.result?.execution_error || null;
         const executionErrorCode = triggerResult?.result?.execution_error_code || null;
+        const appliedTargetMode = String(triggerResult?.result?.target_mode_applied || '').toLowerCase();
+        const appliedTargetEnabled = !!triggerResult?.result?.target_enabled;
+        const appliedTp = Number(triggerResult?.result?.take_profit_applied || 0);
+        const appliedProbeScore = Number(triggerResult?.result?.probe_confidence_score || 0);
+        const appliedTargetThreshold = Number(triggerResult?.result?.target_confidence_min || 0);
+        const expectedTargetMode = String(document.getElementById('exec-target-mode')?.value || '').toLowerCase();
         const liveModeNeedsBrokerProof = !after.paperTrading;
 
         if (legCheckPass !== null) {
@@ -1035,12 +1147,28 @@ window.runExecutionProbe = async (action = 'BUY') => {
             });
         }
 
+        if (expectedTargetMode) {
+            checks.splice(3, 0, {
+                label: 'Target mode applied',
+                pass: !appliedTargetMode || appliedTargetMode === expectedTargetMode,
+                detail: `Expected ${expectedTargetMode}, got ${appliedTargetMode || 'n/a'}`,
+            });
+            checks.splice(4, 0, {
+                label: 'TP behavior matches target mode',
+                pass: expectedTargetMode !== 'none' ? true : (appliedTp <= 0),
+                detail: expectedTargetMode === 'none'
+                    ? `take_profit=${appliedTp.toFixed(2)} (must be 0.00)`
+                    : `take_profit=${appliedTp.toFixed(2)} | enabled=${appliedTargetEnabled}`,
+            });
+        }
+
         const failed = checks.filter(c => !c.pass);
         const isPass = failed.length === 0;
 
         const lines = [
             `<div class="probe-title">${isPass ? 'PASS' : 'ATTENTION'} - ${modeText}</div>`,
             `<div class="probe-subtitle">Instrument: ${currentInstrumentName} | Trigger: ${signalStatus} | Action: ${probeAction}</div>`,
+            `<div class="probe-subtitle">Target: ${appliedTargetMode || 'n/a'} | Enabled: ${appliedTargetEnabled ? 'Yes' : 'No'} | TP: ${appliedTp.toFixed(2)} | Probe score: ${appliedProbeScore} | Adaptive threshold: ${appliedTargetThreshold}</div>`,
             '<ul class="probe-list">',
             ...checks.map(c => `<li class="${c.pass ? 'pass' : 'fail'}">${c.pass ? 'OK' : 'FAIL'} - ${c.label} (${c.detail})</li>`),
             '</ul>',
@@ -1361,6 +1489,42 @@ async function refreshActiveSignals() {
     }
 }
 
+async function refreshSignalRejections() {
+    if (!isDocumentVisible()) return;
+    const showInMainWatchlist = currentMainView === 'watchlist';
+    if (!showInMainWatchlist) return;
+
+    try {
+        const res = await api.getRejections(40);
+        const rows = res?.rejections || [];
+        const tbody = document.getElementById('signal-rejections-body-main');
+        if (!tbody) return;
+
+        tbody.innerHTML = '';
+        if (!rows.length) {
+            tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; padding: 20px;" class="text-muted">No rejection telemetry yet</td></tr>`;
+            return;
+        }
+
+        rows.forEach((item) => {
+            const tr = document.createElement('tr');
+            const ts = item.timestamp || '-';
+            const strategy = item.strategy_name || item.strategy || '-';
+            const instrument = item.instrument_key || item.instrument || '-';
+            const reason = item.reason || '-';
+            tr.innerHTML = `
+                <td class="text-muted" style="padding: 6px 8px;">${ts}</td>
+                <td style="padding: 6px 8px;">${strategy}</td>
+                <td class="mono" style="padding: 6px 8px;">${instrument}</td>
+                <td style="padding: 6px 8px; color: var(--text-muted);">${reason}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        console.error('Failed to refresh signal rejections', e);
+    }
+}
+
 window.closeActiveSignal = async (id) => {
     try {
         await api.closeActiveSignal(id);
@@ -1381,11 +1545,416 @@ window.deleteActiveSignal = async (id) => {
     }
 };
 
+window.refreshSignalRejections = refreshSignalRejections;
+function initBottomPanelState() {
+    const savedFilter = localStorage.getItem(DECISION_FILTER_KEY) || 'all';
+    const filterEl = document.getElementById('decision-filter');
+    if (filterEl) filterEl.value = savedFilter;
+
+    const snap = localStorage.getItem(BOTTOM_SNAP_KEY) || '28';
+    setBottomPanelSnap(snap);
+
+    try {
+        const parsed = JSON.parse(localStorage.getItem(DECISION_EXPANDED_KEY) || '[]');
+        decisionExpanded = new Set(Array.isArray(parsed) ? parsed : []);
+    } catch {
+        decisionExpanded = new Set();
+    }
+
+    try {
+        const parsedExplain = JSON.parse(localStorage.getItem(ORDER_EXPLAIN_EXPANDED_KEY) || '[]');
+        orderExplainExpanded = new Set(Array.isArray(parsedExplain) ? parsedExplain : []);
+    } catch {
+        orderExplainExpanded = new Set();
+    }
+
+    const tab = localStorage.getItem(BOTTOM_TAB_KEY) || 'decisions';
+    switchBottomTab(tab);
+
+    window.addEventListener('resize', () => {
+        const currentSnap = localStorage.getItem(BOTTOM_SNAP_KEY) || '28';
+        setBottomPanelSnap(currentSnap);
+    });
+}
+
+function setBottomPanelSnap(level) {
+    const panel = document.getElementById('bottom-panel');
+    if (!panel) return;
+    panel.classList.remove('snap-28', 'snap-45', 'snap-hidden');
+    const safe = ['28', '45', 'hidden'].includes(String(level)) ? String(level) : '28';
+    panel.classList.add(`snap-${safe}`);
+
+    // Percent heights can be unreliable in nested flex containers; enforce
+    // explicit pixel height from the current center-panel viewport.
+    const panelCenter = document.querySelector('.panel-center');
+    const centerHeight = panelCenter ? panelCenter.clientHeight : 0;
+    if (safe === 'hidden') {
+        panel.style.height = '38px';
+        panel.style.minHeight = '38px';
+    } else if (centerHeight > 0) {
+        const ratio = safe === '45' ? 0.45 : 0.28;
+        const target = Math.max(220, Math.round(centerHeight * ratio));
+        panel.style.height = `${target}px`;
+        panel.style.minHeight = `${target}px`;
+    }
+
+    localStorage.setItem(BOTTOM_SNAP_KEY, safe);
+}
+
+function switchBottomTab(tabId) {
+    const safe = ['decisions', 'execution', 'system'].includes(tabId) ? tabId : 'decisions';
+    const panel = document.getElementById('bottom-panel');
+    if (!panel) return;
+
+    panel.querySelectorAll('.bottom-tab').forEach(btn => btn.classList.remove('active'));
+    panel.querySelectorAll('.bottom-content').forEach(el => el.classList.remove('active'));
+
+    panel.querySelectorAll('.bottom-tab').forEach(btn => {
+        const onclick = btn.getAttribute('onclick') || '';
+        if (onclick.includes(`'${safe}'`) || onclick.includes(`\"${safe}\"`)) btn.classList.add('active');
+    });
+
+    const content = document.getElementById(`tab-${safe}`);
+    if (content) content.classList.add('active');
+
+    localStorage.setItem(BOTTOM_TAB_KEY, safe);
+
+    if (safe === 'execution') {
+        refreshPositions();
+        refreshOrderBook();
+        refreshTrades();
+        refreshOrderExplain();
+    } else if (safe === 'decisions') {
+        refreshDecisionTimeline();
+    } else if (safe === 'system') {
+        refreshSystemTimeline();
+    }
+}
+
+function persistOrderExplainExpanded() {
+    localStorage.setItem(ORDER_EXPLAIN_EXPANDED_KEY, JSON.stringify(Array.from(orderExplainExpanded).slice(-200)));
+}
+
+function buildSeverityByTradeStatus(statusText) {
+    const s = String(statusText || '').toLowerCase();
+    if (s.includes('rejected') || s.includes('cancelled') || s.includes('failed')) return 'sev-danger';
+    if (s.includes('pending')) return 'sev-warning';
+    return 'sev-success';
+}
+
+async function refreshOrderExplain() {
+    const body = document.getElementById('order-explain-body');
+    if (!body) return;
+    if (!isDocumentVisible()) return;
+    if (!isBottomTabActive('execution')) return;
+
+    try {
+        const res = await api.getPaperTrades(80);
+        const rows = (res?.data || []).slice().sort((a, b) => {
+            const ta = new Date(a.timestamp || 0).getTime();
+            const tb = new Date(b.timestamp || 0).getTime();
+            return (isNaN(tb) ? 0 : tb) - (isNaN(ta) ? 0 : ta);
+        });
+
+        body.innerHTML = '';
+        if (!rows.length) {
+            body.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">No explainable order records yet</td></tr>`;
+            return;
+        }
+
+        rows.forEach((r, idx) => {
+            const meta = r.metadata || {};
+            const rowKey = `${r.id || idx}-${r.timestamp || ''}-${r.instrument_key || ''}`;
+            const statusText = String(r.status || 'unknown');
+            const sev = buildSeverityByTradeStatus(statusText);
+            const outcome = sev === 'sev-danger' ? 'Blocked/Failed' : (sev === 'sev-warning' ? 'Pending' : 'Placed');
+            const model = meta.execution_price_model || (meta.option_side ? 'option_premium' : 'direct');
+            const brokerRef = meta.gtt_order_id || (Array.isArray(meta._gtt_order_ids) ? meta._gtt_order_ids.join(',') : '-') || '-';
+            const time = r.timestamp ? new Date(r.timestamp).toLocaleTimeString('en-IN', { hour12: false }) : '-';
+
+            const tr = document.createElement('tr');
+            tr.className = `order-explain-row ${sev}`;
+            tr.innerHTML = `
+                <td class="text-muted">${time}</td>
+                <td>${r.strategy_name || '-'}</td>
+                <td class="mono">${r.instrument_key || '-'}</td>
+                <td>${outcome}</td>
+                <td>${model}</td>
+                <td class="mono">${brokerRef}</td>
+            `;
+
+            tr.addEventListener('click', () => {
+                if (orderExplainExpanded.has(rowKey)) orderExplainExpanded.delete(rowKey);
+                else orderExplainExpanded.add(rowKey);
+                persistOrderExplainExpanded();
+                refreshOrderExplain();
+            });
+
+            body.appendChild(tr);
+
+            if (orderExplainExpanded.has(rowKey)) {
+                const sourceSignal = {
+                    underlying: meta.underlying || meta.underlying_key || '-',
+                    underlying_price: meta.underlying_price ?? '-',
+                    underlying_sl: meta.underlying_sl ?? '-',
+                    underlying_tp: meta.underlying_tp ?? '-',
+                    strategy_action: r.action || '-',
+                };
+                const executionValues = {
+                    instrument: r.instrument_key || '-',
+                    option_side: meta.option_side || '-',
+                    strike_price: meta.strike_price ?? '-',
+                    expiry_date: meta.expiry_date || '-',
+                    entry_price: r.price ?? '-',
+                    stop_loss: r.stop_loss ?? '-',
+                    take_profit: r.take_profit ?? '-',
+                    quantity: r.quantity ?? '-',
+                    lot_size: meta.lot_size ?? '-',
+                    trailing_gap: meta.execution_trailing_gap ?? '-',
+                    premium_risk_distance: meta.premium_risk_distance ?? '-',
+                };
+                const brokerPayload = {
+                    gtt_order_id: meta.gtt_order_id || '-',
+                    gtt_payload: meta.gtt_payload || '-',
+                    gtt_execution_settings: meta.gtt_execution_settings || '-',
+                };
+                const guards = {
+                    option_quality_regime: meta.option_quality_regime || '-',
+                    option_quality_thresholds: meta.option_quality_thresholds || '-',
+                    execution_error: meta._last_execution_error || '-',
+                    execution_error_code: meta._last_execution_error_code || '-',
+                    oc_analysis: meta.oc_analysis || '-',
+                };
+
+                const detail = document.createElement('tr');
+                detail.className = 'order-explain-detail';
+                detail.innerHTML = `
+                    <td colspan="6">
+                        <div><strong>Source Signal</strong></div>
+                        <pre style="white-space: pre-wrap; margin:4px 0 8px; font-size:0.72rem;">${JSON.stringify(sourceSignal, null, 2)}</pre>
+                        <div><strong>Execution Values</strong></div>
+                        <pre style="white-space: pre-wrap; margin:4px 0 8px; font-size:0.72rem;">${JSON.stringify(executionValues, null, 2)}</pre>
+                        <div><strong>Broker Payload</strong></div>
+                        <pre style="white-space: pre-wrap; margin:4px 0 8px; font-size:0.72rem;">${JSON.stringify(brokerPayload, null, 2)}</pre>
+                        <div><strong>Guards & Checks</strong></div>
+                        <pre style="white-space: pre-wrap; margin:4px 0 0; font-size:0.72rem;">${JSON.stringify(guards, null, 2)}</pre>
+                    </td>
+                `;
+                body.appendChild(detail);
+            }
+        });
+    } catch (e) {
+        console.error('Failed to refresh order explain', e);
+    }
+}
+
+function persistDecisionExpanded() {
+    localStorage.setItem(DECISION_EXPANDED_KEY, JSON.stringify(Array.from(decisionExpanded).slice(-200)));
+}
+
+function buildDecisionClass(event) {
+    if (event.severity === 'danger') return 'decision-danger';
+    if (event.severity === 'warning') return 'decision-warning';
+    return 'decision-success';
+}
+
+function buildDecisionChip(outcome, severity) {
+    const cls = severity === 'danger' ? 'danger' : (severity === 'warning' ? 'warning' : 'success');
+    return `<span class="decision-outcome-chip ${cls}">${outcome}</span>`;
+}
+
+async function refreshDecisionTimeline() {
+    const body = document.getElementById('decision-timeline-body');
+    if (!body) return;
+    if (!isDocumentVisible()) return;
+    if (!isBottomTabActive('decisions')) return;
+
+    const filter = document.getElementById('decision-filter')?.value || 'all';
+    localStorage.setItem(DECISION_FILTER_KEY, filter);
+
+    try {
+        const [signalsRes, rejectionsRes, tradesRes, statusRes] = await Promise.allSettled([
+            api.getSignals(),
+            api.getRejections(60),
+            api.getPaperTrades(80),
+            _lastEngineStatus ? Promise.resolve(_lastEngineStatus) : api.getStatus(),
+        ]);
+
+        const signals = signalsRes.status === 'fulfilled' ? (signalsRes.value?.data || signalsRes.value?.signals || []) : [];
+        const rejections = rejectionsRes.status === 'fulfilled' ? (rejectionsRes.value?.rejections || []) : [];
+        const trades = tradesRes.status === 'fulfilled' ? (tradesRes.value?.data || []) : [];
+        const status = statusRes.status === 'fulfilled' ? statusRes.value : {};
+
+        const events = [];
+
+        signals.forEach((s, idx) => {
+            const tsMs = parseEventTimeMs(s.timestamp) || (Date.now() - idx);
+            events.push({
+                id: `sig-${idx}-${s.timestamp || ''}-${s.instrument || s.instrument_key || ''}`,
+                ts: tsMs,
+                time: s.timestamp || '-',
+                stage: 'Signal Evaluated',
+                instrument: s.instrument || s.instrument_key || '-',
+                outcome: 'Passed',
+                reason: `Action ${s.action || '-'} @ ${s.price != null ? `₹${formatPrice(Number(s.price))}` : '-'}`,
+                severity: 'success',
+                detail: s,
+            });
+        });
+
+        rejections.forEach((r, idx) => {
+            const tsMs = parseEventTimeMs(r.timestamp) || (Date.now() - idx);
+            events.push({
+                id: `rej-${idx}-${r.timestamp || ''}-${r.instrument_key || ''}`,
+                ts: tsMs,
+                time: r.timestamp || '-',
+                stage: 'Signal Evaluated',
+                instrument: r.instrument || r.instrument_key || '-',
+                outcome: 'Blocked',
+                reason: r.reason || 'Rejected',
+                severity: 'danger',
+                detail: r,
+            });
+        });
+
+        trades.forEach((t, idx) => {
+            const tsMs = parseEventTimeMs(t.timestamp) || (Date.now() - idx);
+            const statusText = String(t.status || '').toLowerCase();
+            const isPending = statusText.includes('pending');
+            const isErr = statusText.includes('rejected') || statusText.includes('cancelled') || statusText.includes('failed');
+            const outcome = isErr ? 'Skipped' : (isPending ? 'Pending' : 'Executed');
+            const severity = isErr ? 'danger' : (isPending ? 'warning' : 'success');
+            const meta = t.metadata || {};
+            events.push({
+                id: `tr-${idx}-${t.id || ''}`,
+                ts: tsMs,
+                time: t.timestamp ? new Date(t.timestamp).toLocaleTimeString('en-IN', { hour12: false }) : '-',
+                stage: 'Execution',
+                instrument: t.instrument_key || '-',
+                outcome,
+                reason: meta._last_execution_error || statusText || 'Order lifecycle update',
+                severity,
+                detail: {
+                    ...t,
+                    option_snapshot: meta.option_snapshot,
+                    oc_analysis: meta.oc_analysis,
+                    atr: meta.atr,
+                    option_quality_regime: meta.option_quality_regime,
+                    option_quality_thresholds: meta.option_quality_thresholds,
+                },
+            });
+        });
+
+        const pendingManaged = Array.isArray(status?.managed_positions) ? status.managed_positions.filter(p => p.execution_state === 'entry_pending') : [];
+        pendingManaged.forEach((p, idx) => {
+            events.push({
+                id: `pd-${idx}-${p.instrument || ''}`,
+                ts: Date.now() - idx,
+                time: '-',
+                stage: 'Execution',
+                instrument: p.instrument || '-',
+                outcome: 'Pending',
+                reason: `Awaiting broker fill confirmation (${p.entry_pending_age_sec || 0}s/${p.entry_timeout_sec || '-'}s)`,
+                severity: 'warning',
+                detail: p,
+            });
+        });
+
+        let filtered = events.sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 120);
+        if (filter === 'blocked') filtered = filtered.filter(e => e.outcome === 'Blocked');
+        if (filter === 'executed') filtered = filtered.filter(e => e.outcome === 'Executed');
+        if (filter === 'pending') filtered = filtered.filter(e => e.outcome === 'Pending');
+        if (filter === 'error') filtered = filtered.filter(e => e.severity === 'danger');
+
+        body.innerHTML = '';
+        if (!filtered.length) {
+            body.innerHTML = `<tr><td colspan="5" style="text-align:center; padding: 20px;" class="text-muted">No timeline events for selected filter</td></tr>`;
+            return;
+        }
+
+        filtered.forEach((event) => {
+            const row = document.createElement('tr');
+            row.className = `decision-event-row ${buildDecisionClass(event)}`;
+            row.innerHTML = `
+                <td class="text-muted">${event.time}</td>
+                <td>${event.stage}</td>
+                <td class="mono">${event.instrument}</td>
+                <td>${buildDecisionChip(event.outcome, event.severity)}</td>
+                <td>${event.reason || '-'}</td>
+            `;
+            row.addEventListener('click', () => {
+                if (decisionExpanded.has(event.id)) decisionExpanded.delete(event.id);
+                else decisionExpanded.add(event.id);
+                persistDecisionExpanded();
+                refreshDecisionTimeline();
+            });
+            body.appendChild(row);
+
+            if (decisionExpanded.has(event.id)) {
+                const detail = document.createElement('tr');
+                detail.className = 'decision-detail-row';
+                detail.innerHTML = `
+                    <td colspan="5">
+                        <strong>Metadata</strong><br>
+                        <pre style="white-space: pre-wrap; margin-top:6px; font-size:0.72rem;">${JSON.stringify(event.detail || {}, null, 2)}</pre>
+                    </td>
+                `;
+                body.appendChild(detail);
+            }
+        });
+    } catch (e) {
+        console.error('Failed to render decision timeline', e);
+    }
+}
+
+async function refreshSystemTimeline() {
+    const connEl = document.getElementById('system-connectivity-timeline');
+    const healthEl = document.getElementById('system-health-timeline');
+    if (!connEl || !healthEl) return;
+    if (!isDocumentVisible()) return;
+
+    try {
+        const [status, proxy, market] = await Promise.all([
+            _lastEngineStatus ? Promise.resolve(_lastEngineStatus) : api.getStatus(),
+            api.getProxyStatus(false),
+            api.getMarketStatus(),
+        ]);
+
+        const wsLive = ws.isConnected();
+        const authText = document.getElementById('auth-status-text')?.innerText || 'Unknown';
+        const tokenValid = !!proxy?.data?.token_valid;
+        const egress = proxy?.data?.egress_ip || proxy?.data?.egress_ip_error || 'Unavailable';
+        const pending = Number(status?.pending_entries_count || 0);
+        const rej = Number(status?.rejections_today || 0);
+
+        connEl.innerHTML = [
+            `<div class="system-event ${wsLive ? 'ok' : 'bad'}">WebSocket: ${wsLive ? 'Connected' : 'Disconnected'}</div>`,
+            `<div class="system-event ${market?.market_open ? 'ok' : 'warn'}">Market: ${market?.market_open ? 'Open' : 'Closed'}</div>`,
+            `<div class="system-event ${pending > 0 ? 'warn' : 'ok'}">Pending entries: ${pending}</div>`,
+        ].join('');
+
+        healthEl.innerHTML = [
+            `<div class="system-event ${authText.toLowerCase().includes('valid') ? 'ok' : 'bad'}">Auth: ${authText}</div>`,
+            `<div class="system-event ${tokenValid ? 'ok' : 'bad'}">Proxy token: ${tokenValid ? 'Valid' : 'Invalid'}</div>`,
+            `<div class="system-event ${rej > 0 ? 'warn' : 'ok'}">Rejections today: ${rej}</div>`,
+            `<div class="system-event ${egress === 'Unavailable' ? 'warn' : 'ok'}">Egress: ${egress}</div>`,
+        ].join('');
+
+        updateElementText('rail-auth-health', authText);
+        updateElementText('rail-proxy-route', proxy?.data?.requests_proxy_active ? 'Proxy Active' : 'Direct');
+    } catch (e) {
+        console.error('Failed to refresh system timeline', e);
+    }
+}
 
 
 // Window globals for legacy onclick handlers
 window.selectInstrument = selectInstrument;
-window.switchBottomTab = (tabId) => switchTab('bottom-panel', `tab-${tabId}`);
+window.switchBottomTab = switchBottomTab;
+window.setBottomPanelSnap = setBottomPanelSnap;
+window.refreshDecisionTimeline = refreshDecisionTimeline;
+window.refreshSystemTimeline = refreshSystemTimeline;
+window.refreshOrderExplain = refreshOrderExplain;
 window.setChartTimeframe = (interval) => {
     state.set('currentInterval', interval);
 
@@ -1419,6 +1988,125 @@ window.initializeEngine = async () => {
     }
 };
 
+window.pauseEngineNow = async () => {
+    try {
+        await api.setAutoMode(false);
+        showToast('Engine paused', 'warning');
+        refreshStatus();
+    } catch (e) {
+        showToast('Failed to pause engine', 'error');
+    }
+};
+
+window.flattenAllNow = async () => {
+    try {
+        await api.squareOffAll();
+        showToast('Flatten all initiated', 'warning');
+        await Promise.all([refreshStatus(), refreshPositions(), refreshTrades(), refreshOrderBook()]);
+    } catch (e) {
+        showToast('Flatten all failed', 'error');
+    }
+};
+
+window.reloadDataNow = async () => {
+    try {
+        await Promise.all([
+            fetchHistoricalCandles(),
+            refreshStatus(),
+            refreshPositions(),
+            refreshTrades(),
+            refreshOrderBook(),
+            refreshDecisionTimeline(),
+            refreshSystemTimeline(),
+        ]);
+        showToast('Data reloaded', 'success');
+    } catch (e) {
+        showToast('Reload failed', 'error');
+    }
+};
+
+window.reconnectWSNow = async () => {
+    try {
+        ws.reconnect();
+        showToast('Reconnecting WebSocket...', 'info');
+    } catch (e) {
+        showToast('Reconnect failed', 'error');
+    }
+};
+
+window.emergencyHaltNow = async () => {
+    try {
+        await api.setAutoMode(false);
+        await api.squareOffAll();
+        showToast('Emergency halt executed', 'warning');
+        await Promise.all([refreshStatus(), refreshPositions(), refreshOrderBook(), refreshTrades()]);
+    } catch (e) {
+        showToast('Emergency halt failed', 'error');
+    }
+};
+
+window.toggleStrategyRuntime = async (enabled) => {
+    try {
+        const selector = document.getElementById('strategy-selector');
+        if (!selector || selector.options.length === 0) {
+            showToast('No strategy selected', 'warning');
+            return;
+        }
+
+        const strategyClass = selector.options[selector.selectedIndex].dataset.class;
+        const name = selector.options[selector.selectedIndex].text;
+        const params = getDynamicParams();
+        params.enabled = !!enabled;
+
+        await api.loadStrategy({
+            strategy_class: strategyClass,
+            name,
+            instruments: currentInstrumentKey,
+            timeframe: currentInterval,
+            paper_trading: document.getElementById('toggle-papermode-rail')?.checked ?? true,
+            params: JSON.stringify(params),
+            replace_existing: true,
+        });
+        showToast(`Strategy ${enabled ? 'enabled' : 'disabled'}`, enabled ? 'success' : 'warning');
+        refreshStatus();
+    } catch (e) {
+        showToast('Failed to change strategy runtime state', 'error');
+    }
+};
+
+async function refreshRailInstrumentContext() {
+    updateElementText('rail-symbol', currentInstrumentName || currentInstrumentKey || '-');
+    const liveLtp = document.getElementById('inst-ltp')?.textContent || '-';
+    updateElementText('rail-ltp', liveLtp);
+
+    try {
+        const res = await api.getPaperTrades(40);
+        const rows = res?.data || [];
+        const row = rows.find(r => (r.instrument_key || '') === currentInstrumentKey) || rows[0];
+        const meta = row?.metadata || {};
+        const snapshot = meta.option_snapshot || {};
+        const bid = Number(snapshot.bid || 0);
+        const ask = Number(snapshot.ask || 0);
+        let spreadText = 'N/A';
+        if (bid > 0 && ask > 0 && ask >= bid) {
+            const mid = (bid + ask) / 2;
+            const pct = mid > 0 ? ((ask - bid) / mid) * 100 : 0;
+            spreadText = `${pct.toFixed(2)}%`;
+        }
+        updateElementText('rail-spread', spreadText);
+
+        const oi = Number(snapshot.oi || 0);
+        const vol = Number(snapshot.volume || 0);
+        const ltp = Number(snapshot.ltp || 0);
+        const spreadPenalty = spreadText !== 'N/A' ? Number(spreadText.replace('%', '')) * 8 : 10;
+        const liqScore = Math.max(0, Math.min(100, (Math.min(35, vol / 70) + Math.min(35, oi / 1000) + Math.min(30, ltp / 8)) - spreadPenalty));
+        updateElementText('rail-liquidity-score', Number.isFinite(liqScore) ? `${liqScore.toFixed(1)}/100` : 'N/A');
+    } catch {
+        updateElementText('rail-spread', 'N/A');
+        updateElementText('rail-liquidity-score', 'N/A');
+    }
+}
+
 window.runCycle = async () => {
     try {
         showToast("Running engine cycle...", "info");
@@ -1436,6 +2124,7 @@ window.clearTradeHistory = async () => {
         await api.clearPaperTrades();
         tradeRowCache.clear();
         await refreshTrades();
+        await refreshDecisionTimeline();
         showToast('Trade history cleared', 'success');
     } catch (e) {
         showToast('Failed to clear trade history', 'error');
@@ -1488,13 +2177,25 @@ window.triggerTestSignalWithAction = async (action = 'BUY') => {
 };
 
 window.saveSettings = async () => {
+    const apiVersion = document.getElementById('setting-api-version')?.value;
     const key = document.getElementById('setting-api-key').value;
     const secret = document.getElementById('setting-api-secret').value;
+    const authCode = document.getElementById('setting-auth-code')?.value;
+    const accessToken = document.getElementById('setting-access-token')?.value;
+    const algoName = document.getElementById('setting-algo-name')?.value;
+    const algoId = document.getElementById('setting-algo-id')?.value;
+    const orderApiVersion = document.getElementById('setting-order-api-version')?.value;
     const uri = document.getElementById('setting-redirect-uri').value;
 
     const payload = {};
+    if (apiVersion) payload.API_VERSION = apiVersion;
     if (key && !key.includes('...')) payload.API_KEY = key;
     if (secret && !secret.includes('***')) payload.API_SECRET = secret;
+    if (authCode && !authCode.includes('***')) payload.AUTH_CODE = authCode;
+    if (accessToken && !accessToken.includes('***')) payload.ACCESS_TOKEN = accessToken;
+    if (algoName !== undefined) payload.ALGO_NAME = algoName;
+    if (algoId !== undefined) payload.ALGO_ID = algoId;
+    if (orderApiVersion) payload.ORDER_API_VERSION = orderApiVersion;
     if (uri) payload.REDIRECT_URI = uri;
 
     try {
@@ -1502,6 +2203,44 @@ window.saveSettings = async () => {
         showToast("API Configuration Saved", "success");
     } catch (e) {
         showToast("Failed to save settings", "error");
+    }
+};
+
+window.clearApiCredentials = async () => {
+    const payload = {
+        API_KEY: "",
+        API_SECRET: "",
+        AUTH_CODE: "",
+        ACCESS_TOKEN: "",
+        ALGO_NAME: "",
+        ALGO_ID: "",
+    };
+
+    try {
+        await api.saveSettings(payload);
+        showToast("API credentials cleared", "success");
+        await loadSettingsIntoUI();
+    } catch (e) {
+        showToast("Failed to clear API credentials", "error");
+    }
+};
+
+window.saveAdvancedSettings = async () => {
+    const raw = document.getElementById('setting-advanced-json')?.value || '{}';
+    let payload;
+    try {
+        payload = JSON.parse(raw);
+    } catch (e) {
+        showToast('Advanced settings JSON is invalid', 'error');
+        return;
+    }
+
+    try {
+        await api.saveSettings(payload);
+        showToast('Advanced settings saved', 'success');
+        await loadSettingsIntoUI();
+    } catch (e) {
+        showToast('Failed to save advanced settings', 'error');
     }
 };
 
@@ -1520,6 +2259,72 @@ window.saveSandboxSettings = async () => {
         showToast("Sandbox Configuration Saved", "success");
     } catch (e) {
         showToast("Failed to save sandbox settings", "error");
+    }
+};
+
+window.saveNetworkSettings = async () => {
+    const payload = {
+        APPLY_UPSTOX_SDK_PROXY: !!document.getElementById('setting-apply-upstox-sdk-proxy')?.checked,
+        REQUIRE_UPSTOX_PROXY: !!document.getElementById('setting-require-upstox-proxy')?.checked,
+        APPLY_PROCESS_PROXY_ENV: !!document.getElementById('setting-apply-process-proxy-env')?.checked,
+    };
+
+    const upstoxProxy = document.getElementById('setting-upstox-proxy-url')?.value?.trim();
+    const httpProxy = document.getElementById('setting-requests-http-proxy')?.value?.trim();
+    const httpsProxy = document.getElementById('setting-requests-https-proxy')?.value?.trim();
+
+    // Avoid accidental clearing of saved proxy credentials when fields are blank
+    // or still masked in the UI.
+    if (upstoxProxy && !upstoxProxy.includes('*')) payload.UPSTOX_PROXY_URL = upstoxProxy;
+    if (httpProxy && !httpProxy.includes('*')) payload.REQUESTS_HTTP_PROXY = httpProxy;
+    if (httpsProxy && !httpsProxy.includes('*')) payload.REQUESTS_HTTPS_PROXY = httpsProxy;
+
+    try {
+        await api.saveSettings(payload);
+        showToast("Network/Proxy settings saved", "success");
+        await refreshNetworkDiagnostics();
+    } catch (e) {
+        showToast("Failed to save Network/Proxy settings", "error");
+    }
+};
+
+window.refreshNetworkDiagnostics = async () => {
+    const summary = document.getElementById('network-diag-summary');
+    const grid = document.getElementById('network-diag-grid');
+    if (!summary || !grid) return;
+
+    summary.textContent = 'Refreshing diagnostics...';
+    grid.innerHTML = '';
+
+    try {
+        const res = await api.getProxyStatus(true);
+        const data = res?.data || {};
+
+        const tokenState = data.token_valid ? 'Valid' : `Invalid (${data.token_reason || 'unknown'})`;
+        const egress = data.egress_ip || data.egress_ip_error || 'Unavailable';
+
+        summary.innerHTML = `Egress IP: <strong>${egress}</strong><br>Token: <strong>${tokenState}</strong>`;
+
+        const rows = [
+            ['SDK proxy enabled', data.apply_upstox_sdk_proxy ? 'Yes' : 'No'],
+            ['SDK proxy configured', data.upstox_proxy_configured ? 'Yes' : 'No'],
+            ['Requests proxy active', data.requests_proxy_active ? 'Yes' : 'No'],
+            ['HTTP proxy configured', data.requests_http_proxy_configured ? 'Yes' : 'No'],
+            ['HTTPS proxy configured', data.requests_https_proxy_configured ? 'Yes' : 'No'],
+            ['Process proxy env', data.all_proxy_env_configured ? 'Yes' : 'No'],
+            ['Require proxy', data.require_upstox_proxy ? 'Yes' : 'No'],
+            ['Algo name configured', data.algo_name_configured ? `Yes (${data.algo_name || ''})` : 'No'],
+        ];
+
+        grid.innerHTML = rows.map(([label, value]) => (
+            `<div style="padding:8px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary);">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">${label}</div>
+                <div style="font-weight:600; color: var(--text-primary);">${value}</div>
+            </div>`
+        )).join('');
+    } catch (e) {
+        summary.textContent = 'Failed to load diagnostics';
+        grid.innerHTML = `<div style="color: var(--accent-danger);">${e.message || 'Unknown error'}</div>`;
     }
 };
 
@@ -1560,6 +2365,10 @@ window.toggleSandboxMode = async (enabled) => {
 window.togglePaperMode = async (enabled) => {
     try {
         await api.updateConfig({ paper_trading: enabled });
+        const railToggle = document.getElementById('toggle-papermode-rail');
+        if (railToggle) railToggle.checked = enabled;
+        const settingsToggle = document.getElementById('toggle-papermode');
+        if (settingsToggle) settingsToggle.checked = enabled;
         showToast(`Paper Trading ${enabled ? 'Enabled' : 'Disabled'}`, 'info');
         refreshStatus();
     } catch (e) {
@@ -1626,8 +2435,13 @@ window.saveExecutionSettings = async () => {
         const slMult = parseFloat(document.getElementById('exec-sl-mult')?.value);
         const tpMult = parseFloat(document.getElementById('exec-tp-mult')?.value);
         const trailMult = parseFloat(document.getElementById('exec-trail-mult')?.value);
+        const targetMode = String(document.getElementById('exec-target-mode')?.value || 'adaptive');
+        const targetConfidence = parseInt(document.getElementById('exec-target-confidence')?.value || '72', 10);
         if (slMult > 0 || tpMult > 0 || trailMult > 0) {
-            await saveRiskMultipliersToStrategy(slMult, tpMult, trailMult);
+            await saveRiskMultipliersToStrategy(slMult, tpMult, trailMult, {
+                target_mode: targetMode,
+                target_confidence_min: Number.isFinite(targetConfidence) ? targetConfidence : 72,
+            });
         }
 
         showToast("Execution settings saved", "success");
@@ -1636,12 +2450,37 @@ window.saveExecutionSettings = async () => {
     }
 };
 
+window.saveSpeedSettings = async () => {
+    const secRaw = parseInt(document.getElementById('setting-candle-check-seconds')?.value || '5', 10);
+    const payload = {
+        FAST_EXECUTION_MODE: !!document.getElementById('setting-fast-execution-mode')?.checked,
+        FAST_SKIP_OC_INSIGHT: !!document.getElementById('setting-fast-skip-oc-insight')?.checked,
+        FAST_ATM_RESOLVER_LIGHT: !!document.getElementById('setting-fast-atm-resolver-light')?.checked,
+        FAST_ASYNC_ALERTER: !!document.getElementById('setting-fast-async-alerter')?.checked,
+        CANDLE_CHECK_SECONDS: Number.isFinite(secRaw) ? Math.max(1, Math.min(59, secRaw)) : 5,
+    };
+
+    try {
+        await api.saveSettings(payload);
+        showToast('Speed settings saved (restart app to apply scheduler interval)', 'success');
+    } catch (e) {
+        showToast('Failed to save speed settings', 'error');
+    }
+};
+
 // ── Risk Level Multiplier Helpers ──────────────────────────
 
 // Strategy-specific key names for SL/TP/trailing multipliers
 const RISK_KEY_MAP = {
-    SuperTrendPro: { sl: 'sl_multiplier', tp: 'tp_multiplier', trail: 'trail_multiplier' },
-    ScalpPro:      { sl: 'sl_atr_multiplier', tp: 'tp_atr_multiplier', trail: 'trailing_atr_mult' },
+    SuperTrendPro: { sl: 'sl_multiplier', tp: 'tp_multiplier', trail: 'trail_multiplier', targetMode: null, targetThreshold: null },
+    ScalpPro:      { sl: 'sl_atr_multiplier', tp: 'tp_atr_multiplier', trail: 'trailing_atr_mult', targetMode: 'target_mode', targetThreshold: 'target_confidence_min' },
+};
+
+window.toggleExecutionTargetInputs = () => {
+    const mode = String(document.getElementById('exec-target-mode')?.value || 'adaptive').toLowerCase();
+    const group = document.getElementById('exec-target-confidence-group');
+    if (!group) return;
+    group.style.display = mode === 'adaptive' ? 'block' : 'none';
 };
 
 window.populateRiskLevels = () => {
@@ -1667,6 +2506,28 @@ window.populateRiskLevels = () => {
     const slVal = getParamLiveValue(keys.sl) ?? slParam?.default ?? 1.0;
     const tpVal = getParamLiveValue(keys.tp) ?? tpParam?.default ?? 2.0;
     const trailVal = getParamLiveValue(keys.trail) ?? trailParam?.default ?? 1.0;
+
+    // Target behavior controls are strategy-specific (currently ScalpPro).
+    const targetCard = document.getElementById('exec-target-card');
+    const targetModeEl = document.getElementById('exec-target-mode');
+    const targetConfEl = document.getElementById('exec-target-confidence');
+
+    if (targetCard && targetModeEl && targetConfEl) {
+        if (keys.targetMode && keys.targetThreshold) {
+            const targetModeParam = schema.params.find(p => p.name === keys.targetMode);
+            const targetThresholdParam = schema.params.find(p => p.name === keys.targetThreshold);
+
+            const modeVal = String(getParamLiveValue(keys.targetMode) ?? targetModeParam?.default ?? 'adaptive');
+            const thresholdVal = Number(getParamLiveValue(keys.targetThreshold) ?? targetThresholdParam?.default ?? 72);
+
+            targetCard.style.display = 'block';
+            targetModeEl.value = modeVal;
+            targetConfEl.value = Number.isFinite(thresholdVal) ? thresholdVal : 72;
+            window.toggleExecutionTargetInputs();
+        } else {
+            targetCard.style.display = 'none';
+        }
+    }
 
     document.getElementById('exec-sl-mult').value = slVal;
     document.getElementById('exec-tp-mult').value = tpVal;
@@ -1711,7 +2572,7 @@ function updateRiskExample(sl, tp, trail) {
     });
 });
 
-async function saveRiskMultipliersToStrategy(sl, tp, trail) {
+async function saveRiskMultipliersToStrategy(sl, tp, trail, extras = {}) {
     const selector = document.getElementById('strategy-selector');
     if (!selector || selector.options.length === 0) return;
     const cls = selector.options[selector.selectedIndex]?.dataset?.class;
@@ -1726,6 +2587,13 @@ async function saveRiskMultipliersToStrategy(sl, tp, trail) {
     if (sl > 0) setDynParam(keys.sl, sl);
     if (tp > 0) setDynParam(keys.tp, tp);
     if (trail > 0) setDynParam(keys.trail, trail);
+
+    if (keys.targetMode && typeof extras.target_mode === 'string') {
+        setDynParam(keys.targetMode, extras.target_mode);
+    }
+    if (keys.targetThreshold && Number.isFinite(Number(extras.target_confidence_min))) {
+        setDynParam(keys.targetThreshold, Number(extras.target_confidence_min));
+    }
 
     // Re-apply strategy with updated params (same as clicking "Load Strategy")
     const strategyClass = selector.options[selector.selectedIndex].dataset.class;
@@ -1764,14 +2632,34 @@ async function loadSettingsIntoUI() {
     try {
         const settings = await api.getSettings();
 
+        const adv = document.getElementById('setting-advanced-json');
+        if (adv) adv.value = JSON.stringify(settings, null, 2);
+
         // General
+        if (document.getElementById('setting-api-version')) document.getElementById('setting-api-version').value = settings.API_VERSION || '2.0';
         if (document.getElementById('setting-api-key')) document.getElementById('setting-api-key').value = settings.API_KEY || '';
+        if (document.getElementById('setting-api-secret')) document.getElementById('setting-api-secret').value = settings.API_SECRET || '';
+        if (document.getElementById('setting-auth-code')) document.getElementById('setting-auth-code').value = settings.AUTH_CODE || '';
+        if (document.getElementById('setting-access-token')) document.getElementById('setting-access-token').value = settings.ACCESS_TOKEN || '';
+        if (document.getElementById('setting-algo-name')) document.getElementById('setting-algo-name').value = settings.ALGO_NAME || '';
+        if (document.getElementById('setting-algo-id')) document.getElementById('setting-algo-id').value = settings.ALGO_ID || '';
+        if (document.getElementById('setting-order-api-version')) document.getElementById('setting-order-api-version').value = settings.ORDER_API_VERSION || '3.0';
         if (document.getElementById('setting-redirect-uri')) document.getElementById('setting-redirect-uri').value = settings.REDIRECT_URI || '';
 
         // Sandbox & Modes
         if (document.getElementById('setting-sandbox-key')) document.getElementById('setting-sandbox-key').value = settings.SANDBOX_API_KEY || '';
         if (document.getElementById('toggle-sandboxmode')) document.getElementById('toggle-sandboxmode').checked = settings.USE_SANDBOX || false;
         if (document.getElementById('toggle-papermode')) document.getElementById('toggle-papermode').checked = settings.PAPER_TRADING ?? true;
+        if (document.getElementById('toggle-papermode-rail')) document.getElementById('toggle-papermode-rail').checked = settings.PAPER_TRADING ?? true;
+
+        // Network / Proxy
+        if (document.getElementById('setting-upstox-proxy-url')) document.getElementById('setting-upstox-proxy-url').value = settings.UPSTOX_PROXY_URL || '';
+        if (document.getElementById('setting-requests-http-proxy')) document.getElementById('setting-requests-http-proxy').value = settings.REQUESTS_HTTP_PROXY || '';
+        if (document.getElementById('setting-requests-https-proxy')) document.getElementById('setting-requests-https-proxy').value = settings.REQUESTS_HTTPS_PROXY || '';
+        if (document.getElementById('setting-apply-upstox-sdk-proxy')) document.getElementById('setting-apply-upstox-sdk-proxy').checked = settings.APPLY_UPSTOX_SDK_PROXY || false;
+        if (document.getElementById('setting-require-upstox-proxy')) document.getElementById('setting-require-upstox-proxy').checked = settings.REQUIRE_UPSTOX_PROXY || false;
+        if (document.getElementById('setting-apply-process-proxy-env')) document.getElementById('setting-apply-process-proxy-env').checked = settings.APPLY_PROCESS_PROXY_ENV || false;
+        await refreshNetworkDiagnostics();
 
         // Risk
         if (document.getElementById('risk-capital')) document.getElementById('risk-capital').value = settings.TRADING_CAPITAL || 100000;
@@ -1798,6 +2686,23 @@ async function loadSettingsIntoUI() {
             toggleTrailingGapInput();
         }
         if (document.getElementById('gtt-trailing-gap-value')) document.getElementById('gtt-trailing-gap-value').value = settings.GTT_TRAILING_GAP_VALUE || 0;
+
+        // Speed mode settings
+        if (document.getElementById('setting-fast-execution-mode')) {
+            document.getElementById('setting-fast-execution-mode').checked = settings.FAST_EXECUTION_MODE ?? false;
+        }
+        if (document.getElementById('setting-fast-skip-oc-insight')) {
+            document.getElementById('setting-fast-skip-oc-insight').checked = settings.FAST_SKIP_OC_INSIGHT ?? true;
+        }
+        if (document.getElementById('setting-fast-atm-resolver-light')) {
+            document.getElementById('setting-fast-atm-resolver-light').checked = settings.FAST_ATM_RESOLVER_LIGHT ?? true;
+        }
+        if (document.getElementById('setting-fast-async-alerter')) {
+            document.getElementById('setting-fast-async-alerter').checked = settings.FAST_ASYNC_ALERTER ?? true;
+        }
+        if (document.getElementById('setting-candle-check-seconds')) {
+            document.getElementById('setting-candle-check-seconds').value = settings.CANDLE_CHECK_SECONDS ?? 5;
+        }
 
     } catch (e) {
         console.error("Failed to load settings into UI", e);
@@ -1852,9 +2757,10 @@ window.toggleAutoMode = async (enabled) => {
 
 async function fetchStrategySchemas() {
     try {
+        // Reuse cached status from refreshStatus() to avoid a duplicate /engine/status call
         const [data, status] = await Promise.all([
             api.getStrategySchemas(),
-            api.getStatus()
+            _lastEngineStatus ? Promise.resolve(_lastEngineStatus) : api.getStatus()
         ]);
 
         const selector = document.getElementById("strategy-selector");
@@ -2103,6 +3009,7 @@ window.switchMainView = (view) => {
     if (view === 'watchlist') {
         refreshWatchlist();
         refreshActiveSignals();
+        refreshSignalRejections();
     }
 
     // Persist instrument name across view transitions

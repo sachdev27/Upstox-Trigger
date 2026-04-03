@@ -22,6 +22,7 @@ class SettingsUpdate(BaseModel):
     UPSTOX_PROXY_URL: str | None = None
     REQUESTS_HTTP_PROXY: str | None = None
     REQUESTS_HTTPS_PROXY: str | None = None
+    APPLY_UPSTOX_SDK_PROXY: bool | None = None
     REQUIRE_UPSTOX_PROXY: bool | None = None
     APPLY_PROCESS_PROXY_ENV: bool | None = None
     ORDER_API_VERSION: str | None = None
@@ -61,11 +62,13 @@ _SECRET_KEYS = {
 _CATEGORY_MAP = {
     "API_KEY": "API", "API_SECRET": "API", "REDIRECT_URI": "API", "ACCESS_TOKEN": "API", "AUTH_CODE": "API",
     "ALGO_NAME": "API", "ALGO_ID": "API",
-    "UPSTOX_PROXY_URL": "API", "REQUESTS_HTTP_PROXY": "API", "REQUESTS_HTTPS_PROXY": "API", "REQUIRE_UPSTOX_PROXY": "API", "APPLY_PROCESS_PROXY_ENV": "API",
+    "UPSTOX_PROXY_URL": "API", "REQUESTS_HTTP_PROXY": "API", "REQUESTS_HTTPS_PROXY": "API", "APPLY_UPSTOX_SDK_PROXY": "API", "REQUIRE_UPSTOX_PROXY": "API", "APPLY_PROCESS_PROXY_ENV": "API",
     "ORDER_API_VERSION": "API", "REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS": "API",
     "AUTO_SLICE_ORDERS": "API", "DEFAULT_MARKET_PROTECTION": "API",
     "MAX_RISK_PER_TRADE_PCT": "RISK", "MAX_DAILY_LOSS_PCT": "RISK", "MAX_CONCURRENT_POSITIONS": "RISK", "SQUARE_OFF_TIME": "RISK",
     "TRADING_CAPITAL": "ENGINE", "PAPER_TRADING": "ENGINE", "TRADING_SIDE": "ENGINE", "MAX_OPEN_TRADES": "ENGINE",
+    "CANDLE_CHECK_SECONDS": "ENGINE", "FAST_EXECUTION_MODE": "ENGINE", "FAST_SKIP_OC_INSIGHT": "ENGINE",
+    "FAST_ATM_RESOLVER_LIGHT": "ENGINE", "FAST_ASYNC_ALERTER": "ENGINE",
     "USE_SANDBOX": "ENGINE", "SANDBOX_API_KEY": "API", "SANDBOX_API_SECRET": "API", "SANDBOX_ACCESS_TOKEN": "API",
     "TELEGRAM_BOT_TOKEN": "NOTIFICATIONS", "TELEGRAM_CHAT_ID": "NOTIFICATIONS",
     "SMTP_SERVER": "NOTIFICATIONS", "SMTP_PORT": "NOTIFICATIONS", "SMTP_USER": "NOTIFICATIONS",
@@ -88,14 +91,18 @@ async def get_current_settings():
     settings.load_from_db()
 
     return {
+        "API_VERSION": settings.API_VERSION,
         "API_KEY": _mask(settings.API_KEY) if settings.API_KEY else "",
         "API_SECRET": "********" if settings.API_SECRET else "",
+        "AUTH_CODE": "********" if settings.AUTH_CODE else "",
+        "ACCESS_TOKEN": "********" if settings.ACCESS_TOKEN else "",
         "REDIRECT_URI": settings.REDIRECT_URI,
         "ALGO_NAME": settings.ALGO_NAME,
         "ALGO_ID": settings.ALGO_ID,
         "UPSTOX_PROXY_URL": "********" if settings.UPSTOX_PROXY_URL else "",
         "REQUESTS_HTTP_PROXY": "********" if settings.REQUESTS_HTTP_PROXY else "",
         "REQUESTS_HTTPS_PROXY": "********" if settings.REQUESTS_HTTPS_PROXY else "",
+        "APPLY_UPSTOX_SDK_PROXY": settings.APPLY_UPSTOX_SDK_PROXY,
         "REQUIRE_UPSTOX_PROXY": settings.REQUIRE_UPSTOX_PROXY,
         "APPLY_PROCESS_PROXY_ENV": settings.APPLY_PROCESS_PROXY_ENV,
         "ORDER_API_VERSION": settings.ORDER_API_VERSION,
@@ -114,6 +121,11 @@ async def get_current_settings():
         "PAPER_TRADING": settings.PAPER_TRADING,
         "TRADING_SIDE": settings.TRADING_SIDE,
         "MAX_OPEN_TRADES": settings.MAX_OPEN_TRADES,
+        "CANDLE_CHECK_SECONDS": settings.CANDLE_CHECK_SECONDS,
+        "FAST_EXECUTION_MODE": settings.FAST_EXECUTION_MODE,
+        "FAST_SKIP_OC_INSIGHT": settings.FAST_SKIP_OC_INSIGHT,
+        "FAST_ATM_RESOLVER_LIGHT": settings.FAST_ATM_RESOLVER_LIGHT,
+        "FAST_ASYNC_ALERTER": settings.FAST_ASYNC_ALERTER,
         "TELEGRAM_BOT_TOKEN": "********" if settings.TELEGRAM_BOT_TOKEN else "",
         "TELEGRAM_CHAT_ID": settings.TELEGRAM_CHAT_ID,
         "SMTP_SERVER": settings.SMTP_SERVER,
@@ -122,6 +134,7 @@ async def get_current_settings():
         "SMTP_PASSWORD": "********" if settings.SMTP_PASSWORD else "",
         "EMAIL_RECIPIENT": settings.EMAIL_RECIPIENT,
         "NOTIFICATION_CHANNELS": settings.NOTIFICATION_CHANNELS,
+        "ENV_OVERRIDE_DB": settings.ENV_OVERRIDE_DB,
         "GTT_PRODUCT_TYPE": settings.GTT_PRODUCT_TYPE,
         "GTT_TRAILING_SL": settings.GTT_TRAILING_SL,
         "GTT_TRAILING_GAP_MODE": settings.GTT_TRAILING_GAP_MODE,
@@ -132,13 +145,17 @@ async def get_current_settings():
 
 
 @router.post("/")
-async def update_settings(updates: SettingsUpdate = Body(...)):
+async def update_settings(updates: dict = Body(...)):
     """Update settings — persisted to the database."""
     settings = get_settings()
     updated_keys = []
 
-    # Map the Pydantic model to a dict, excluding None values
-    update_data = updates.model_dump(exclude_none=True)
+    # Accept dynamic payloads from frontend and keep only valid setting keys.
+    allowed_keys = {k for k in vars(settings).keys() if k.isupper()}
+    update_data = {
+        str(k): v for k, v in (updates or {}).items()
+        if str(k).isupper() and str(k) in allowed_keys and v is not None
+    }
 
     for key, value in update_data.items():
         # Skip masked placeholder values (user didn't change them)
@@ -153,7 +170,7 @@ async def update_settings(updates: SettingsUpdate = Body(...)):
     # Sync engine with new settings
     if updated_keys:
         if any(k in {
-            "UPSTOX_PROXY_URL", "REQUESTS_HTTP_PROXY", "REQUESTS_HTTPS_PROXY", "REQUIRE_UPSTOX_PROXY", "APPLY_PROCESS_PROXY_ENV"
+            "UPSTOX_PROXY_URL", "REQUESTS_HTTP_PROXY", "REQUESTS_HTTPS_PROXY", "APPLY_UPSTOX_SDK_PROXY", "REQUIRE_UPSTOX_PROXY", "APPLY_PROCESS_PROXY_ENV"
         } for k in updated_keys):
             from app.network_proxy import configure_network_proxies
             configure_network_proxies(settings)
