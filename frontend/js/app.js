@@ -156,24 +156,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     chart.init();
     ws.connect();
 
-    // Restore sidebar state — REMOVED
+    // Phase 1: Fire all independent fetches in parallel — avoid serial waterfall
+    // refreshStatus runs here so _lastEngineStatus is populated for fetchStrategySchemas
+    await Promise.allSettled([
+        fetchHistoricalCandles(),
+        checkAuth(),
+        refreshStatus(),
+        refreshAccountSummary(),
+        refreshWatchlist(),
+        loadSettingsIntoUI(),
+        refreshPositions(),
+        refreshTrades(),
+        refreshSignals(),
+        refreshActiveSignals(),
+        refreshSignalRejections(),
+        refreshOrderBook(),
+        refreshMarketStatus(),
+    ]);
 
-    await fetchHistoricalCandles();
-    await refreshAccountSummary();
-    await refreshPositions();
-    await refreshTrades();
-    await refreshSignals();
-    await refreshActiveSignals();
-    await refreshSignalRejections();
-    await refreshWatchlist();
-    await checkAuth();
-    await refreshStatus();
-    await loadSettingsIntoUI();
-    refreshAccountSummary();
-    refreshMarketStatus();
-    refreshOrderBook();
-    updateClock();
+    // Phase 2: depends on _lastEngineStatus from refreshStatus() above
     await fetchStrategySchemas();
+    updateClock();
 
     // Restore UI from localStorage
     updateElementText('current-instrument', currentInstrumentName);
@@ -199,13 +202,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     setInterval(refreshPositions, 30000);
     setInterval(refreshMarketStatus, 60000);
     setInterval(refreshOrderBook, 45000);
-    setInterval(refreshActiveSignals, 20000); // Every 20 seconds
-    setInterval(refreshSignalRejections, 20000);
-    setInterval(refreshDecisionTimeline, 20000);
-    setInterval(refreshSystemTimeline, 20000);
+    setInterval(refreshActiveSignals, 30000); // Every 30 seconds
+    setInterval(refreshSignalRejections, 30000);
+    setInterval(refreshDecisionTimeline, 60000);
+    setInterval(refreshSystemTimeline, 60000);
     setInterval(refreshRailInstrumentContext, 30000);
     setInterval(() => scheduleOverlayRefresh(false), OVERLAY_REFRESH_MS); // Throttled strategy HUD/overlay
-    setInterval(refreshOcInsight, 20000); // OC insight every 20s
+    setInterval(refreshOcInsight, 30000); // OC insight every 30s
 
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && currentMainView === 'chart') {
@@ -894,9 +897,13 @@ async function refreshMarketStatus() {
     }
 }
 
+// Cached engine status (shared across refreshStatus / fetchStrategySchemas)
+let _lastEngineStatus = null;
+
 async function refreshStatus() {
     try {
         const data = await api.getStatus();
+        _lastEngineStatus = data;
         updateEngineStatus(data);
         refreshSystemTimeline();
         refreshRailInstrumentContext();
@@ -1770,7 +1777,7 @@ async function refreshDecisionTimeline() {
             api.getSignals(),
             api.getRejections(60),
             api.getPaperTrades(80),
-            api.getStatus(),
+            _lastEngineStatus ? Promise.resolve(_lastEngineStatus) : api.getStatus(),
         ]);
 
         const signals = signalsRes.status === 'fulfilled' ? (signalsRes.value?.data || signalsRes.value?.signals || []) : [];
@@ -1908,8 +1915,8 @@ async function refreshSystemTimeline() {
 
     try {
         const [status, proxy, market] = await Promise.all([
-            api.getStatus(),
-            api.getProxyStatus(true),
+            _lastEngineStatus ? Promise.resolve(_lastEngineStatus) : api.getStatus(),
+            api.getProxyStatus(false),
             api.getMarketStatus(),
         ]);
 
@@ -2750,9 +2757,10 @@ window.toggleAutoMode = async (enabled) => {
 
 async function fetchStrategySchemas() {
     try {
+        // Reuse cached status from refreshStatus() to avoid a duplicate /engine/status call
         const [data, status] = await Promise.all([
             api.getStrategySchemas(),
-            api.getStatus()
+            _lastEngineStatus ? Promise.resolve(_lastEngineStatus) : api.getStatus()
         ]);
 
         const selector = document.getElementById("strategy-selector");

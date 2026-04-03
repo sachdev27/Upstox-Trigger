@@ -141,6 +141,13 @@ class AutomationEngine:
         # WebSocket broadcast callback (set by main.py)
         self.broadcast_callback = None
 
+        # Cached DB query results for get_status() (avoid hitting DB every 10s)
+        self._cached_active_signal_count: int = 0
+        self._cached_active_signal_count_at: float = 0.0
+        self._cached_rejections: list[dict] = []
+        self._cached_rejections_at: float = 0.0
+        _STATUS_DB_CACHE_TTL = 15.0  # seconds
+
         # Configuration (synced later)
         self.paper_trading: bool = True
         self.trading_side: str = "BOTH"
@@ -164,9 +171,6 @@ class AutomationEngine:
 
         # Semaphore to limit concurrent instrument evaluations per cycle
         self._eval_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EVALS)
-
-        # Load config from DB-backed settings
-        self.sync_from_settings()
 
     def sync_from_settings(self):
         """Sync engine runtime config from the DB-backed Settings singleton."""
@@ -199,6 +203,7 @@ class AutomationEngine:
                 )
                 session.add(row)
                 session.commit()
+                self._cached_rejections_at = 0.0  # invalidate cache
             except Exception as e:
                 logger.error(f"Failed to persist signal rejection: {e}")
                 session.rollback()
@@ -208,8 +213,11 @@ class AutomationEngine:
             logger.error(f"Signal rejection DB session failure: {e}")
 
     def get_recent_rejections(self, limit: int = 50) -> list[dict]:
-        """Return recent rejection events, preferring persisted telemetry."""
+        """Return recent rejection events, preferring persisted telemetry (cached 15s)."""
         n = max(1, min(int(limit or 50), 500))
+        now = time.monotonic()
+        if (now - self._cached_rejections_at) < 15.0 and self._cached_rejections:
+            return self._cached_rejections[:n]
         try:
             session = get_session()
             try:
@@ -220,7 +228,7 @@ class AutomationEngine:
                     .all()
                 )
                 if rows:
-                    return [
+                    result = [
                         {
                             "timestamp": (
                                 (r.timestamp.strftime("%H:%M:%S") if getattr(r.timestamp, "tzinfo", None) is None else r.timestamp.astimezone(IST).strftime("%H:%M:%S"))
@@ -236,6 +244,9 @@ class AutomationEngine:
                         }
                         for r in rows
                     ]
+                    self._cached_rejections = result
+                    self._cached_rejections_at = now
+                    return result
             finally:
                 session.close()
         except Exception as e:
@@ -279,9 +290,6 @@ class AutomationEngine:
                 except Exception as e:
                     logger.error(f"Failed to auto-load strategy: {e}")
         try:
-            # Refresh config from DB
-            self.sync_from_settings()
-
             try:
                 # 1. Market Data ALWAYS uses Live configuration (Sandbox doesn't support market data)
                 live_config = self._auth.get_configuration(use_sandbox=False)
@@ -1405,15 +1413,20 @@ class AutomationEngine:
         return self._trades_today
 
     def _get_active_signal_count(self) -> int:
-        """Get count of active (non-closed) signals from DB."""
+        """Get count of active (non-closed) signals from DB (cached 15s)."""
+        now = time.monotonic()
+        if (now - self._cached_active_signal_count_at) < 15.0:
+            return self._cached_active_signal_count
         try:
             from app.database.connection import get_session, ActiveSignal
             session = get_session()
             count = session.query(ActiveSignal).filter_by(status="active").count()
             session.close()
+            self._cached_active_signal_count = count
+            self._cached_active_signal_count_at = now
             return count
         except Exception:
-            return 0
+            return self._cached_active_signal_count
 
     def _get_latest_oc_insight(self) -> dict | None:
         """Return the latest cached OC analysis from the pipeline processor."""

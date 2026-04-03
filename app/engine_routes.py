@@ -22,8 +22,8 @@ async def initialize_engine():
 
 @router.post("/load-strategy")
 async def load_strategy(
-    strategy_class: str = "SuperTrendPro",
-    name: str = "SuperTrend Pro v6.3",
+    strategy_class: str = "ScalpPro",
+    name: str = "ScalpPro v1.0",
     instruments: str = "NSE_INDEX|Nifty 50",
     timeframe: str = "15m",
     paper_trading: bool = True,

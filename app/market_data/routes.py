@@ -16,7 +16,7 @@ from app.rate_limiter import get_rate_limiter
 router = APIRouter(prefix="/market", tags=["Market Data"])
 
 _strategy_overlay_cache: dict[tuple, tuple[float, dict]] = {}
-_strategy_overlay_cache_ttl_sec = 10.0
+_strategy_overlay_cache_ttl_sec = 30.0
 _strategy_overlay_cache_max_entries = 256
 _market_service_singleton: MarketDataService | None = None
 _market_service_token: str | None = None
