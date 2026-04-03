@@ -5,9 +5,7 @@ Automated trading platform powered by the **Upstox API v2** — real-time market
 Built with **FastAPI**, **SQLAlchemy**, **APScheduler**, and **vanilla JavaScript**.
 
 
-
-<img width="2554" height="1034" alt="image" src="https://github.com/user-attachments/assets/b2573336-f2c7-452c-9c8d-04fd7379e0e5" />
-
+<img width="2554" height="1040" alt="image" src="https://github.com/user-attachments/assets/2df7346b-3371-45ed-bd62-777b190936fa" />
 
 
 ## Key Capabilities
