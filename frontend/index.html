@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Upstox Trading Automation Terminal">
     <title>Upstox Trading Automation</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=5">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>⚡</text></svg>">
     <!-- Localized Dependencies -->
     <script src="/static/lightweight-charts.js"></script>
@@ -33,7 +33,6 @@
                 <span class="dot"></span>
                 <span id="auth-status-text">Auth Unknown</span>
             </span>
-            <button id="btn-view-settings" class="btn btn-outline" style="width: auto; padding: 4px 10px;" onclick="switchMainView('settings')">⚙️ Settings</button>
             <button class="btn btn-outline" style="width: auto; padding: 4px 10px; margin-left: 8px;" onclick="loginUpstox()">🔐 Login</button>
             <span id="market-status-indicator" class="text-muted" style="font-size: 0.8rem; margin-left: 10px;">Market Loading...</span>
             <span id="clock" class="mono" style="color: var(--text-muted); font-size: 0.8rem; margin-left: 10px;"></span>
@@ -46,11 +45,11 @@
 
     <!-- ═══ Terminal Layout ══════════════════════════════ -->
     <div class="terminal-layout">
-        
+
 
         <!-- ── Center Panel (Chart & Logs) ── -->
         <main class="panel-center">
-            
+
             <!-- Chart Container -->
             <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px; background: var(--bg-dark); border-bottom: 1px solid var(--border-color);">
                 <div style="display: flex; gap: 4px;">
@@ -73,11 +72,11 @@
                     <button id="btn-view-settings-center" class="btn btn-outline" style="padding: 2px 8px; font-size: 0.75rem" onclick="switchMainView('settings')">⚙️ Settings</button>
                 </div>
             </div>
-            
+
             <div id="tvchart" class="chart-container" style="height: calc(100% - 28px);">
                 <!-- Lightweight Charts injected here via JS -->
             </div>
-            
+
             <!-- Option Chain Container (Hidden by default) -->
             <div id="option-chain-container" class="chart-container" style="display: none; height: calc(100% - 28px); overflow-y: auto; background: var(--bg-color);">
                 <div style="padding: 12px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); background: var(--bg-card);">
@@ -86,7 +85,7 @@
                         <option value="">Nearest Expiry</option>
                     </select>
                 </div>
-                
+
                 <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem; text-align: center;">
                     <thead style="position: sticky; top: 0; z-index: 10;">
                         <tr style="background: var(--bg-dark);">
@@ -169,9 +168,10 @@
                     <button class="settings-tab active" onclick="switchSettingsTab('general')">General</button>
                     <button class="settings-tab" onclick="switchSettingsTab('strategy')">Strategy Config</button>
                     <button class="settings-tab" onclick="switchSettingsTab('risk')">Risk & Capital</button>
+                    <button class="settings-tab" onclick="switchSettingsTab('execution')">Execution</button>
                     <button class="settings-tab" onclick="switchSettingsTab('notifications')">Notifications</button>
                 </div>
-                
+
                 <!-- General Settings -->
                 <div id="set-tab-general" class="settings-content active">
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px;">
@@ -247,7 +247,7 @@
                     <div class="settings-card" style="margin: 20px;">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                             <h4 style="margin: 0;">Strategy Parameters</h4>
-                            <select id="strategy-selector" class="form-input" style="width: auto;" onchange="renderDynamicStrategyForm()">
+                            <select id="strategy-selector" class="form-input" style="width: auto;" onchange="renderDynamicStrategyForm(); populateRiskLevels()">
                                 <option value="supertrend_pro" data-class="SuperTrendPro">SuperTrend Pro v6.3</option>
                             </select>
                         </div>
@@ -279,6 +279,122 @@
                             <input type="number" id="risk-maxtrades" class="form-input" value="3">
                         </div>
                         <button class="btn btn-primary" onclick="saveRiskConfig()">Save Risk Config</button>
+                    </div>
+                </div>
+
+                <!-- Execution / GTT Settings -->
+                <div id="set-tab-execution" class="settings-content">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px;">
+                        <div class="settings-card">
+                            <h4>GTT Order Configuration</h4>
+                            <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 16px;">
+                                Good Till Triggered orders place ENTRY + TARGET + STOPLOSS in a single atomic order.
+                                The exchange manages SL/TP execution automatically.
+                            </p>
+                            <div class="form-group">
+                                <label class="form-label">Product Type</label>
+                                <select id="gtt-product-type" class="form-input">
+                                    <option value="D">Delivery (D) — Carry overnight</option>
+                                    <option value="I">Intraday (I) — Auto square-off</option>
+                                    <option value="MTF">Margin (MTF) — Leveraged delivery</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Entry Trigger Type</label>
+                                <select id="gtt-entry-trigger" class="form-input">
+                                    <option value="IMMEDIATE">IMMEDIATE — Limit order sent instantly</option>
+                                    <option value="ABOVE">ABOVE — Trigger when price rises above</option>
+                                    <option value="BELOW">BELOW — Trigger when price drops below</option>
+                                </select>
+                                <small class="text-muted">IMMEDIATE sends a limit order right away. ABOVE/BELOW wait for price to cross the trigger level.</small>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Market Protection</label>
+                                <select id="gtt-market-protection" class="form-input">
+                                    <option value="-1">Auto (-1) — Exchange-defined buffer</option>
+                                    <option value="1">1%</option>
+                                    <option value="2">2%</option>
+                                    <option value="3">3%</option>
+                                    <option value="5">5%</option>
+                                </select>
+                                <small class="text-muted">Slippage buffer for limit-to-market conversion. Auto is recommended.</small>
+                            </div>
+                        </div>
+                        <div class="settings-card">
+                            <h4>Trailing Stop Loss</h4>
+                            <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 16px;">
+                                Trailing SL automatically follows the market price, locking in profit as price moves toward the target.
+                            </p>
+                            <div class="auto-mode-card" style="margin-bottom: 16px;">
+                                <div>
+                                    <div style="font-weight: 600;">Enable Trailing SL</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">SL trails market price at a fixed gap</div>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="gtt-trailing-sl" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Trailing Gap Mode</label>
+                                <select id="gtt-trailing-gap-mode" class="form-input" onchange="toggleTrailingGapInput()">
+                                    <option value="auto">Auto — Derived from Entry→SL distance</option>
+                                    <option value="custom">Custom — Fixed gap value</option>
+                                </select>
+                                <small class="text-muted">Auto uses the initial risk distance (entry price − stop loss) as the trailing gap.</small>
+                            </div>
+                            <div class="form-group" id="gtt-custom-gap-group" style="display: none;">
+                                <label class="form-label">Custom Trailing Gap (₹)</label>
+                                <input type="number" id="gtt-trailing-gap-value" class="form-input" value="0" step="0.05" min="0">
+                                <small class="text-muted">Must be ≥ 10% of |LTP − SL trigger price| per Upstox rules.</small>
+                            </div>
+                            <div class="settings-card" style="background: rgba(76, 175, 80, 0.05); border-color: var(--success); margin-top: 16px; padding: 16px;">
+                                <h4 style="color: var(--success); font-size: 0.8rem; margin-bottom: 8px;">How Trailing SL Works</h4>
+                                <div style="font-size: 0.75rem; color: var(--text-muted); line-height: 1.6;">
+                                    <strong>BUY Example:</strong> Entry ₹270, SL ₹269, Gap ₹1<br>
+                                    Price → ₹272: SL trails to ₹271 (profit locked!)<br>
+                                    Price → ₹275: SL trails to ₹274<br>
+                                    Price reverses → ₹274: Position exits at ₹274<br><br>
+                                    <strong>Result:</strong> ₹4 profit captured instead of hitting original SL.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Risk Levels — SL / TP / Trailing from active strategy -->
+                    <div style="padding: 0 20px;">
+                        <div class="settings-card" id="execution-risk-card">
+                            <h4>Risk Levels <span id="exec-risk-strategy-badge" style="font-size:0.7rem;background:var(--accent-primary);color:#000;padding:2px 8px;border-radius:8px;margin-left:8px;"></span></h4>
+                            <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 16px;">
+                                These multipliers determine your Stop Loss, Take Profit, and trailing distances.<br>
+                                Values are <strong>ATR × multiplier</strong> — the strategy computes ATR automatically from recent candles.
+                            </p>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;">
+                                <div class="form-group">
+                                    <label class="form-label">SL Multiplier</label>
+                                    <input type="number" id="exec-sl-mult" class="form-input" step="0.1" min="0.1" value="1.0">
+                                    <small class="text-muted">SL distance = ATR × this</small>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">TP Multiplier</label>
+                                    <input type="number" id="exec-tp-mult" class="form-input" step="0.1" min="0.1" value="2.0">
+                                    <small class="text-muted">TP distance = ATR × this</small>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Trailing SL Multiplier</label>
+                                    <input type="number" id="exec-trail-mult" class="form-input" step="0.1" min="0.1" value="1.0">
+                                    <small class="text-muted">Trail gap = ATR × this</small>
+                                </div>
+                            </div>
+                            <div class="settings-card" id="exec-risk-example" style="background: rgba(33,150,243,0.05); border-color: var(--accent-primary); margin-top: 12px; padding: 14px;">
+                                <h4 style="color: var(--accent-primary); font-size: 0.8rem; margin-bottom: 6px;">Live Example</h4>
+                                <div id="exec-risk-example-text" style="font-size: 0.75rem; color: var(--text-muted); line-height: 1.6;">
+                                    Select a strategy and load it to see computed levels.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="padding: 0 20px 20px;">
+                        <button class="btn btn-primary" onclick="saveExecutionSettings()">Save Execution Settings</button>
                     </div>
                 </div>
 
@@ -332,11 +448,12 @@
                     <button class="bottom-tab active" onclick="switchBottomTab('positions')">Positions</button>
                     <button class="bottom-tab" onclick="switchBottomTab('orderbook')">Order Book</button>
                     <button class="bottom-tab" onclick="switchBottomTab('trades')">Trade History</button>
+                    <button class="bottom-tab" onclick="clearTradeHistory()" title="Clear trade history" style="margin-left:auto; font-size:0.8rem; padding:4px 8px; min-width:auto;">🗑️</button>
                     <button class="bottom-tab" onclick="switchBottomTab('signals')">Signals</button>
                     <button class="bottom-tab" onclick="switchBottomTab('active-signals')">🟢 Active Signals</button>
                     <button class="bottom-tab" onclick="switchBottomTab('activity')">Activity Log</button>
                 </div>
-                
+
                 <!-- Positions Tab -->
                 <div id="tab-positions" class="bottom-content active">
                     <table>
@@ -355,7 +472,7 @@
                         </tbody>
                     </table>
                 </div>
-                
+
                 <!-- Order Book Tab -->
                 <div id="tab-orderbook" class="bottom-content">
                     <table>
@@ -453,7 +570,7 @@
 
             <div class="panel-header">Engine Control</div>
             <div class="control-section">
-                
+
                 <div class="auto-mode-card" id="auto-mode-card">
                     <div>
                         <div style="font-weight: 600; font-size: 0.95rem;">Auto Mode</div>
@@ -472,12 +589,39 @@
                 <div style="font-size: 0.75rem; text-align: center; color: var(--text-muted);">
                     Status: <span id="engine-status-text" class="text-warning">Not Initialized</span>
                 </div>
+
+                <div class="execution-probe-card" id="execution-probe-card">
+                    <button class="execution-probe-header execution-probe-toggle" type="button" onclick="toggleExecutionProbe()" aria-expanded="true" aria-controls="execution-probe-body">
+                        <span>Execution Probe</span>
+                        <span id="execution-probe-chevron" class="execution-probe-chevron">▾</span>
+                    </button>
+                    <div id="execution-probe-body" class="execution-probe-body">
+                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                            <button class="btn btn-outline" onclick="triggerTestSignalWithAction('BUY')">Test BUY→CE</button>
+                            <button class="btn btn-outline" onclick="triggerTestSignalWithAction('SELL')">Test SELL→PE</button>
+                        </div>
+                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                            <button class="btn btn-primary" onclick="runExecutionProbe('BUY')">Verify BUY Flow</button>
+                            <button class="btn btn-primary" onclick="runExecutionProbe('SELL')">Verify SELL Flow</button>
+                        </div>
+                        <div id="execution-probe-result" class="execution-probe-result probe-neutral">
+                            Run Verify Flow to test signal -> cycle -> order path.
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="panel-header">Strategy Feedback</div>
             <div class="control-section" id="strategy-hud-container" style="padding: 0; background: var(--bg-color);">
                 <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
                     Waiting for active strategy...
+                </div>
+            </div>
+
+            <div class="panel-header">OC Insight</div>
+            <div class="control-section" id="oc-insight-container" style="padding: 0; background: var(--bg-color);">
+                <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
+                    Select an INDEX instrument to view OC analysis
                 </div>
             </div>
 
@@ -505,6 +649,7 @@
     </div>
 
     <!-- Modularized JS -->
-    <script type="module" src="/static/js/app.js"></script>
+
+    <script type="module" src="/static/js/app.js?v=9"></script>
 </body>
 </html>

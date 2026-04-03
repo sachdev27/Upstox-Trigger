@@ -3,17 +3,37 @@
  */
 
 import { api } from './api.js';
-import { showToast, updateElementText, formatPrice } from './ui.js';
+import * as ui from './ui.js';
 import { EngineWS } from './ws.js';
 import { ChartManager } from './chart.js';
+import { state } from './state.js';
 
-// Application State
-let currentInstrumentKey = localStorage.getItem("currentInstrumentKey") || "NSE_INDEX|Nifty 50";
-let currentInstrumentName = localStorage.getItem("currentInstrumentName") || "Nifty 50";
-let currentInterval = localStorage.getItem("currentInterval") || "15minute";
+const showToast = ui.showToast;
+const updateElementText = ui.updateElementText;
+const formatPrice = ui.formatPrice;
+const renderStrategyHUDEmpty = ui.renderStrategyHUDEmpty;
+const renderStrategyHUD = ui.renderStrategyHUD;
+const renderOcInsight = ui.renderOcInsight || (() => {});
+
+// Application State — backed by state.js store for pub/sub.
+// Legacy getters/setters keep existing code working while routing through the store.
+Object.defineProperties(window, {
+    _currentInstrumentKey: { get() { return state.get('currentInstrumentKey'); }, set(v) { state.set('currentInstrumentKey', v); } },
+    _currentInstrumentName: { get() { return state.get('currentInstrumentName'); }, set(v) { state.set('currentInstrumentName', v); } },
+    _currentInterval: { get() { return state.get('currentInterval'); }, set(v) { state.set('currentInterval', v); } },
+});
+// Module-level aliases (re-assignable `let` backed by the store getters)
+let currentInstrumentKey = state.get('currentInstrumentKey');
+let currentInstrumentName = state.get('currentInstrumentName');
+let currentInterval = state.get('currentInterval');
 let engineActive = false;
 let dynamicSchemas = {};
-const IST_OFFSET = 0; // Standardize to UTC seconds 
+const IST_OFFSET = 0; // Standardize to UTC seconds
+
+// Keep module-level vars in sync with store
+state.on('currentInstrumentKey', (v) => { currentInstrumentKey = v; });
+state.on('currentInstrumentName', (v) => { currentInstrumentName = v; });
+state.on('currentInterval', (v) => { currentInterval = v; });
 
 let globalSearchResults = [];
 let selectedSearchIndex = -1;
@@ -21,6 +41,42 @@ const domNodes = new Map(); // Performance Cache: instrument_key -> { row: HTMLE
 const lastUiUpdate = { status: 0, volume: 0 }; // Throttling state
 const pendingUpdates = new Map(); // Batching Queue: key -> last_tick_data
 let isFlushing = false;
+let overlayRefreshInFlight = false;
+let lastOverlayRefreshAt = 0;
+const OVERLAY_REFRESH_MS = 30000;
+let currentMainView = state.get('currentMainView');
+state.on('currentMainView', (v) => { currentMainView = v; });
+
+// Bottom-panel row caches for delta rendering (key -> serialized row state)
+const tradeRowCache = new Map();
+const signalRowCache = new Map();
+
+async function scheduleOverlayRefresh(force = false) {
+    if (!currentInstrumentKey) return;
+    if (currentMainView !== 'chart') return;
+    if (document.visibilityState !== 'visible') return;
+
+    const now = Date.now();
+    if (!force && (overlayRefreshInFlight || (now - lastOverlayRefreshAt) < OVERLAY_REFRESH_MS)) {
+        return;
+    }
+
+    overlayRefreshInFlight = true;
+    try {
+        await refreshOverlay();
+    } finally {
+        lastOverlayRefreshAt = Date.now();
+        overlayRefreshInFlight = false;
+    }
+}
+
+function isDocumentVisible() {
+    return document.visibilityState === 'visible';
+}
+
+function isBottomTabActive(tabId) {
+    return !!document.getElementById(`tab-${tabId}`)?.classList.contains('active');
+}
 
 // --- IndexedDB Cache System ---
 const DB_NAME = 'TradingTerminalDB';
@@ -77,9 +133,9 @@ const ws = new EngineWS(handleWsMessage, () => {
 document.addEventListener("DOMContentLoaded", async () => {
     chart.init();
     ws.connect();
-    
+
     // Restore sidebar state — REMOVED
-    
+
     await fetchHistoricalCandles();
     await refreshAccountSummary();
     await refreshPositions();
@@ -95,12 +151,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     refreshOrderBook();
     updateClock();
     await fetchStrategySchemas();
-    
+
     // Restore UI from localStorage
     updateElementText('current-instrument', currentInstrumentName);
     updateElementText('oc-instrument-name', currentInstrumentName);
     updateElementText('inst-ltp', `₹0.00`);
-    
+
     // Set active state for persisted timeframe
     const activeBtn = document.getElementById(`tf-${currentInterval}`);
     if (activeBtn) {
@@ -111,22 +167,33 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Set up listeners
     setupEventListeners();
     setupGlobalSearch();
-    
+    applyExecutionProbeState();
+
     // Interval updates
     setInterval(updateClock, 1000);
-    setInterval(refreshAccountSummary, 60000);
+    setInterval(refreshAccountSummary, 120000);
     setInterval(refreshPositions, 30000);
     setInterval(refreshMarketStatus, 60000);
-    setInterval(refreshOrderBook, 30000);
-    setInterval(refreshActiveSignals, 15000); // Every 15 seconds
-    setInterval(refreshOverlay, 30000); // Refresh strategy indicators/HUD every 30s
+    setInterval(refreshOrderBook, 45000);
+    setInterval(refreshActiveSignals, 20000); // Every 20 seconds
+    setInterval(() => scheduleOverlayRefresh(false), OVERLAY_REFRESH_MS); // Throttled strategy HUD/overlay
+    setInterval(refreshOcInsight, 20000); // OC insight every 20s
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && currentMainView === 'chart') {
+            scheduleOverlayRefresh(false);
+        }
+    });
+
+    // Initial OC insight fetch
+    refreshOcInsight();
 });
 
 function setupEventListeners() {
     // Buy/Sell buttons
     document.getElementById('btn-buy')?.addEventListener('click', () => placeManualOrder('BUY'));
     document.getElementById('btn-sell')?.addEventListener('click', () => placeManualOrder('SELL'));
-    
+
     // Instrument search
     const searchInp = document.getElementById("instrument-search");
     let searchTimeout;
@@ -144,7 +211,7 @@ function setupEventListeners() {
     // Strategy selector change
     document.getElementById("strategy-selector")?.addEventListener("change", () => {
         renderDynamicStrategyForm();
-        refreshOverlay();
+        scheduleOverlayRefresh(true);
     });
 
     // Watchlist search
@@ -181,6 +248,19 @@ function setupEventListeners() {
     });
 }
 
+function formatOptionLabel(data) {
+    if (!data) return '';
+    const side = data.option_side || data.resolved_option_side;
+    const strike = data.strike_price != null ? Number(data.strike_price) : null;
+    const expiry = data.expiry_date || null;
+    const underlying = data.underlying || null;
+    if (!side && strike == null && !expiry) return '';
+    const strikeTxt = Number.isFinite(strike) ? `${Math.round(strike)}` : '-';
+    const expiryTxt = expiry || '-';
+    const underTxt = underlying || '-';
+    return `${underTxt} ${side || '-'} ${strikeTxt} ${expiryTxt}`;
+}
+
 function handleWsMessage(msg) {
     let d;
     if (Array.isArray(msg) && msg[0] === 't') {
@@ -209,8 +289,7 @@ function handleWsMessage(msg) {
         refreshPositions();
         refreshAccountSummary();
     } else {
-        // For other message types, log and handle via switch
-        console.log("WS Message:", msg);
+        // Handle named message types
         switch (msg.type) {
             case 'status':
                 updateEngineStatus(msg.data);
@@ -223,14 +302,26 @@ function handleWsMessage(msg) {
                 if (msg.data.latest_metrics) {
                     renderStrategyHUD({ latest_metrics: msg.data.latest_metrics });
                 }
-                refreshOverlay(); // Still refresh overlay for markers and latest indicators on chart
+                scheduleOverlayRefresh(true); // Force immediate strategy overlay refresh on signal
                 break;
-            case 'trade_executed':
-                addLog(`💰 Trade: ${msg.data.action} @ ${msg.data.price}`, 'success');
-                showToast(`Trade Executed: ${msg.data.action}`, 'success');
+            case 'trade_executed': {
+                const td = msg.data;
+                const modeTag = td.type === 'paper' ? '📋 Paper' : '🔴 Live';
+                const actionTag = td.action === 'BUY' ? '🟢 BUY' : '🔴 SELL';
+                const symbol = td.instrument?.split('|')[1] || td.instrument || 'Unknown';
+                const optLabel = formatOptionLabel(td);
+                const suffix = optLabel ? ` | ${optLabel}` : '';
+                addLog(`💰 ${modeTag} ${actionTag} ${symbol} @ ₹${formatPrice(td.price)}${suffix}`, 'success');
+                showToast(`${actionTag} ${symbol} @ ₹${formatPrice(td.price)} (${modeTag})${optLabel ? ` | ${optLabel}` : ''}`, 'success');
+                // Refresh all order-related panels
                 refreshTrades();
                 refreshPositions();
+                refreshOrderBook();
+                refreshActiveSignals();
+                // Auto-switch bottom panel to Trade History so user sees the new trade
+                switchBottomTab('trades');
                 break;
+            }
         }
     }
 }
@@ -245,6 +336,7 @@ function flushUpdates() {
         if (d.instrument_key === currentInstrumentKey) {
             chart.updateCandle(d.candle, currentInterval);
             updateElementText("inst-ltp", `₹${formatPrice(d.ltp)}`);
+            scheduleOverlayRefresh(false);
             if (Date.now() - lastUiUpdate.volume > 500) {
                 updateElementText("inst-volume", `Vol: ${(d.volume || 0).toLocaleString()}`);
                 lastUiUpdate.volume = Date.now();
@@ -275,8 +367,12 @@ function flushUpdates() {
         // 4. Option Chain (Cached)
         const cachedOC = domNodes.get(`oc-${d.instrument_key}`);
         if (cachedOC) {
-            if (cachedOC.ltp) cachedOC.ltp.innerText = formatPrice(d.ltp);
-            if (cachedOC.volume) cachedOC.volume.innerText = (d.volume || 0).toLocaleString();
+            if (cachedOC.ltp && typeof d.ltp === 'number' && Number.isFinite(d.ltp) && d.ltp > 0) {
+                cachedOC.ltp.innerText = formatPrice(d.ltp);
+            }
+            if (cachedOC.volume && typeof d.volume === 'number' && Number.isFinite(d.volume) && d.volume >= 0) {
+                cachedOC.volume.innerText = d.volume.toLocaleString();
+            }
             if (cachedOC.delta && d.delta !== undefined) cachedOC.delta.innerText = d.delta.toFixed(2);
             if (cachedOC.theta && d.theta !== undefined) cachedOC.theta.innerText = d.theta.toFixed(2);
             if (cachedOC.iv && d.iv !== undefined) cachedOC.iv.innerText = `${(d.iv || 0).toFixed(1)}%`;
@@ -295,7 +391,7 @@ function updateGlobalPnL() {
             totalPnL += pnl;
         }
     }
-    
+
     const pnlEl = document.getElementById('account-pnl');
     if (pnlEl) {
         pnlEl.innerText = `₹${formatPrice(totalPnL)}`;
@@ -337,7 +433,7 @@ async function fetchHistoricalCandles() {
                 .filter(c => c && c.time && c.open != null && c.high != null && c.low != null && c.close != null)
                 .map(c => ({...c, time: c.time}))
                 .sort((a, b) => a.time - b.time);
-            
+
             const unique = [];
             let lastT = null;
             for (const c of valid) {
@@ -346,13 +442,13 @@ async function fetchHistoricalCandles() {
                     lastT = c.time;
                 }
             }
-            
+
             // 3. Store in Cache & Update Chart
             if (unique.length > 0) {
                 await setCachedHistorical(currentInstrumentKey, currentInterval, unique);
             }
             chart.setData(unique);
-            
+
             if (unique.length === 0) {
                 showToast("No candle data found for this interval", "warning");
             }
@@ -367,18 +463,21 @@ async function fetchHistoricalCandles() {
 
 async function selectInstrument(key, name) {
     const oldKey = currentInstrumentKey;
-    
-    // 1. Update state
-    currentInstrumentKey = key;
-    currentInstrumentName = name;
-    localStorage.setItem("currentInstrumentKey", key);
-    localStorage.setItem("currentInstrumentName", name);
+
+    // 1. Update state (store persists to localStorage automatically)
+    state.batch({ currentInstrumentKey: key, currentInstrumentName: name });
 
     updateElementText('current-instrument', name);
     updateElementText('oc-instrument-name', name);
     updateElementText('inst-ltp', '₹--');
     updateElementText('inst-volume', 'Vol: --');
-    
+
+    // Reset OC expiry selector when instrument changes to avoid stale expiry reuse.
+    const ocExpiry = document.getElementById('oc-expiry-select');
+    if (ocExpiry) {
+        ocExpiry.innerHTML = '<option value="">Select Expiry</option>';
+    }
+
     // 2. Unsubscribe from old if appropriate
     if (oldKey && shouldUnsubscribe(oldKey)) {
         ws.send({ action: 'unsubscribe', instrument_key: oldKey });
@@ -386,10 +485,14 @@ async function selectInstrument(key, name) {
 
     // 3. Subscribe to new
     ws.send({ action: 'subscribe', instrument_key: currentInstrumentKey });
-    
+
     chart.clear();
     await fetchHistoricalCandles();
-    await refreshOverlay();
+    await scheduleOverlayRefresh(true);
+
+    // Refresh OC insight for index instruments
+    _lastOcKey = null; // force re-fetch on instrument change
+    refreshOcInsight();
 }
 
 async function placeManualOrder(side) {
@@ -435,6 +538,9 @@ async function refreshAccountSummary() {
 }
 
 async function refreshPositions() {
+    if (!isDocumentVisible()) return;
+    if (!isBottomTabActive('positions')) return;
+
     try {
         const { data } = await api.getPositions();
         const list = document.getElementById("positions-body");
@@ -444,14 +550,14 @@ async function refreshPositions() {
         for (const key of domNodes.keys()) {
             if (key.startsWith('pos-')) domNodes.delete(key);
         }
-        
+
         list.innerHTML = "";
-        
+
         if (!data || data.length === 0) {
             list.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--text-muted)">No open positions</td></tr>`;
             return;
         }
-        
+
         let totalPnL = 0;
         data.forEach(p => {
             totalPnL += (p.pnl || 0);
@@ -495,28 +601,129 @@ async function refreshPositions() {
 
 async function refreshTrades() {
     try {
-        const data = await api.getTrades();
         const list = document.getElementById("trades-body");
         if (!list) return;
-        list.innerHTML = "";
-        
-        const trades = data.data || [];
-        if (trades.length === 0) {
-            list.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted)">No trades today</td></tr>`;
+
+        // Paper trades come from DB; live trades from Upstox API — fetch both and merge.
+        const [paperRes, liveRes] = await Promise.allSettled([
+            api.getPaperTrades(),
+            api.getTrades(),
+        ]);
+
+        const paperTrades = (paperRes.status === 'fulfilled' ? paperRes.value.data : null) || [];
+        const liveTrades  = (liveRes.status  === 'fulfilled' ? liveRes.value.data  : null) || [];
+
+        // Normalize both sources to explicit UI fields that match table headers exactly:
+        // Time | Action | Instrument | Price | SL | TP | Mode
+        const normPaper = paperTrades.map(t => ({
+            time: t.timestamp,
+            action: (t.action || '-').toUpperCase(),
+            instrument: t.instrument_key?.split('|')[1] || t.instrument_key || '-',
+            instrument_full: t.instrument_key || '-',
+            price: t.price,
+            stop_loss: t.stop_loss,
+            take_profit: t.take_profit,
+            mode: t.status === 'live' ? '🔴 Live' : '📋 Paper',
+            option_side: t.metadata?.option_side || null,
+            strike_price: t.metadata?.strike_price ?? null,
+            expiry_date: t.metadata?.expiry_date || null,
+            underlying: t.metadata?.underlying || null,
+        }));
+
+        const normLive = liveTrades.map(t => ({
+            time: t.order_timestamp,
+            action: (t.transaction_type || t.side || '-').toUpperCase(),
+            instrument: t.tradingsymbol || t.instrument_key?.split('|')[1] || t.instrument_token || '-',
+            instrument_full: t.instrument_key || t.instrument_token || '-',
+            price: t.average_price ?? t.price,
+            stop_loss: null,
+            take_profit: null,
+            mode: '🔴 Live',
+            option_side: null,
+            strike_price: null,
+            expiry_date: null,
+            underlying: null,
+        }));
+
+        const merged = [...normLive, ...normPaper].sort((a, b) => {
+            const ta = new Date(a.time || 0).getTime();
+            const tb = new Date(b.time || 0).getTime();
+            return (isNaN(tb) ? 0 : tb) - (isNaN(ta) ? 0 : ta);
+        });
+
+        const nextKeys = new Set();
+        if (merged.length === 0) {
+            list.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--text-muted)">No trades today</td></tr>`;
+            tradeRowCache.clear();
             return;
         }
-        
-        trades.reverse().forEach(t => {
-            const row = document.createElement("tr");
-            row.innerHTML = `
-                <td class="text-muted" style="font-size:0.7rem">${new Date(t.order_timestamp).toLocaleTimeString()}</td>
-                <td class="mono" style="font-size:0.75rem">${t.tradingsymbol}</td>
-                <td><span class="badge ${t.transaction_type.toLowerCase()}">${t.transaction_type}</span></td>
-                <td>${t.quantity}</td>
-                <td class="mono">₹${formatPrice(t.average_price)}</td>
+
+        // Remove empty-state row if present
+        if (list.children.length === 1 && list.children[0].children.length === 1) {
+            list.innerHTML = "";
+        }
+
+        const existingRows = new Map();
+        Array.from(list.querySelectorAll("tr[data-row-key]")).forEach(r => existingRows.set(r.dataset.rowKey, r));
+
+        const rows = [];
+        merged.forEach((t, idx) => {
+            const rowKey = `${t.mode}|${t.time || '-'}|${t.action || '-'}|${t.instrument || '-'}|${idx}`;
+            nextKeys.add(rowKey);
+            const sideClass = t.action === 'BUY' ? 'buy' : (t.action.includes('SELL') ? 'sell' : '');
+            const parsedTs = t.time ? new Date(t.time) : null;
+            const timeStr = parsedTs && !isNaN(parsedTs.getTime())
+                ? parsedTs.toLocaleTimeString('en-IN', { hour12: false })
+                : (t.time || '-');
+
+            const slTxt = t.stop_loss != null && Number.isFinite(Number(t.stop_loss))
+                ? `₹${formatPrice(Number(t.stop_loss))}`
+                : '-';
+            const tpTxt = t.take_profit != null && Number.isFinite(Number(t.take_profit))
+                ? `₹${formatPrice(Number(t.take_profit))}`
+                : '-';
+            const optionLabel = formatOptionLabel(t);
+            const instrumentCell = optionLabel
+                ? `${t.instrument || '-'}<br><span class="text-muted" style="font-size:0.65rem">${optionLabel}</span>`
+                : (t.instrument || '-');
+
+            const rowHtml = `
+                <td class="text-muted" style="font-size:0.7rem">${timeStr}</td>
+                <td><span class="badge ${sideClass}">${t.action || '-'}</span></td>
+                <td class="mono" style="font-size:0.75rem">${instrumentCell}</td>
+                <td class="mono">${t.price != null ? `₹${formatPrice(Number(t.price))}` : '-'}</td>
+                <td class="mono text-muted" style="font-size:0.75rem">${slTxt}</td>
+                <td class="mono text-muted" style="font-size:0.75rem">${tpTxt}</td>
+                <td class="text-muted" style="font-size:0.7rem">${t.mode}</td>
             `;
-            list.appendChild(row);
+
+            const prevSerialized = tradeRowCache.get(rowKey);
+            if (prevSerialized !== rowHtml || !existingRows.get(rowKey)) {
+                let row = existingRows.get(rowKey);
+                if (!row) {
+                    row = document.createElement("tr");
+                    row.dataset.rowKey = rowKey;
+                }
+                row.innerHTML = rowHtml;
+                existingRows.set(rowKey, row);
+                tradeRowCache.set(rowKey, rowHtml);
+            }
+            rows.push(existingRows.get(rowKey));
         });
+
+        // Remove stale rows no longer in current data
+        for (const [key, row] of existingRows.entries()) {
+            if (!nextKeys.has(key)) {
+                row.remove();
+                tradeRowCache.delete(key);
+            }
+        }
+
+        // Keep visual order in sync with merged (newest first)
+        const frag = document.createDocumentFragment();
+        rows.forEach(r => r && frag.appendChild(r));
+        list.innerHTML = "";
+        list.appendChild(frag);
     } catch (e) {
         console.error("Failed to refresh trades", e);
     }
@@ -527,47 +734,98 @@ async function refreshSignals() {
         const data = await api.getSignals();
         const list = document.getElementById("signals-body");
         if (!list) return;
-        list.innerHTML = "";
-        
+        const nextKeys = new Set();
+
         const signals = data.data || [];
         if (signals.length === 0) {
             list.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted)">No signals Generated</td></tr>`;
+            signalRowCache.clear();
             return;
         }
-        
-        signals.reverse().forEach(s => {
-            const row = document.createElement("tr");
-            row.innerHTML = `
-                <td class="text-muted" style="font-size:0.7rem">${s.timestamp}</td>
-                <td class="mono" style="font-size:0.75rem">${s.instrument_key}</td>
-                <td><span class="badge ${s.action.toLowerCase()}">${s.action}</span></td>
-                <td class="mono">₹${formatPrice(s.price)}</td>
-                <td>${s.strategy_name}</td>
+
+        if (list.children.length === 1 && list.children[0].children.length === 1) {
+            list.innerHTML = "";
+        }
+
+        const existingRows = new Map();
+        Array.from(list.querySelectorAll("tr[data-row-key]")).forEach(r => existingRows.set(r.dataset.rowKey, r));
+
+        const rows = [];
+
+        signals
+            .slice()
+            .sort((a, b) => {
+                const ta = new Date(a.timestamp || 0).getTime();
+                const tb = new Date(b.timestamp || 0).getTime();
+                return (isNaN(tb) ? 0 : tb) - (isNaN(ta) ? 0 : ta);
+            })
+            .forEach((s, idx) => {
+            const action = (s.action || '-').toUpperCase();
+            const sideClass = action === 'BUY' ? 'buy' : (action.includes('SELL') ? 'sell' : '');
+            const instrument = s.instrument_key || s.instrument || '-';
+            const score = Number.isFinite(Number(s.confidence_score))
+                ? Number(s.confidence_score)
+                : (Number.isFinite(Number(s.confidence)) ? Number(s.confidence) : null);
+            const rowKey = `${s.timestamp || '-'}|${action}|${instrument}|${idx}`;
+            nextKeys.add(rowKey);
+            const rowHtml = `
+                <td class="text-muted" style="font-size:0.7rem">${s.timestamp || '-'}</td>
+                <td><span class="badge ${sideClass}">${action}</span></td>
+                <td class="mono" style="font-size:0.75rem">${instrument}</td>
+                <td class="mono">${s.price != null ? `₹${formatPrice(Number(s.price))}` : '-'}</td>
+                <td>${score != null ? score : '<span class="text-muted">Signal only</span>'}</td>
             `;
-            list.appendChild(row);
+
+            const prevSerialized = signalRowCache.get(rowKey);
+            if (prevSerialized !== rowHtml || !existingRows.get(rowKey)) {
+                let row = existingRows.get(rowKey);
+                if (!row) {
+                    row = document.createElement("tr");
+                    row.dataset.rowKey = rowKey;
+                }
+                row.innerHTML = rowHtml;
+                existingRows.set(rowKey, row);
+                signalRowCache.set(rowKey, rowHtml);
+            }
+            rows.push(existingRows.get(rowKey));
         });
+
+        for (const [key, row] of existingRows.entries()) {
+            if (!nextKeys.has(key)) {
+                row.remove();
+                signalRowCache.delete(key);
+            }
+        }
+
+        const frag = document.createDocumentFragment();
+        rows.forEach(r => r && frag.appendChild(r));
+        list.innerHTML = "";
+        list.appendChild(frag);
     } catch (e) {
         console.error("Failed to refresh signals", e);
     }
 }
 
 async function refreshOrderBook() {
+    if (!isDocumentVisible()) return;
+    if (!isBottomTabActive('orderbook')) return;
+
     try {
         const { data } = await api.getOrderBook();
         const list = document.getElementById("order-book-body");
         if (!list) return;
         list.innerHTML = "";
-        
+
         if (!data || data.length === 0) {
             list.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--text-muted)">No orders today</td></tr>`;
             return;
         }
-        
+
         data.reverse().forEach(o => {
             const row = document.createElement("tr");
             const sideClass = o.transaction_type === 'BUY' ? 'buy' : 'sell';
             const statusClass = (o.status === 'COMPLETE' || o.status === 'FILLED') ? 'text-success' : (o.status === 'REJECTED' || o.status === 'CANCELLED') ? 'text-danger' : 'text-warning';
-            
+
             row.innerHTML = `
                 <td class="text-muted small">${new Date(o.order_timestamp).toLocaleTimeString()}</td>
                 <td class="mono small">${o.tradingsymbol}</td>
@@ -609,7 +867,7 @@ async function refreshStatus() {
 function updateEngineStatus(status) {
     const text = document.getElementById("engine-status-text");
     if (!text) return;
-    
+
     if (status.initialized) {
         text.innerText = "Active";
         text.className = "text-success";
@@ -619,12 +877,190 @@ function updateEngineStatus(status) {
         text.className = "text-warning";
         engineActive = false;
     }
-    
+
     const autoToggle = document.getElementById("toggle-automode");
     if (autoToggle) autoToggle.checked = status.auto_mode;
-    
+
     document.getElementById("auto-mode-card")?.classList.toggle("active", status.auto_mode);
+
+    // Render OC insight from engine cache if available
+    if (status.oc_insight) {
+        renderOcInsight(status.oc_insight);
+    }
 }
+
+function setExecutionProbeResult(html, state = 'neutral') {
+    const box = document.getElementById('execution-probe-result');
+    if (!box) return;
+    box.classList.remove('probe-pass', 'probe-fail', 'probe-neutral');
+    box.classList.add(`probe-${state}`);
+    box.innerHTML = html;
+}
+
+function applyExecutionProbeState() {
+    const card = document.getElementById('execution-probe-card');
+    const toggle = document.querySelector('#execution-probe-card .execution-probe-toggle');
+    if (!card || !toggle) return;
+
+    const collapsed = localStorage.getItem('executionProbeCollapsed') === 'true';
+    card.classList.toggle('collapsed', collapsed);
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+}
+
+window.toggleExecutionProbe = () => {
+    const card = document.getElementById('execution-probe-card');
+    const toggle = document.querySelector('#execution-probe-card .execution-probe-toggle');
+    if (!card || !toggle) return;
+
+    const collapsed = !card.classList.contains('collapsed');
+    card.classList.toggle('collapsed', collapsed);
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    localStorage.setItem('executionProbeCollapsed', String(collapsed));
+};
+
+async function collectExecutionProbeSnapshot() {
+    const [statusRes, signalsRes, tradesRes, orderBookRes] = await Promise.allSettled([
+        api.getStatus(),
+        api.getSignals(),
+        api.getPaperTrades(),
+        api.getOrderBook(),
+    ]);
+
+    const status = statusRes.status === 'fulfilled' ? statusRes.value : {};
+    const signalList = signalsRes.status === 'fulfilled'
+        ? (signalsRes.value.data || signalsRes.value.signals || [])
+        : [];
+    const tradeList = tradesRes.status === 'fulfilled'
+        ? (tradesRes.value.data || tradesRes.value.trades || [])
+        : [];
+    const orderList = orderBookRes.status === 'fulfilled'
+        ? (orderBookRes.value.data || [])
+        : [];
+
+    const filledOrders = orderList.filter(o => ['COMPLETE', 'FILLED'].includes((o.status || '').toUpperCase())).length;
+    const rejectedOrders = orderList.filter(o => ['REJECTED', 'CANCELLED'].includes((o.status || '').toUpperCase())).length;
+
+    return {
+        status,
+        paperTrading: Boolean(status.paper_trading),
+        signalsToday: Number(status.signals_today ?? signalList.length),
+        tradesToday: Number(status.trades_today ?? tradeList.length),
+        filledOrders,
+        rejectedOrders,
+    };
+}
+
+window.runExecutionProbe = async (action = 'BUY') => {
+    setExecutionProbeResult('Running verification...', 'neutral');
+    showToast('Running execution robustness probe...', 'info');
+
+    try {
+        const before = await collectExecutionProbeSnapshot();
+        const probeAction = String(action || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+        const forceLive = !before.paperTrading;
+
+        const triggerResult = await api.triggerTestSignal(currentInstrumentKey, probeAction, forceLive);
+        // Note: triggerTestSignal already runs the full pipeline (_handle_signal).
+        // We do NOT call runCycle() here — that would evaluate the strategy independently
+        // and potentially place a second duplicate order.
+        await new Promise(resolve => setTimeout(resolve, 1400));
+
+        await Promise.all([
+            refreshStatus(),
+            refreshSignals(),
+            refreshTrades(),
+            refreshOrderBook(),
+            refreshPositions(),
+        ]);
+
+        const after = await collectExecutionProbeSnapshot();
+
+        const hasExecutionEvidence =
+            (after.tradesToday > before.tradesToday) || (after.filledOrders > before.filledOrders);
+
+        const checks = [
+            {
+                label: 'Engine initialized',
+                pass: Boolean(after.status.initialized),
+                detail: after.status.initialized ? 'Engine is active' : 'Engine not initialized',
+            },
+            {
+                label: 'Strategy loaded',
+                pass: Array.isArray(after.status.active_strategies) && after.status.active_strategies.length > 0,
+                detail: `Strategies: ${(after.status.active_strategies || []).length}`,
+            },
+            {
+                label: 'Signal recorded',
+                pass: (after.signalsToday > before.signalsToday) || hasExecutionEvidence,
+                detail: `${before.signalsToday} -> ${after.signalsToday}`,
+            },
+            {
+                label: 'Trade or filled order observed',
+                pass: hasExecutionEvidence,
+                detail: `Trades ${before.tradesToday} -> ${after.tradesToday}, Filled ${before.filledOrders} -> ${after.filledOrders}`,
+            },
+            {
+                label: 'No rejection spike',
+                pass: after.rejectedOrders <= before.rejectedOrders,
+                detail: `Rejected ${before.rejectedOrders} -> ${after.rejectedOrders}`,
+            },
+        ];
+
+        const modeText = after.paperTrading ? 'Paper mode' : 'Live mode';
+        const signalStatus = triggerResult?.status || 'unknown';
+        const requestedLeg = probeAction === 'BUY' ? 'CE' : 'PE';
+        const resolvedLeg = triggerResult?.result?.option_side || triggerResult?.result?.resolved_option_side || '-';
+        const legCheckPass = resolvedLeg === '-' ? null : resolvedLeg === requestedLeg;
+        const executionMode = triggerResult?.result?.execution_mode || 'unknown';
+        const entryOrderIds = Array.isArray(triggerResult?.result?.gtt_order_ids) ? triggerResult.result.gtt_order_ids : [];
+        const executionError = triggerResult?.result?.execution_error || null;
+        const executionErrorCode = triggerResult?.result?.execution_error_code || null;
+        const liveModeNeedsBrokerProof = !after.paperTrading;
+
+        if (legCheckPass !== null) {
+            checks.splice(2, 0, {
+                label: `${probeAction} mapped to ${requestedLeg}`,
+                pass: legCheckPass,
+                detail: `Resolved option side: ${resolvedLeg}`,
+            });
+        }
+
+        if (liveModeNeedsBrokerProof) {
+            checks.splice(4, 0, {
+                label: 'Broker accepted live order',
+                pass: executionMode === 'live' && entryOrderIds.length > 0,
+                detail: entryOrderIds.length > 0
+                    ? `Order IDs: ${entryOrderIds.join(', ')}`
+                    : `No live order ID returned${executionError ? ` (${executionError})` : ''}`,
+            });
+        }
+
+        const failed = checks.filter(c => !c.pass);
+        const isPass = failed.length === 0;
+
+        const lines = [
+            `<div class="probe-title">${isPass ? 'PASS' : 'ATTENTION'} - ${modeText}</div>`,
+            `<div class="probe-subtitle">Instrument: ${currentInstrumentName} | Trigger: ${signalStatus} | Action: ${probeAction}</div>`,
+            '<ul class="probe-list">',
+            ...checks.map(c => `<li class="${c.pass ? 'pass' : 'fail'}">${c.pass ? 'OK' : 'FAIL'} - ${c.label} (${c.detail})</li>`),
+            '</ul>',
+        ];
+
+        if (!after.paperTrading) {
+            lines.push(`<div class="probe-note">Live mode check: order ids ${entryOrderIds.length > 0 ? entryOrderIds.join(', ') : 'not available'}; keep watching Order Book for COMPLETE/FILLED statuses.</div>`);
+            if (executionErrorCode === 'UDAPI1154') {
+                lines.push('<div class="probe-note">Upstox blocked this request due to static IP restriction (UDAPI1154). Add your current public IP to allowed IPs in Upstox app settings or run from an allowed network.</div>');
+            }
+        }
+
+        setExecutionProbeResult(lines.join(''), isPass ? 'pass' : 'fail');
+        showToast(isPass ? 'Execution probe passed' : 'Execution probe found issues', isPass ? 'success' : 'warning');
+    } catch (e) {
+        console.error('Execution probe failed', e);
+        setExecutionProbeResult('Probe failed to run. Check backend logs or auth status.', 'fail');
+        showToast('Execution probe failed', 'error');
+    }
+};
 
 async function checkAuth() {
     try {
@@ -632,7 +1068,7 @@ async function checkAuth() {
         const data = await res.json();
         const badge = document.getElementById("auth-status");
         const text = document.getElementById("auth-status-text");
-        
+
         if (data.auth === "valid") {
             badge.className = "status-badge online";
             text.innerText = "Auth Valid";
@@ -665,7 +1101,7 @@ function shouldUnsubscribe(key, leavingPositions = false) {
             if (inPositions) return false;
         }
     }
-    
+
     return true;
 }
 
@@ -719,7 +1155,7 @@ async function refreshWatchlist() {
         const data = await api.getWatchlist();
         const container = document.getElementById("watchlist-items");
         if (!container) return;
-        
+
         const items = data.data || [];
         // Also refresh the name map for active signals
         _watchlistNameMap = {};
@@ -863,38 +1299,43 @@ function _resolveInstrument(instrumentKey) {
 }
 
 async function refreshActiveSignals() {
+    if (!isDocumentVisible()) return;
+    const showInMainWatchlist = currentMainView === 'watchlist';
+    const showInBottomTab = isBottomTabActive('active-signals');
+    if (!showInMainWatchlist && !showInBottomTab) return;
+
     try {
         const data = await api.getActiveSignals();
         const signals = data.data || [];
-        
+
         // Ensure name map is populated
         if (Object.keys(_watchlistNameMap).length === 0) {
             await _refreshWatchlistNameMap();
         }
-        
+
         // Build rows HTML once, apply to both tables
         const targets = ['active-signals-body', 'active-signals-body-main'];
-        
+
         targets.forEach(targetId => {
             const tbody = document.getElementById(targetId);
             if (!tbody) return;
             tbody.innerHTML = "";
-            
+
             if (signals.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:20px; color:var(--text-muted)">No active signals</td></tr>`;
                 return;
             }
-            
+
             signals.forEach(s => {
                 const row = document.createElement("tr");
                 if (s.status === 'active') row.classList.add('active-signal-row');
-                
+
                 const inst = _resolveInstrument(s.instrument_key);
                 const time = s.created_at ? new Date(s.created_at).toLocaleTimeString('en-IN', { hour12: false }) : '--';
-                const statusBadge = s.status === 'active' 
+                const statusBadge = s.status === 'active'
                     ? '<span class="badge" style="background:rgba(0,208,132,0.15); color:#00d084;">ACTIVE</span>'
                     : '<span class="badge" style="background:rgba(139,139,158,0.15); color:#8b8b9e;">CLOSED</span>';
-                
+
                 row.innerHTML = `
                     <td class="text-muted" style="font-size:0.7rem">${time}</td>
                     <td style="font-size:0.75rem">${s.strategy_name}</td>
@@ -946,28 +1387,25 @@ window.deleteActiveSignal = async (id) => {
 window.selectInstrument = selectInstrument;
 window.switchBottomTab = (tabId) => switchTab('bottom-panel', `tab-${tabId}`);
 window.setChartTimeframe = (interval) => {
-    currentInterval = interval;
-    localStorage.setItem("currentInterval", interval);
+    state.set('currentInterval', interval);
 
-    // Update timeframe buttons
-    document.querySelectorAll('[onclick^="setChartTimeframe"]').forEach(btn => {
-        btn.classList.remove('btn-primary');
-        btn.classList.add('btn-outline');
-    });
-    
-    // This is a bit hacky because buttons don't have IDs in index.html,
-    // let's just find the one with the matching text or re-render based on interval.
-    // Actually, I'll add IDs to them in index.html for reliability if possible, 
-    // but for now I'll just use the event target logic or iterate.
-    const btns = document.querySelectorAll('[onclick^="setChartTimeframe"]');
-    btns.forEach(b => {
-        if (b.getAttribute('onclick').includes(interval)) {
-            b.classList.remove('btn-outline');
-            b.classList.add('btn-primary');
+    // Update timeframe buttons exactly by ID
+    const allIntervals = ['1minute', '5minute', '15minute', '30minute', '1hour', 'day'];
+
+    allIntervals.forEach(t => {
+        const btn = document.getElementById(`tf-${t}`);
+        if (btn) {
+            if (t === interval) {
+                btn.classList.remove('btn-outline');
+                btn.classList.add('btn-primary');
+            } else {
+                btn.classList.remove('btn-primary');
+                btn.classList.add('btn-outline');
+            }
         }
     });
 
-    fetchHistoricalCandles().then(() => refreshOverlay());
+    fetchHistoricalCandles().then(() => scheduleOverlayRefresh(true));
 };
 window.loginUpstox = () => window.location.href = "/auth/login";
 
@@ -992,12 +1430,60 @@ window.runCycle = async () => {
 
 // window.toggleSidebar removed
 
-window.triggerTestSignal = async () => {
+window.clearTradeHistory = async () => {
+    if (!confirm('Clear all trade history entries?')) return;
     try {
-        showToast("Triggering test signal...", "info");
-        await api.triggerTestSignal(currentInstrumentKey);
+        await api.clearPaperTrades();
+        tradeRowCache.clear();
+        await refreshTrades();
+        showToast('Trade history cleared', 'success');
+    } catch (e) {
+        showToast('Failed to clear trade history', 'error');
+    }
+};
+
+window.triggerTestSignal = async () => {
+    const action = 'BUY';
+    try {
+        showToast(`Triggering ${action} test signal...`, "info");
+        const res = await api.triggerTestSignal(currentInstrumentKey, action);
+        await Promise.all([refreshStatus(), refreshSignals()]);
+        const optSide = res?.result?.option_side || res?.result?.resolved_option_side || 'N/A';
+        setExecutionProbeResult(`Manual ${action} signal queued for ${currentInstrumentName}. Option side: ${optSide}.`, 'neutral');
     } catch (e) {
         showToast("Failed to trigger test signal", "error");
+        setExecutionProbeResult('Manual signal failed. Check engine/auth status.', 'fail');
+    }
+};
+
+window.triggerTestSignalWithAction = async (action = 'BUY') => {
+    const side = String(action || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+    try {
+        showToast(`Triggering ${side} test signal...`, 'info');
+        const status = await api.getStatus();
+        const forceLive = status && status.paper_trading === false;
+        const res = await api.triggerTestSignal(currentInstrumentKey, side, forceLive);
+        await Promise.all([refreshStatus(), refreshSignals(), refreshTrades(), refreshOrderBook()]);
+        const requestedLeg = side === 'BUY' ? 'CE' : 'PE';
+        const optSide = res?.result?.option_side || res?.result?.resolved_option_side || 'N/A';
+        const strike = res?.result?.strike_price != null ? Math.round(Number(res.result.strike_price)) : 'N/A';
+        const expiry = res?.result?.expiry_date || 'N/A';
+        const underlying = res?.result?.underlying || currentInstrumentKey;
+        const resolved = res?.result?.resolved_instrument || 'N/A';
+        const execMode = res?.result?.execution_mode || 'unknown';
+        const orderIds = Array.isArray(res?.result?.gtt_order_ids) ? res.result.gtt_order_ids : [];
+        const execError = res?.result?.execution_error || null;
+        const execErrorCode = res?.result?.execution_error_code || null;
+        setExecutionProbeResult(
+            `Manual ${side} signal queued for ${currentInstrumentName}. Expected ${requestedLeg}, resolved ${optSide}.<br>`
+            + `Underlying: ${underlying} | Strike: ${strike} | Expiry: ${expiry}<br>`
+            + `Contract: ${resolved}<br>`
+            + `Mode: ${execMode}${orderIds.length > 0 ? ` | Order IDs: ${orderIds.join(', ')}` : ''}${execError ? ` | Error: ${execError}` : ''}${execErrorCode ? ` | Code: ${execErrorCode}` : ''}`,
+            'neutral'
+        );
+    } catch (e) {
+        showToast(`Failed to trigger ${side} test signal`, 'error');
+        setExecutionProbeResult(`Manual ${side} signal failed. Check engine/auth status.`, 'fail');
     }
 };
 
@@ -1005,12 +1491,12 @@ window.saveSettings = async () => {
     const key = document.getElementById('setting-api-key').value;
     const secret = document.getElementById('setting-api-secret').value;
     const uri = document.getElementById('setting-redirect-uri').value;
-    
+
     const payload = {};
     if (key && !key.includes('...')) payload.API_KEY = key;
     if (secret && !secret.includes('***')) payload.API_SECRET = secret;
     if (uri) payload.REDIRECT_URI = uri;
-    
+
     try {
         await api.saveSettings(payload);
         showToast("API Configuration Saved", "success");
@@ -1023,12 +1509,12 @@ window.saveSandboxSettings = async () => {
     const key = document.getElementById('setting-sandbox-key').value;
     const secret = document.getElementById('setting-sandbox-secret').value;
     const token = document.getElementById('setting-sandbox-token').value;
-    
+
     const payload = {};
     if (key && !key.includes('...')) payload.SANDBOX_API_KEY = key;
     if (secret && !secret.includes('***')) payload.SANDBOX_API_SECRET = secret;
     if (token && !token.includes('***')) payload.SANDBOX_ACCESS_TOKEN = token;
-    
+
     try {
         await api.saveSettings(payload);
         showToast("Sandbox Configuration Saved", "success");
@@ -1043,7 +1529,7 @@ window.saveRiskConfig = async () => {
     const maxLoss = document.getElementById('risk-maxloss').value;
     const maxTrades = document.getElementById('risk-maxtrades').value;
     const side = document.getElementById('setting-trading-side').value;
-    
+
     const payload = {
         trading_capital: parseFloat(capital),
         risk_per_trade_pct: parseFloat(risk),
@@ -1051,9 +1537,9 @@ window.saveRiskConfig = async () => {
         max_open_trades: parseInt(maxTrades),
         trading_side: side
     };
-    
+
     try {
-        await api.updateConfig(payload); 
+        await api.updateConfig(payload);
         showToast("Risk Configuration Saved", "success");
         refreshStatus();
     } catch (e) {
@@ -1098,7 +1584,7 @@ window.saveNotificationSettings = async () => {
     const user = document.getElementById('setting-smtp-user').value;
     const password = document.getElementById('setting-smtp-password').value;
     const recipient = document.getElementById('setting-email-recipient').value;
-    
+
     const payload = {};
     if (channels) payload.NOTIFICATION_CHANNELS = channels;
     if (server) payload.SMTP_SERVER = server;
@@ -1106,7 +1592,7 @@ window.saveNotificationSettings = async () => {
     if (user) payload.SMTP_USER = user;
     if (password && !password.includes('***')) payload.SMTP_PASSWORD = password;
     if (recipient) payload.EMAIL_RECIPIENT = recipient;
-    
+
     try {
         await api.saveSettings(payload);
         showToast("Notification settings saved", "success");
@@ -1114,6 +1600,151 @@ window.saveNotificationSettings = async () => {
         showToast("Failed to save notification settings", "error");
     }
 };
+
+// ── GTT Execution Settings ─────────────────────────────────
+
+window.toggleTrailingGapInput = () => {
+    const mode = document.getElementById('gtt-trailing-gap-mode')?.value;
+    const group = document.getElementById('gtt-custom-gap-group');
+    if (group) group.style.display = mode === 'custom' ? 'block' : 'none';
+};
+
+window.saveExecutionSettings = async () => {
+    const payload = {
+        gtt_product_type: document.getElementById('gtt-product-type')?.value || 'D',
+        gtt_entry_trigger_type: document.getElementById('gtt-entry-trigger')?.value || 'IMMEDIATE',
+        gtt_market_protection: parseInt(document.getElementById('gtt-market-protection')?.value || '-1'),
+        gtt_trailing_sl: !!document.getElementById('gtt-trailing-sl')?.checked,
+        gtt_trailing_gap_mode: document.getElementById('gtt-trailing-gap-mode')?.value || 'auto',
+        gtt_trailing_gap_value: parseFloat(document.getElementById('gtt-trailing-gap-value')?.value || '0'),
+    };
+
+    try {
+        await api.updateConfig(payload);
+
+        // Also save updated SL/TP/trailing multipliers back to the active strategy
+        const slMult = parseFloat(document.getElementById('exec-sl-mult')?.value);
+        const tpMult = parseFloat(document.getElementById('exec-tp-mult')?.value);
+        const trailMult = parseFloat(document.getElementById('exec-trail-mult')?.value);
+        if (slMult > 0 || tpMult > 0 || trailMult > 0) {
+            await saveRiskMultipliersToStrategy(slMult, tpMult, trailMult);
+        }
+
+        showToast("Execution settings saved", "success");
+    } catch (e) {
+        showToast("Failed to save execution settings", "error");
+    }
+};
+
+// ── Risk Level Multiplier Helpers ──────────────────────────
+
+// Strategy-specific key names for SL/TP/trailing multipliers
+const RISK_KEY_MAP = {
+    SuperTrendPro: { sl: 'sl_multiplier', tp: 'tp_multiplier', trail: 'trail_multiplier' },
+    ScalpPro:      { sl: 'sl_atr_multiplier', tp: 'tp_atr_multiplier', trail: 'trailing_atr_mult' },
+};
+
+window.populateRiskLevels = () => {
+    const selector = document.getElementById('strategy-selector');
+    if (!selector || selector.options.length === 0) return;
+    const cls = selector.options[selector.selectedIndex]?.dataset?.class;
+    const name = selector.options[selector.selectedIndex]?.text;
+    const schema = dynamicSchemas[selector.value];
+    if (!schema) return;
+
+    // Show strategy name badge
+    const badge = document.getElementById('exec-risk-strategy-badge');
+    if (badge) badge.textContent = name || cls;
+
+    const keys = RISK_KEY_MAP[cls] || {};
+
+    // Read current values from the dynamic param inputs (Strategy Config tab)
+    const slParam = schema.params.find(p => p.name === keys.sl);
+    const tpParam = schema.params.find(p => p.name === keys.tp);
+    const trailParam = schema.params.find(p => p.name === keys.trail);
+
+    // Try to get live edited values from Strategy Config form first, then fall back to schema defaults
+    const slVal = getParamLiveValue(keys.sl) ?? slParam?.default ?? 1.0;
+    const tpVal = getParamLiveValue(keys.tp) ?? tpParam?.default ?? 2.0;
+    const trailVal = getParamLiveValue(keys.trail) ?? trailParam?.default ?? 1.0;
+
+    document.getElementById('exec-sl-mult').value = slVal;
+    document.getElementById('exec-tp-mult').value = tpVal;
+    document.getElementById('exec-trail-mult').value = trailVal;
+
+    updateRiskExample(slVal, tpVal, trailVal);
+};
+
+function getParamLiveValue(paramName) {
+    if (!paramName) return null;
+    const el = document.querySelector(`.dyn-param[data-name="${paramName}"]`);
+    if (!el) return null;
+    return el.type === 'checkbox' ? el.checked : Number(el.value);
+}
+
+function updateRiskExample(sl, tp, trail) {
+    const box = document.getElementById('exec-risk-example-text');
+    if (!box) return;
+    // Use a realistic ATR example
+    const atr = 15;
+    const entry = 270;
+    const slPrice = (entry - sl * atr).toFixed(2);
+    const tpPrice = (entry + tp * atr).toFixed(2);
+    const trailGap = (trail * atr).toFixed(2);
+    box.innerHTML = `
+        <strong>If ATR = ₹${atr}, Entry = ₹${entry} (BUY):</strong><br>
+        Stop Loss = ₹${entry} − (${sl} × ₹${atr}) = <span style="color:var(--danger);font-weight:600">₹${slPrice}</span><br>
+        Take Profit = ₹${entry} + (${tp} × ₹${atr}) = <span style="color:var(--success);font-weight:600">₹${tpPrice}</span><br>
+        Trailing Gap = ${trail} × ₹${atr} = <span style="color:var(--accent-primary);font-weight:600">₹${trailGap}</span>
+        <span style="font-size:0.7rem;"> (SL follows price at this distance)</span>
+    `;
+}
+
+// Listen for changes on the risk level inputs to update the example live
+['exec-sl-mult', 'exec-tp-mult', 'exec-trail-mult'].forEach(id => {
+    document.getElementById(id)?.addEventListener('input', () => {
+        updateRiskExample(
+            parseFloat(document.getElementById('exec-sl-mult').value) || 1,
+            parseFloat(document.getElementById('exec-tp-mult').value) || 2,
+            parseFloat(document.getElementById('exec-trail-mult').value) || 1
+        );
+    });
+});
+
+async function saveRiskMultipliersToStrategy(sl, tp, trail) {
+    const selector = document.getElementById('strategy-selector');
+    if (!selector || selector.options.length === 0) return;
+    const cls = selector.options[selector.selectedIndex]?.dataset?.class;
+    const keys = RISK_KEY_MAP[cls];
+    if (!keys) return;
+
+    // Update the dynamic param inputs in the Strategy Config tab so they stay in sync
+    const setDynParam = (name, val) => {
+        const el = document.querySelector(`.dyn-param[data-name="${name}"]`);
+        if (el) el.value = val;
+    };
+    if (sl > 0) setDynParam(keys.sl, sl);
+    if (tp > 0) setDynParam(keys.tp, tp);
+    if (trail > 0) setDynParam(keys.trail, trail);
+
+    // Re-apply strategy with updated params (same as clicking "Load Strategy")
+    const strategyClass = selector.options[selector.selectedIndex].dataset.class;
+    const name = selector.options[selector.selectedIndex].text;
+    const paperModeToggle = document.getElementById('toggle-papermode');
+    const isPaperMode = paperModeToggle ? !!paperModeToggle.checked : true;
+
+    const payload = {
+        strategy_class: strategyClass,
+        name: name,
+        instruments: currentInstrumentKey,
+        timeframe: currentInterval,
+        paper_trading: isPaperMode,
+        params: JSON.stringify(getDynamicParams()),
+        replace_existing: true,
+    };
+
+    await api.loadStrategy(payload);
+}
 
 window.testNotification = async (channel = "email") => {
     try {
@@ -1132,23 +1763,23 @@ window.testNotification = async (channel = "email") => {
 async function loadSettingsIntoUI() {
     try {
         const settings = await api.getSettings();
-        
+
         // General
         if (document.getElementById('setting-api-key')) document.getElementById('setting-api-key').value = settings.API_KEY || '';
         if (document.getElementById('setting-redirect-uri')) document.getElementById('setting-redirect-uri').value = settings.REDIRECT_URI || '';
-        
+
         // Sandbox & Modes
         if (document.getElementById('setting-sandbox-key')) document.getElementById('setting-sandbox-key').value = settings.SANDBOX_API_KEY || '';
         if (document.getElementById('toggle-sandboxmode')) document.getElementById('toggle-sandboxmode').checked = settings.USE_SANDBOX || false;
         if (document.getElementById('toggle-papermode')) document.getElementById('toggle-papermode').checked = settings.PAPER_TRADING ?? true;
-        
+
         // Risk
         if (document.getElementById('risk-capital')) document.getElementById('risk-capital').value = settings.TRADING_CAPITAL || 100000;
         if (document.getElementById('risk-pct')) document.getElementById('risk-pct').value = settings.MAX_RISK_PER_TRADE_PCT || 1.0;
         if (document.getElementById('risk-maxloss')) document.getElementById('risk-maxloss').value = settings.MAX_DAILY_LOSS_PCT || 3.0;
         if (document.getElementById('risk-maxtrades')) document.getElementById('risk-maxtrades').value = settings.MAX_OPEN_TRADES || 3;
         if (document.getElementById('setting-trading-side')) document.getElementById('setting-trading-side').value = settings.TRADING_SIDE || 'BOTH';
-        
+
         // Notifications
         if (document.getElementById('setting-notification-channels')) document.getElementById('setting-notification-channels').value = settings.NOTIFICATION_CHANNELS || 'EMAIL';
         if (document.getElementById('setting-smtp-server')) document.getElementById('setting-smtp-server').value = settings.SMTP_SERVER || '';
@@ -1156,7 +1787,18 @@ async function loadSettingsIntoUI() {
         if (document.getElementById('setting-smtp-user')) document.getElementById('setting-smtp-user').value = settings.SMTP_USER || '';
         if (document.getElementById('setting-smtp-password')) document.getElementById('setting-smtp-password').value = settings.SMTP_PASSWORD || '';
         if (document.getElementById('setting-email-recipient')) document.getElementById('setting-email-recipient').value = settings.EMAIL_RECIPIENT || '';
-        
+
+        // GTT Execution settings
+        if (document.getElementById('gtt-product-type')) document.getElementById('gtt-product-type').value = settings.GTT_PRODUCT_TYPE || 'D';
+        if (document.getElementById('gtt-entry-trigger')) document.getElementById('gtt-entry-trigger').value = settings.GTT_ENTRY_TRIGGER_TYPE || 'IMMEDIATE';
+        if (document.getElementById('gtt-market-protection')) document.getElementById('gtt-market-protection').value = String(settings.GTT_MARKET_PROTECTION ?? -1);
+        if (document.getElementById('gtt-trailing-sl')) document.getElementById('gtt-trailing-sl').checked = settings.GTT_TRAILING_SL ?? true;
+        if (document.getElementById('gtt-trailing-gap-mode')) {
+            document.getElementById('gtt-trailing-gap-mode').value = settings.GTT_TRAILING_GAP_MODE || 'auto';
+            toggleTrailingGapInput();
+        }
+        if (document.getElementById('gtt-trailing-gap-value')) document.getElementById('gtt-trailing-gap-value').value = settings.GTT_TRAILING_GAP_VALUE || 0;
+
     } catch (e) {
         console.error("Failed to load settings into UI", e);
     }
@@ -1165,23 +1807,32 @@ async function loadSettingsIntoUI() {
 window.loadStrategy = async () => {
     const selector = document.getElementById('strategy-selector');
     if (!selector) return;
-    
+
     const strategyClass = selector.options[selector.selectedIndex].dataset.class;
     const name = selector.options[selector.selectedIndex].text;
-    
+    const paperModeToggle = document.getElementById('toggle-papermode');
+    const isPaperMode = paperModeToggle ? !!paperModeToggle.checked : true;
+
     const payload = {
         strategy_class: strategyClass,
         name: name,
         instruments: currentInstrumentKey,
         timeframe: currentInterval,
-        paper_trading: true // Initial default
+        paper_trading: isPaperMode,
+        params: JSON.stringify(getDynamicParams()),
+        replace_existing: true,
     };
 
     try {
         await api.loadStrategy(payload);
-        showToast("Strategy Loaded Successfully", "success");
+        showToast("Strategy applied to engine successfully", "success");
         refreshStatus();
-        refreshOverlay();
+        await scheduleOverlayRefresh(true);
+
+        const autoToggle = document.getElementById('toggle-automode');
+        if (!autoToggle || !autoToggle.checked) {
+            showToast("Auto Mode is OFF: chart can show setup signals, but engine won't execute until Auto Mode is enabled.", "warning");
+        }
     } catch (e) {
         showToast("Failed to load strategy", "error");
     }
@@ -1205,11 +1856,11 @@ async function fetchStrategySchemas() {
             api.getStrategySchemas(),
             api.getStatus()
         ]);
-        
+
         const selector = document.getElementById("strategy-selector");
         if (!selector) return;
         selector.innerHTML = "";
-        
+
         data.strategies.forEach(s => {
             dynamicSchemas[s.id] = s;
             const opt = document.createElement("option");
@@ -1218,11 +1869,11 @@ async function fetchStrategySchemas() {
             opt.innerText = s.name;
             selector.appendChild(opt);
         });
-        
+
         // Select matching strategy from engine status or default to index 0
         const targetClass = status.active_strategy_class;
         let selectedIdx = 0;
-        
+
         if (targetClass) {
             for (let i = 0; i < selector.options.length; i++) {
                 if (selector.options[i].dataset.class === targetClass) {
@@ -1231,11 +1882,26 @@ async function fetchStrategySchemas() {
                 }
             }
         }
-        
+
         if (selector.options.length > 0) {
             selector.selectedIndex = selectedIdx;
+            // Merge saved params from engine into schema defaults for the selected strategy
+            const activeStrats = status.active_strategies || [];
+            const selectedClass = selector.options[selectedIdx]?.dataset?.class;
+            const activeSchema = dynamicSchemas[selector.value];
+            if (activeSchema && selectedClass) {
+                const matchingStrat = activeStrats.find(s => s.name === activeSchema.name);
+                if (matchingStrat && matchingStrat.params) {
+                    activeSchema.params.forEach(p => {
+                        if (matchingStrat.params[p.name] !== undefined) {
+                            p.default = matchingStrat.params[p.name];
+                        }
+                    });
+                }
+            }
             window.renderDynamicStrategyForm();
-            refreshOverlay(); 
+            populateRiskLevels();
+            scheduleOverlayRefresh(true);
         }
     } catch(e) {
         console.error("Failed to load strategy schemas", e);
@@ -1248,16 +1914,16 @@ window.renderDynamicStrategyForm = () => {
     const sid = selector.value;
     const schema = dynamicSchemas[sid];
     if (!schema) return;
-    
+
     const container = document.getElementById("dynamic-strategy-container");
     if (!container) return;
     container.innerHTML = "";
-    
+
     schema.params.forEach(p => {
         const div = document.createElement('div');
         div.className = "form-group";
         div.style.marginTop = "8px";
-        
+
         if (p.type === 'boolean') {
             div.innerHTML = `
                 <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--text-secondary);">
@@ -1291,16 +1957,18 @@ function getDynamicParams() {
 async function refreshOverlay() {
     if (!currentInstrumentKey) return;
     const selector = document.getElementById("strategy-selector");
-    let cls = selector?.options[selector.selectedIndex]?.dataset?.class;
-    // Fallback to default strategy if selector isn't populated yet
-    if (!cls) cls = "SuperTrendPro";
-    
+    // Do not fallback to an arbitrary strategy class before schemas are loaded,
+    // otherwise we trigger expensive wrong overlays and noisy warnings.
+    if (!selector || selector.options.length === 0) return;
+    const cls = selector.options[selector.selectedIndex]?.dataset?.class;
+    if (!cls) return;
+
     // Show loading state in the HUD
     const hud = document.getElementById("strategy-hud-container");
     if (hud && hud.innerText.includes('Waiting')) {
         hud.innerHTML = `<div style="padding: 16px; text-align: center; color: var(--accent-primary); font-size: 0.8rem;">⏳ Loading strategy data...</div>`;
     }
-    
+
     await fetchStrategyOverlay(currentInstrumentKey, currentInterval, cls, getDynamicParams());
 }
 
@@ -1313,21 +1981,21 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
             } else {
                 renderStrategyHUDEmpty("No metrics returned — strategy may need more candle data.");
             }
-            
+
             if (res.overlay && res.overlay.length > 0) {
                 const primarySeries = res.overlay.filter(pt => pt.supertrend !== null).map(pt => ({
                     time: Math.floor(pt.time),
                     value: pt.supertrend,
                     color: pt.trend === 1 ? '#00d084' : '#ff4757'
                 }));
-                
+
                 // Secondary series (e.g. Slow EMA for ScalpPro)
                 const secondarySeries = res.overlay.filter(pt => pt.upper !== null).map(pt => ({
                     time: Math.floor(pt.time),
                     value: pt.upper,
                     color: '#FF9800' // Distinct color for secondary line
                 }));
-                
+
                 const markers = [];
                 let lastTrend = null;
                 res.overlay.forEach(pt => {
@@ -1356,89 +2024,52 @@ async function fetchStrategyOverlay(instrumentKey, interval, strategyClass, para
     }
 }
 
-function renderStrategyHUDEmpty(message) {
-    const hud = document.getElementById("strategy-hud-container");
-    if (!hud) return;
-    hud.innerHTML = `<div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
-        <div style="margin-bottom: 4px;">📊 SuperTrend Pro v6.3</div>
-        <div style="color: var(--accent-secondary);">${message}</div>
-    </div>`;
+// ── OC Insight Panel ────────────────────────────────────────────
+
+let _lastOcKey = null;
+let _lastOcInsightAt = 0;
+const OC_INSIGHT_REFRESH_MS = 20000;
+
+async function refreshOcInsight() {
+    const container = document.getElementById("oc-insight-container");
+    if (!container || !currentInstrumentKey) return;
+    if (document.visibilityState !== 'visible') return;
+
+    // Use the current instrument if it's an index, otherwise default to Nifty 50
+    const ocKey = currentInstrumentKey.includes("INDEX")
+        ? currentInstrumentKey
+        : "NSE_INDEX|Nifty 50";
+
+    // Throttle repeated requests while still allowing periodic updates for the same key.
+    const now = Date.now();
+    if (_lastOcKey === ocKey && (now - _lastOcInsightAt) < OC_INSIGHT_REFRESH_MS) return;
+
+    container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--accent-primary); font-size: 0.75rem;">⏳ Loading OC analysis...</div>`;
+
+    try {
+        const res = await api.getOptionChainAnalysis(ocKey);
+        if (res.status !== "success" || !res.analysis) {
+            container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.75rem;">${res.message || 'No data'}</div>`;
+            return;
+        }
+        _lastOcKey = ocKey;
+        _lastOcInsightAt = now;
+        renderOcInsight(res.analysis, res.expiry_date);
+    } catch (e) {
+        container.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--accent-danger); font-size: 0.75rem;">Failed to load OC analysis</div>`;
+    }
 }
 
-function renderStrategyHUD(strategy) {
-    const m = strategy.latest_metrics;
-    if (!m) {
-        renderStrategyHUDEmpty("No metrics data available.");
-        return;
-    }
-    
-    // Helper to format rows identical to TradingView
-    const bgHdr = "background: #1e222d; color: white;";
-    const bgRow = "background: #2a2e39; color: white;";
-    const bgCyn = "background: rgba(0, 188, 212, 0.2); color: #00bcd4;";
-    const bgOrn = "background: rgba(255, 152, 0, 0.2); color: #ff9800;";
-    
-    const cGrn = "background: rgba(76, 175, 80, 0.2); color: #4caf50;";
-    const cRed = "background: rgba(244, 67, 54, 0.2); color: #ff5252;";
-    const cYlw = "background: rgba(255, 235, 59, 0.2); color: #ffeb3b;";
-    
-    const passCol = (ok) => ok ? cGrn : cRed;
-    
-    let html = `<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #404040; font-family: monospace; font-size: 0.75rem;">`;
-    
-    const addRow = (label, val, bgLabel, bgVal) => {
-        html += `<div style="padding: 4px 8px; ${bgLabel}">${label}</div>`;
-        html += `<div style="padding: 4px 8px; ${bgVal}">${val}</div>`;
-    };
-    
-    addRow("Metric", "Value", bgHdr, bgHdr);
-    
-    // Safely render — not all metrics may be present
-    if (m.tf_profile) addRow("TF profile", `${m.tf_profile} (${m.tf_mode || ''})`, bgCyn, bgCyn);
-    if (m.exit_mode) addRow("Exit mode", m.exit_mode, bgCyn, bgCyn);
-    if (m.trend) addRow("ST Trend", m.trend, bgRow, m.trend === "LONG" ? cGrn : cRed);
-    
-    if (m.hard_gates) {
-        if (m.hard_gates.dual_st) addRow("H1 Dual ST", m.hard_gates.dual_st, bgOrn, m.hard_gates.dual_st === "AGREE" ? cGrn : cRed);
-        if (m.hard_gates.consecutive) {
-            let consecOk = parseInt(m.hard_gates.consecutive.split('/')[0]) >= parseInt(m.hard_gates.consecutive.split('/')[1]);
-            addRow("H2 Consec", `${m.hard_gates.consecutive} ${consecOk ? 'PASS' : 'FAIL'}`, bgOrn, passCol(consecOk));
-        }
-    }
-    
-    if (m.soft_filters) {
-        if (m.soft_filters.score !== undefined) addRow("Soft score", m.soft_filters.score, bgRow, cYlw);
-        if (m.soft_filters.adx) addRow("S1 ADX", `${m.soft_filters.adx.value} ${m.soft_filters.adx.pass ? 'PASS' : 'FAIL'}`, bgRow, passCol(m.soft_filters.adx.pass));
-        if (m.soft_filters.volume) addRow("S2 Volume", m.soft_filters.volume.pass ? "SURGE" : "FLAT", bgRow, passCol(m.soft_filters.volume.pass));
-        if (m.soft_filters.atr_pct) addRow("S3 ATR%", `${m.soft_filters.atr_pct.value}%`, bgRow, passCol(m.soft_filters.atr_pct.pass));
-        if (m.soft_filters.roc) addRow("S4 ROC", `${m.soft_filters.roc.value}%`, bgRow, passCol(m.soft_filters.roc.pass));
-        if (m.soft_filters.bb_squeeze) {
-            let bb = m.soft_filters.bb_squeeze;
-            addRow("S5 BB", bb.state, bgRow, bb.pass ? cGrn : (bb.state === 'SQUEEZE' ? cYlw : cRed));
-        }
-    }
-    
-    if (m.bars_in_trend !== undefined) addRow("Bars held", m.bars_in_trend, bgRow, bgRow);
-    
-    // Catch-all for any other metrics (Generic support for new strategies like ScalpPro)
-    const handledKeys = ['tf_profile', 'tf_mode', 'exit_mode', 'trend', 'hard_gates', 'soft_filters', 'bars_in_trend'];
-    Object.keys(m).forEach(key => {
-        if (!handledKeys.includes(key)) {
-            addRow(key, m[key], bgRow, bgRow);
-        }
-    });
-
-    html += `</div>`;
-    document.getElementById("strategy-hud-container").innerHTML = html;
-}
 window.switchMainView = (view) => {
+    state.set('currentMainView', view);
+
     // Hide all
     const views = ['tvchart', 'option-chain-container', 'watchlist-view-container', 'settings-view-container'];
     views.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     });
-    
+
     // Update button states
     const btnMap = {
         'chart': 'btn-view-chart',
@@ -1479,6 +2110,7 @@ window.switchMainView = (view) => {
     updateElementText('oc-instrument-name', currentInstrumentName);
 
     if (view === 'options') fetchOptionChain();
+    if (view === 'chart') scheduleOverlayRefresh(false);
     if (view === 'settings') {
         refreshStatus();
         loadSettingsIntoUI();
@@ -1488,7 +2120,7 @@ window.switchMainView = (view) => {
 function switchTab(containerId, contentId) {
     const container = document.getElementById(containerId);
     if (!container) return;
-    
+
     // Manage dynamic subscriptions for bottom panel
     if (containerId === 'bottom-panel') {
         const isLeavingPositions = document.querySelector('.bottom-tab.active')?.innerText.toLowerCase().includes('position');
@@ -1499,12 +2131,12 @@ function switchTab(containerId, contentId) {
         } else if (isEnteringPositions) {
             subscribeToPositions();
         }
-        
+
         // Option Chain logic
         const prevTabName = document.querySelector('.bottom-tab.active')?.innerText.toLowerCase() || "";
         const isLeavingOptions = prevTabName.includes('option chain');
         const isEnteringOptions = contentId === 'tab-options';
-        
+
         if (isLeavingOptions && !isEnteringOptions) {
             unsubscribeFromOptionChain();
         }
@@ -1514,7 +2146,7 @@ function switchTab(containerId, contentId) {
     container.querySelectorAll('.bottom-tab, .settings-tab, .sidebar-link').forEach(btn => {
         btn.classList.remove('active');
     });
-    
+
     // 2. Hide all content containers within this scope
     // Use more specific selectors if needed, but for now we hide everything in the container
     const allContents = container.querySelectorAll('.bottom-content, .settings-content, .tab-content, .settings-view-container');
@@ -1548,13 +2180,16 @@ window.switchSettingsTab = (tabId) => {
     // Hide all contents
     document.querySelectorAll('.settings-content').forEach(c => c.classList.remove('active'));
     document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
-    
+
     // Show target
     document.getElementById(`set-tab-${tabId}`)?.classList.add('active');
     // Find button (hacky but works)
     document.querySelectorAll('.settings-tab').forEach(btn => {
         if (btn.innerText.toLowerCase().includes(tabId)) btn.classList.add('active');
     });
+
+    // Populate risk levels when switching to the Execution tab
+    if (tabId === 'execution') populateRiskLevels();
 };
 
 window.fetchOptionChain = async () => {
@@ -1564,11 +2199,29 @@ window.fetchOptionChain = async () => {
         const res = await api.getOptionChain(currentInstrumentKey, expiry);
         if (res.status === 'success') {
             renderOptionChain(res);
-            
-            // Subscribe to visible strikes (±10 around ATM)
+
+            // Subscribe only to an ATM window to keep WS load bounded and data live.
             if (ws && ws.isConnected()) {
                 const keys = [];
-                res.chain.forEach(row => {
+                const chain = Array.isArray(res.chain) ? res.chain : [];
+                let atmIndex = -1;
+                let closestDiff = Number.POSITIVE_INFINITY;
+
+                chain.forEach((row, idx) => {
+                    const strike = Number(row?.strike_price);
+                    const diff = Math.abs(strike - Number(res.spot_price || 0));
+                    if (Number.isFinite(diff) && diff < closestDiff) {
+                        closestDiff = diff;
+                        atmIndex = idx;
+                    }
+                });
+
+                const windowSize = 12; // total strikes around ATM => up to 24 contracts
+                const start = Math.max(0, atmIndex - Math.floor(windowSize / 2));
+                const end = Math.min(chain.length, start + windowSize);
+                const focusedRows = chain.slice(start, end);
+
+                focusedRows.forEach(row => {
                     if (row.ce?.instrument_key) keys.push(row.ce.instrument_key);
                     if (row.pe?.instrument_key) keys.push(row.pe.instrument_key);
                 });
@@ -1603,16 +2256,17 @@ function renderOptionChain(data) {
     for (const key of domNodes.keys()) {
         if (key.startsWith('oc-')) domNodes.delete(key);
     }
-    
+
     list.innerHTML = "";
-    
+
     // Hide placeholder
     const placeholder = document.getElementById('oc-placeholder');
     if (placeholder) placeholder.style.display = 'none';
-    
-    // Populate expiries if not already
+
+    // Always repopulate expiries for current instrument/response.
     const select = document.getElementById('oc-expiry-select');
-    if (select && select.options.length <= 1 && data.available_expiries) {
+    if (select && Array.isArray(data.available_expiries)) {
+        select.innerHTML = '<option value="">Select Expiry</option>';
         data.available_expiries.forEach(exp => {
             const opt = document.createElement('option');
             opt.value = exp;
@@ -1643,15 +2297,15 @@ function renderOptionChain(data) {
         const ce = row.ce || {};
         const pe = row.pe || {};
         const isATM = idx === atmIndex;
-        
+
         const ceITM = row.strike_price < data.spot_price;
         const peITM = row.strike_price > data.spot_price;
-        
+
         if (isATM) {
             tr.style.border = "1px solid #00d084";
             tr.id = "atm-row";
         }
-        
+
         tr.innerHTML = `
             <td data-key="${ce.instrument_key}" data-field="delta" style="color:var(--text-muted); font-size:0.7rem;">${(ce.delta || 0).toFixed(2)}</td>
             <td data-key="${ce.instrument_key}" data-field="theta" style="color:var(--text-muted); font-size:0.7rem;">${(ce.theta || 0).toFixed(2)}</td>
@@ -1705,7 +2359,7 @@ function setupGlobalSearch() {
     const modal = document.getElementById("global-search-modal");
     const input = document.getElementById("global-search-input");
     const results = document.getElementById("global-search-results");
-    
+
     if (!modal || !input) return;
 
     // 1. Opening the modal on keyboard press

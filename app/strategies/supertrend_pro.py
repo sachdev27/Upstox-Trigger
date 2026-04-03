@@ -101,6 +101,26 @@ class SuperTrendPro(BaseStrategy):
 
             # Risk
             "risk_per_trade_pct": 1.0,
+
+            # Option execution controls
+            "option_expiry_mode": "current",   # current | next
+            "option_moneyness_steps": 0,        # 0 = ATM, 1 = 1 strike OTM, ...
+            "option_buy_only": True,            # BUY signal -> BUY CE, SELL signal -> BUY PE
+
+            # Autonomous management controls
+            "enable_trailing_sl": True,
+
+            # ── Option Chain Insight (OC) ─────────────────────────
+            # Real-time option chain analysis (PCR, OI, IV, Max-Pain)
+            # enriches signals with market sentiment from derivatives data.
+            "use_oc_insight":           False,  # enable OC analysis in pipeline
+            "oc_confidence_boost":      10,     # points added when OC aligns with signal
+            "oc_confidence_penalty":    15,     # points removed when OC contradicts
+            "oc_block_contradictions":  False,  # block signal if OC strongly disagrees
+            "oc_block_threshold":       60,     # directional_score threshold for block
+
+            # Broker truth mode
+            "require_broker_fill_confirmation": True,
         }
 
     # ── Auto TF Adaptation (Section 0) ──────────────────────────
@@ -150,12 +170,12 @@ class SuperTrendPro(BaseStrategy):
     def _get_indicators(self, df: pd.DataFrame, htf_df: pd.DataFrame | None = None) -> dict:
         """Calculate and cache all indicators once per cycle."""
         if len(df) == 0: return {}
-        
+
         # Identity check: length + last timestamp
         df_id = (len(df), df["time"].iloc[-1] if "time" in df.columns else 0)
         # Also check htf_df if present
         htf_id = (len(htf_df), htf_df["time"].iloc[-1] if "time" in htf_df.columns else 0) if htf_df is not None else None
-        
+
         if hasattr(self, "_last_eval_id") and self._last_eval_id == (df_id, htf_id):
             return self._indicator_cache
 
@@ -167,14 +187,14 @@ class SuperTrendPro(BaseStrategy):
             "roc_vals": roc(df["close"], p["roc_lookback"]).abs(),
             "squeeze": bb_squeeze(df["close"], p["bb_length"], p["bb_multiplier"], p["squeeze_lookback"])
         }
-        
+
         # Section 2: Slow ST
         if p["use_dual_st"]:
             res["st_slow"] = supertrend(df, p["slow_atr_period"], p["slow_atr_multiplier"], p["use_rma"])
-            
+
         # Section 3: Consec Bars
         res["consec_bars"] = consecutive_confirming_bars(res["st_primary"]["trend"], df["close"])
-        
+
         # Section 4b: HTF
         if p["use_htf_filter"] and htf_df is not None and len(htf_df) > 30:
             res["st_htf"] = supertrend(htf_df, p["htf_atr_period"], p["htf_atr_multiplier"])
@@ -198,9 +218,6 @@ class SuperTrendPro(BaseStrategy):
         """
         if len(df) < 100:
             return None
-
-        # Snapshot evaluation state for UI
-        self.latest_metrics = self.get_dashboard_state(df, htf_df)
 
         p = self.params
         tf_mins = self._tf_minutes(self.config.timeframe)
@@ -229,10 +246,19 @@ class SuperTrendPro(BaseStrategy):
                 return None
 
         # ── Section 4b: H3 — HTF Trend Filter ──────────────────
-        if p["use_htf_filter"] and ind["st_htf"] is not None:
-            htf_trend = ind["st_htf"]["trend"].iloc[-1]
-            if buy_signal and htf_trend != 1: return None
-            if sell_signal and htf_trend != -1: return None
+        if p["use_htf_filter"]:
+            if ind["st_htf"] is not None:
+                htf_trend = ind["st_htf"]["trend"].iloc[-1]
+                if buy_signal and htf_trend != 1: return None
+                if sell_signal and htf_trend != -1: return None
+            else:
+                import logging as _log
+                if not getattr(self, "_htf_missing_warned", False):
+                    _log.getLogger(__name__).warning(
+                        "HTF filter is enabled (use_htf_filter=True) but no HTF data was provided. "
+                        "The H3 gate is being BYPASSED. Ensure htf_df is passed to on_candle()."
+                    )
+                    self._htf_missing_warned = True
 
         # ── Section 4: Soft Score Filters ───────────────────────
         soft_score = 0
@@ -406,6 +432,17 @@ class SuperTrendPro(BaseStrategy):
                 tf_profile = name
                 break
 
+        st_slow = ind.get("st_slow")
+        has_slow_trend = (
+            st_slow is not None
+            and isinstance(st_slow, pd.DataFrame)
+            and not st_slow.empty
+            and "trend" in st_slow.columns
+        )
+        dual_st_agree = (not p["use_dual_st"]) or (
+            has_slow_trend and st_slow["trend"].iloc[-1] == st["trend"].iloc[-1]
+        )
+
         return {
             "tf_profile": tf_profile,
             "tf_mode": "auto" if is_auto else "manual",
@@ -413,7 +450,7 @@ class SuperTrendPro(BaseStrategy):
             "supertrend_value": float(st["supertrend"].iloc[-1]),
             "bars_in_trend": int(consec.iloc[-1]),
             "hard_gates": {
-                "dual_st": "AGREE" if (not p["use_dual_st"] or (ind.get("st_slow") and ind["st_slow"]["trend"].iloc[-1] == st["trend"].iloc[-1])) else "DISAGREE",
+                "dual_st": "AGREE" if dual_st_agree else "DISAGREE",
                 "consecutive": f"{int(consec.iloc[-1])}/{auto.get('consec_bars', p['manual_consec_bars'])}",
             },
             "soft_filters": {

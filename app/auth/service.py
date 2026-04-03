@@ -5,6 +5,7 @@ Tokens are persisted to the database (config_settings table), NOT .env.
 """
 
 import logging
+import json
 from pathlib import Path
 
 import jwt
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 import upstox_client
 
 from app.config import get_settings, BASE_DIR
+from app.network_proxy import patch_upstox_sdk_socks_support
 
 logger = logging.getLogger(__name__)
 
@@ -36,17 +38,16 @@ class AuthService:
 
         if target_sandbox:
             logger.debug("Creating Upstox SANDBOX configuration.")
-            config = upstox_client.Configuration()
-            config.access_token = self.settings.SANDBOX_ACCESS_TOKEN
-            return config
+            return self._build_sdk_config(access_token=self.settings.SANDBOX_ACCESS_TOKEN)
 
         # Live Mode logic (with refresh)
         if self._is_token_expired(self.settings.ACCESS_TOKEN):
-            logger.info("Live access token expired — refreshing...")
-            self._refresh_token(use_sandbox=False)
+            logger.info("Live access token appears expired — attempting refresh...")
+            refreshed = self._refresh_token(use_sandbox=False)
+            if not refreshed and self.settings.ACCESS_TOKEN:
+                logger.info("Proceeding with existing live access token.")
 
-        config = upstox_client.Configuration()
-        config.access_token = self.settings.ACCESS_TOKEN
+        config = self._build_sdk_config(access_token=self.settings.ACCESS_TOKEN)
         self._configuration = config
         return config
 
@@ -77,12 +78,38 @@ class AuthService:
                 self.settings.SANDBOX_ACCESS_TOKEN = token
             else:
                 self.settings.ACCESS_TOKEN = token
-            
+
             # Mark code as used immediately to prevent redundant refresh attempts
             self.settings.save_to_db("AUTH_CODE", "USED", category="API", is_secret=True)
             self.settings.AUTH_CODE = "USED"
             logger.info(f"Successfully obtained and persisted new {key} to DB.")
         return token
+
+    def validate_token(self, use_sandbox: bool | None = None) -> tuple[bool, str | None]:
+        """
+        Validate token by making a lightweight authenticated API call.
+
+        Returns:
+            (is_valid, reason)
+        """
+        # Keep settings in sync with persisted state before validating.
+        self.settings.load_from_db()
+
+        target_sandbox = use_sandbox if use_sandbox is not None else self.settings.USE_SANDBOX
+        token = self.settings.SANDBOX_ACCESS_TOKEN if target_sandbox else self.settings.ACCESS_TOKEN
+
+        if self._is_token_expired(token):
+            return False, "expired"
+
+        try:
+            config = self._build_sdk_config(access_token=token)
+            api = upstox_client.UserApi(upstox_client.ApiClient(config))
+            api.get_profile(self.settings.API_VERSION)
+            return True, None
+        except Exception as e:
+            if self._is_invalid_token_error(e):
+                return False, "invalid"
+            return False, f"auth_check_failed: {e}"
 
     # ── Internal ────────────────────────────────────────────────
 
@@ -90,6 +117,10 @@ class AuthService:
         """Check if a JWT access token is expired."""
         if not token or token == "None":
             return True
+        # Upstox token formats may vary by flow/version; if token is not JWT-like,
+        # skip local-expiry heuristic and let API calls validate it.
+        if token.count(".") != 2:
+            return False
         try:
             decoded = api_jwt.decode(
                 jwt=token, algorithms=["HS256"],
@@ -100,22 +131,22 @@ class AuthService:
             )
             return exp_dt < datetime.now(timezone.utc)
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, KeyError):
-            return True
+            return False
 
-    def _refresh_token(self, use_sandbox: bool = False):
+    def _refresh_token(self, use_sandbox: bool = False) -> bool:
         """
         Exchange the stored auth code for a new access token.
         NOTE: Auth codes are single-use. We should only attempt this if the code hasn't been used.
         """
         if not self.settings.AUTH_CODE or self.settings.AUTH_CODE == "USED":
-            logger.warning("Auth code missing or already used. Manual re-authorization required.")
-            return
+            logger.info("Auth code missing or already used; skipping refresh attempt.")
+            return False
 
         token = self._exchange_code_for_token(self.settings.AUTH_CODE, use_sandbox=use_sandbox)
         if token:
             key = "SANDBOX_ACCESS_TOKEN" if use_sandbox else "ACCESS_TOKEN"
             self.settings.save_to_db(key, token, category="API", is_secret=True)
-            
+
             # Mark code as used to prevent infinite loop on failure
             self.settings.save_to_db("AUTH_CODE", "USED", category="API", is_secret=True)
             self.settings.AUTH_CODE = "USED"
@@ -125,23 +156,25 @@ class AuthService:
             else:
                 self.settings.ACCESS_TOKEN = token
             logger.info("Successfully swapped single-use code for access token.")
+            return True
         else:
             # If exchange failed, the code might still be invalid/used
             logger.error(
                 "Failed to exchange auth code. Visit the auth URL to re-authorize:\n"
                 f"  {self.get_auth_url()}"
             )
+            return False
 
     def _exchange_code_for_token(self, auth_code: str, use_sandbox: bool = False) -> str | None:
         """Call Upstox token endpoint to exchange auth code for access token."""
         try:
-            config = upstox_client.Configuration()
+            config = self._build_sdk_config()
             api_instance = upstox_client.LoginApi(
                 upstox_client.ApiClient(config)
             )
             client_id = self.settings.SANDBOX_API_KEY if use_sandbox else self.settings.API_KEY
             client_secret = self.settings.SANDBOX_API_SECRET if use_sandbox else self.settings.API_SECRET
-            
+
             response = api_instance.token(
                 self.settings.API_VERSION,
                 code=auth_code,
@@ -154,6 +187,61 @@ class AuthService:
         except Exception as e:
             logger.error(f"Token exchange failed: {e}")
             return None
+
+    def _is_invalid_token_error(self, err: Exception) -> bool:
+        """Detect invalid/revoked token responses from Upstox errors."""
+        text = str(err) or ""
+        if "UDAPI100050" in text or "Invalid token" in text:
+            return True
+
+        # Best-effort parse of SDK exception body snippets.
+        marker = "HTTP response body:"
+        if marker in text:
+            try:
+                body = text.split(marker, 1)[1].strip()
+                if body.startswith("b'") and body.endswith("'"):
+                    body = body[2:-1]
+                payload = json.loads(body)
+                errors = payload.get("errors") or []
+                for item in errors:
+                    if str(item.get("errorCode") or item.get("error_code") or "") == "UDAPI100050":
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def _build_sdk_config(self, access_token: str | None = None) -> upstox_client.Configuration:
+        """Construct SDK configuration with optional token and settings-driven proxy behavior."""
+        config = upstox_client.Configuration()
+        if access_token:
+            config.access_token = access_token
+
+        # Backward-compatible proxy resolution:
+        # - APPLY_UPSTOX_SDK_PROXY explicitly enables SDK proxying.
+        # - REQUIRE_UPSTOX_PROXY also implies SDK proxying for existing deployments.
+        # - UPSTOX_PROXY_URL is preferred, but legacy REQUESTS proxies can still backfill it.
+        proxy_url = (
+            (self.settings.UPSTOX_PROXY_URL or "").strip()
+            or (self.settings.REQUESTS_HTTPS_PROXY or "").strip()
+            or (self.settings.REQUESTS_HTTP_PROXY or "").strip()
+        )
+        apply_sdk_proxy = bool(
+            getattr(self.settings, "APPLY_UPSTOX_SDK_PROXY", False)
+            or getattr(self.settings, "REQUIRE_UPSTOX_PROXY", False)
+        )
+
+        if self.settings.REQUIRE_UPSTOX_PROXY and not (apply_sdk_proxy and proxy_url):
+            raise RuntimeError(
+                "REQUIRE_UPSTOX_PROXY=True but SDK proxy is not enabled/configured. "
+                "Set APPLY_UPSTOX_SDK_PROXY=True and UPSTOX_PROXY_URL."
+            )
+
+        if apply_sdk_proxy and proxy_url:
+            patch_upstox_sdk_socks_support()
+            config.proxy = proxy_url
+            logger.debug("Upstox SDK proxy is enabled.")
+
+        return config
 
 
 # Module-level singleton

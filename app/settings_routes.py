@@ -17,6 +17,17 @@ class SettingsUpdate(BaseModel):
     API_KEY: str | None = None
     API_SECRET: str | None = None
     REDIRECT_URI: str | None = None
+    ALGO_NAME: str | None = None
+    ALGO_ID: str | None = None
+    UPSTOX_PROXY_URL: str | None = None
+    REQUESTS_HTTP_PROXY: str | None = None
+    REQUESTS_HTTPS_PROXY: str | None = None
+    REQUIRE_UPSTOX_PROXY: bool | None = None
+    APPLY_PROCESS_PROXY_ENV: bool | None = None
+    ORDER_API_VERSION: str | None = None
+    REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS: bool | None = None
+    AUTO_SLICE_ORDERS: bool | None = None
+    DEFAULT_MARKET_PROTECTION: int | None = None
     MAX_RISK_PER_TRADE_PCT: float | None = None
     MAX_DAILY_LOSS_PCT: float | None = None
     MAX_CONCURRENT_POSITIONS: int | None = None
@@ -41,18 +52,23 @@ class SettingsUpdate(BaseModel):
 
 # Keys that should be masked in the UI
 _SECRET_KEYS = {
-    "API_KEY", "API_SECRET", "SANDBOX_API_KEY", "SANDBOX_API_SECRET", 
-    "SANDBOX_ACCESS_TOKEN", "ACCESS_TOKEN", "SMTP_PASSWORD", "TELEGRAM_BOT_TOKEN"
+    "API_KEY", "API_SECRET", "SANDBOX_API_KEY", "SANDBOX_API_SECRET",
+    "SANDBOX_ACCESS_TOKEN", "ACCESS_TOKEN", "SMTP_PASSWORD", "TELEGRAM_BOT_TOKEN",
+    "UPSTOX_PROXY_URL", "REQUESTS_HTTP_PROXY", "REQUESTS_HTTPS_PROXY",
 }
 
 # Category mapping for DB storage
 _CATEGORY_MAP = {
     "API_KEY": "API", "API_SECRET": "API", "REDIRECT_URI": "API", "ACCESS_TOKEN": "API", "AUTH_CODE": "API",
+    "ALGO_NAME": "API", "ALGO_ID": "API",
+    "UPSTOX_PROXY_URL": "API", "REQUESTS_HTTP_PROXY": "API", "REQUESTS_HTTPS_PROXY": "API", "REQUIRE_UPSTOX_PROXY": "API", "APPLY_PROCESS_PROXY_ENV": "API",
+    "ORDER_API_VERSION": "API", "REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS": "API",
+    "AUTO_SLICE_ORDERS": "API", "DEFAULT_MARKET_PROTECTION": "API",
     "MAX_RISK_PER_TRADE_PCT": "RISK", "MAX_DAILY_LOSS_PCT": "RISK", "MAX_CONCURRENT_POSITIONS": "RISK", "SQUARE_OFF_TIME": "RISK",
     "TRADING_CAPITAL": "ENGINE", "PAPER_TRADING": "ENGINE", "TRADING_SIDE": "ENGINE", "MAX_OPEN_TRADES": "ENGINE",
     "USE_SANDBOX": "ENGINE", "SANDBOX_API_KEY": "API", "SANDBOX_API_SECRET": "API", "SANDBOX_ACCESS_TOKEN": "API",
     "TELEGRAM_BOT_TOKEN": "NOTIFICATIONS", "TELEGRAM_CHAT_ID": "NOTIFICATIONS",
-    "SMTP_SERVER": "NOTIFICATIONS", "SMTP_PORT": "NOTIFICATIONS", "SMTP_USER": "NOTIFICATIONS", 
+    "SMTP_SERVER": "NOTIFICATIONS", "SMTP_PORT": "NOTIFICATIONS", "SMTP_USER": "NOTIFICATIONS",
     "SMTP_PASSWORD": "NOTIFICATIONS", "EMAIL_RECIPIENT": "NOTIFICATIONS", "NOTIFICATION_CHANNELS": "NOTIFICATIONS",
 }
 
@@ -75,6 +91,17 @@ async def get_current_settings():
         "API_KEY": _mask(settings.API_KEY) if settings.API_KEY else "",
         "API_SECRET": "********" if settings.API_SECRET else "",
         "REDIRECT_URI": settings.REDIRECT_URI,
+        "ALGO_NAME": settings.ALGO_NAME,
+        "ALGO_ID": settings.ALGO_ID,
+        "UPSTOX_PROXY_URL": "********" if settings.UPSTOX_PROXY_URL else "",
+        "REQUESTS_HTTP_PROXY": "********" if settings.REQUESTS_HTTP_PROXY else "",
+        "REQUESTS_HTTPS_PROXY": "********" if settings.REQUESTS_HTTPS_PROXY else "",
+        "REQUIRE_UPSTOX_PROXY": settings.REQUIRE_UPSTOX_PROXY,
+        "APPLY_PROCESS_PROXY_ENV": settings.APPLY_PROCESS_PROXY_ENV,
+        "ORDER_API_VERSION": settings.ORDER_API_VERSION,
+        "REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS": settings.REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS,
+        "AUTO_SLICE_ORDERS": settings.AUTO_SLICE_ORDERS,
+        "DEFAULT_MARKET_PROTECTION": settings.DEFAULT_MARKET_PROTECTION,
         "MAX_RISK_PER_TRADE_PCT": settings.MAX_RISK_PER_TRADE_PCT,
         "MAX_DAILY_LOSS_PCT": settings.MAX_DAILY_LOSS_PCT,
         "MAX_CONCURRENT_POSITIONS": settings.MAX_CONCURRENT_POSITIONS,
@@ -95,6 +122,12 @@ async def get_current_settings():
         "SMTP_PASSWORD": "********" if settings.SMTP_PASSWORD else "",
         "EMAIL_RECIPIENT": settings.EMAIL_RECIPIENT,
         "NOTIFICATION_CHANNELS": settings.NOTIFICATION_CHANNELS,
+        "GTT_PRODUCT_TYPE": settings.GTT_PRODUCT_TYPE,
+        "GTT_TRAILING_SL": settings.GTT_TRAILING_SL,
+        "GTT_TRAILING_GAP_MODE": settings.GTT_TRAILING_GAP_MODE,
+        "GTT_TRAILING_GAP_VALUE": settings.GTT_TRAILING_GAP_VALUE,
+        "GTT_MARKET_PROTECTION": settings.GTT_MARKET_PROTECTION,
+        "GTT_ENTRY_TRIGGER_TYPE": settings.GTT_ENTRY_TRIGGER_TYPE,
     }
 
 
@@ -105,7 +138,7 @@ async def update_settings(updates: SettingsUpdate = Body(...)):
     updated_keys = []
 
     # Map the Pydantic model to a dict, excluding None values
-    update_data = updates.dict(exclude_none=True)
+    update_data = updates.model_dump(exclude_none=True)
 
     for key, value in update_data.items():
         # Skip masked placeholder values (user didn't change them)
@@ -119,6 +152,12 @@ async def update_settings(updates: SettingsUpdate = Body(...)):
 
     # Sync engine with new settings
     if updated_keys:
+        if any(k in {
+            "UPSTOX_PROXY_URL", "REQUESTS_HTTP_PROXY", "REQUESTS_HTTPS_PROXY", "REQUIRE_UPSTOX_PROXY", "APPLY_PROCESS_PROXY_ENV"
+        } for k in updated_keys):
+            from app.network_proxy import configure_network_proxies
+            configure_network_proxies(settings)
+
         engine = get_engine()
         engine.sync_from_settings()
 

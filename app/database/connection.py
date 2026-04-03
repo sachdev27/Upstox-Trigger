@@ -198,3 +198,23 @@ def init_db():
             logger.info("Migration: added 'timeframes' column to watchlists")
         except Exception:
             pass  # Column already exists
+
+        # Create hot-path indexes (safe for existing DBs)
+        index_sql = [
+            # Trades table: latest trade history + instrument drilldowns
+            "CREATE INDEX IF NOT EXISTS idx_trade_logs_timestamp ON trade_logs(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_trade_logs_instrument_ts ON trade_logs(instrument_key, timestamp)",
+            # Active signals table: active-signal panel and close-by-instrument updates
+            "CREATE INDEX IF NOT EXISTS idx_active_signals_status_created ON active_signals(status, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_active_signals_instrument_status ON active_signals(instrument_key, status)",
+            # Watchlist table: lookup by instrument_key is frequent
+            "CREATE INDEX IF NOT EXISTS idx_watchlists_instrument_key ON watchlists(instrument_key)",
+            # Config reads are frequent at startup/runtime sync
+            "CREATE INDEX IF NOT EXISTS idx_config_settings_category ON config_settings(category)",
+        ]
+        for sql in index_sql:
+            try:
+                conn.execute(text(sql))
+            except Exception:
+                pass
+        conn.commit()
