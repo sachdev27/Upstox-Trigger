@@ -1523,6 +1523,31 @@ window.saveSandboxSettings = async () => {
     }
 };
 
+window.saveNetworkSettings = async () => {
+    const payload = {
+        APPLY_UPSTOX_SDK_PROXY: !!document.getElementById('setting-apply-upstox-sdk-proxy')?.checked,
+        REQUIRE_UPSTOX_PROXY: !!document.getElementById('setting-require-upstox-proxy')?.checked,
+        APPLY_PROCESS_PROXY_ENV: !!document.getElementById('setting-apply-process-proxy-env')?.checked,
+    };
+
+    const upstoxProxy = document.getElementById('setting-upstox-proxy-url')?.value?.trim();
+    const httpProxy = document.getElementById('setting-requests-http-proxy')?.value?.trim();
+    const httpsProxy = document.getElementById('setting-requests-https-proxy')?.value?.trim();
+
+    // Avoid accidental clearing of saved proxy credentials when fields are blank
+    // or still masked in the UI.
+    if (upstoxProxy && !upstoxProxy.includes('*')) payload.UPSTOX_PROXY_URL = upstoxProxy;
+    if (httpProxy && !httpProxy.includes('*')) payload.REQUESTS_HTTP_PROXY = httpProxy;
+    if (httpsProxy && !httpsProxy.includes('*')) payload.REQUESTS_HTTPS_PROXY = httpsProxy;
+
+    try {
+        await api.saveSettings(payload);
+        showToast("Network/Proxy settings saved", "success");
+    } catch (e) {
+        showToast("Failed to save Network/Proxy settings", "error");
+    }
+};
+
 window.saveRiskConfig = async () => {
     const capital = document.getElementById('risk-capital').value;
     const risk = document.getElementById('risk-pct').value;
@@ -1772,6 +1797,14 @@ async function loadSettingsIntoUI() {
         if (document.getElementById('setting-sandbox-key')) document.getElementById('setting-sandbox-key').value = settings.SANDBOX_API_KEY || '';
         if (document.getElementById('toggle-sandboxmode')) document.getElementById('toggle-sandboxmode').checked = settings.USE_SANDBOX || false;
         if (document.getElementById('toggle-papermode')) document.getElementById('toggle-papermode').checked = settings.PAPER_TRADING ?? true;
+
+        // Network / Proxy
+        if (document.getElementById('setting-upstox-proxy-url')) document.getElementById('setting-upstox-proxy-url').value = settings.UPSTOX_PROXY_URL || '';
+        if (document.getElementById('setting-requests-http-proxy')) document.getElementById('setting-requests-http-proxy').value = settings.REQUESTS_HTTP_PROXY || '';
+        if (document.getElementById('setting-requests-https-proxy')) document.getElementById('setting-requests-https-proxy').value = settings.REQUESTS_HTTPS_PROXY || '';
+        if (document.getElementById('setting-apply-upstox-sdk-proxy')) document.getElementById('setting-apply-upstox-sdk-proxy').checked = settings.APPLY_UPSTOX_SDK_PROXY || false;
+        if (document.getElementById('setting-require-upstox-proxy')) document.getElementById('setting-require-upstox-proxy').checked = settings.REQUIRE_UPSTOX_PROXY || false;
+        if (document.getElementById('setting-apply-process-proxy-env')) document.getElementById('setting-apply-process-proxy-env').checked = settings.APPLY_PROCESS_PROXY_ENV || false;
 
         // Risk
         if (document.getElementById('risk-capital')) document.getElementById('risk-capital').value = settings.TRADING_CAPITAL || 100000;

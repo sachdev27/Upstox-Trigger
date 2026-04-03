@@ -22,6 +22,7 @@ class SettingsUpdate(BaseModel):
     UPSTOX_PROXY_URL: str | None = None
     REQUESTS_HTTP_PROXY: str | None = None
     REQUESTS_HTTPS_PROXY: str | None = None
+    APPLY_UPSTOX_SDK_PROXY: bool | None = None
     REQUIRE_UPSTOX_PROXY: bool | None = None
     APPLY_PROCESS_PROXY_ENV: bool | None = None
     ORDER_API_VERSION: str | None = None
@@ -61,7 +62,7 @@ _SECRET_KEYS = {
 _CATEGORY_MAP = {
     "API_KEY": "API", "API_SECRET": "API", "REDIRECT_URI": "API", "ACCESS_TOKEN": "API", "AUTH_CODE": "API",
     "ALGO_NAME": "API", "ALGO_ID": "API",
-    "UPSTOX_PROXY_URL": "API", "REQUESTS_HTTP_PROXY": "API", "REQUESTS_HTTPS_PROXY": "API", "REQUIRE_UPSTOX_PROXY": "API", "APPLY_PROCESS_PROXY_ENV": "API",
+    "UPSTOX_PROXY_URL": "API", "REQUESTS_HTTP_PROXY": "API", "REQUESTS_HTTPS_PROXY": "API", "APPLY_UPSTOX_SDK_PROXY": "API", "REQUIRE_UPSTOX_PROXY": "API", "APPLY_PROCESS_PROXY_ENV": "API",
     "ORDER_API_VERSION": "API", "REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS": "API",
     "AUTO_SLICE_ORDERS": "API", "DEFAULT_MARKET_PROTECTION": "API",
     "MAX_RISK_PER_TRADE_PCT": "RISK", "MAX_DAILY_LOSS_PCT": "RISK", "MAX_CONCURRENT_POSITIONS": "RISK", "SQUARE_OFF_TIME": "RISK",
@@ -96,6 +97,7 @@ async def get_current_settings():
         "UPSTOX_PROXY_URL": "********" if settings.UPSTOX_PROXY_URL else "",
         "REQUESTS_HTTP_PROXY": "********" if settings.REQUESTS_HTTP_PROXY else "",
         "REQUESTS_HTTPS_PROXY": "********" if settings.REQUESTS_HTTPS_PROXY else "",
+        "APPLY_UPSTOX_SDK_PROXY": settings.APPLY_UPSTOX_SDK_PROXY,
         "REQUIRE_UPSTOX_PROXY": settings.REQUIRE_UPSTOX_PROXY,
         "APPLY_PROCESS_PROXY_ENV": settings.APPLY_PROCESS_PROXY_ENV,
         "ORDER_API_VERSION": settings.ORDER_API_VERSION,
@@ -153,7 +155,7 @@ async def update_settings(updates: SettingsUpdate = Body(...)):
     # Sync engine with new settings
     if updated_keys:
         if any(k in {
-            "UPSTOX_PROXY_URL", "REQUESTS_HTTP_PROXY", "REQUESTS_HTTPS_PROXY", "REQUIRE_UPSTOX_PROXY", "APPLY_PROCESS_PROXY_ENV"
+            "UPSTOX_PROXY_URL", "REQUESTS_HTTP_PROXY", "REQUESTS_HTTPS_PROXY", "APPLY_UPSTOX_SDK_PROXY", "REQUIRE_UPSTOX_PROXY", "APPLY_PROCESS_PROXY_ENV"
         } for k in updated_keys):
             from app.network_proxy import configure_network_proxies
             configure_network_proxies(settings)
