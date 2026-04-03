@@ -613,6 +613,29 @@ body {
     font-size: 0.75rem;
 }
 
+.order-explain-row {
+    cursor: pointer;
+}
+
+.order-explain-row.sev-success td {
+    border-left: 3px solid rgba(0,208,132,0.8);
+}
+
+.order-explain-row.sev-warning td {
+    border-left: 3px solid rgba(255,177,66,0.85);
+}
+
+.order-explain-row.sev-danger td {
+    border-left: 3px solid rgba(255,71,87,0.9);
+}
+
+.order-explain-detail td {
+    background: rgba(255,255,255,0.03);
+    border-left: 3px solid rgba(255,255,255,0.08);
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
 .decision-outcome-chip {
     display: inline-flex;
     align-items: center;

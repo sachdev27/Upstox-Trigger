@@ -626,6 +626,16 @@ class OrderService:
             "gtt_order_ids": gtt_ids,
             "gtt_order_id": gtt_ids[0] if gtt_ids else None,
             "quantity": quantity,
+            "gtt_payload": gtt_params,
+            "gtt_execution_settings": {
+                "product": gtt_product,
+                "entry_trigger_type": gtt_entry_type,
+                "market_protection": gtt_market_prot,
+                "trailing_enabled": bool(gtt_trailing_enabled),
+                "trailing_gap_mode": gtt_gap_mode,
+                "trailing_gap_custom": gtt_gap_custom,
+                "trailing_gap_effective": (rules[-1].get("trailing_gap") if rules and isinstance(rules[-1], dict) and rules[-1].get("strategy") == "STOPLOSS" else None),
+            },
         }
 
     def cancel_gtt_order(self, gtt_order_id: str) -> dict:

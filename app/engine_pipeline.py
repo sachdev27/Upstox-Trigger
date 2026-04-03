@@ -592,6 +592,11 @@ class ExecutionProcessor(SignalProcessor):
                     engine._order_service.place_gtt_signal, signal, trailing_gap
                 )
                 gtt_order_id = result.get("gtt_order_id") if isinstance(result, dict) else None
+                if isinstance(result, dict):
+                    if result.get("gtt_payload"):
+                        meta["gtt_payload"] = result.get("gtt_payload")
+                    if result.get("gtt_execution_settings"):
+                        meta["gtt_execution_settings"] = result.get("gtt_execution_settings")
                 if gtt_order_id:
                     meta.setdefault("_gtt_order_ids", []).append(str(gtt_order_id))
                 meta.setdefault("_placement_modes", []).append("live")

@@ -50,7 +50,9 @@ const BOTTOM_TAB_KEY = 'bottomIntentTab';
 const BOTTOM_SNAP_KEY = 'bottomPanelSnap';
 const DECISION_FILTER_KEY = 'decisionFilter';
 const DECISION_EXPANDED_KEY = 'decisionExpandedKeys';
+const ORDER_EXPLAIN_EXPANDED_KEY = 'orderExplainExpandedKeys';
 let decisionExpanded = new Set();
+let orderExplainExpanded = new Set();
 
 // Bottom-panel row caches for delta rendering (key -> serialized row state)
 const tradeRowCache = new Map();
@@ -736,6 +738,7 @@ async function refreshTrades() {
         rows.forEach(r => r && frag.appendChild(r));
         list.innerHTML = "";
         list.appendChild(frag);
+        refreshOrderExplain();
     } catch (e) {
         console.error("Failed to refresh trades", e);
     }
@@ -1504,8 +1507,20 @@ function initBottomPanelState() {
         decisionExpanded = new Set();
     }
 
+    try {
+        const parsedExplain = JSON.parse(localStorage.getItem(ORDER_EXPLAIN_EXPANDED_KEY) || '[]');
+        orderExplainExpanded = new Set(Array.isArray(parsedExplain) ? parsedExplain : []);
+    } catch {
+        orderExplainExpanded = new Set();
+    }
+
     const tab = localStorage.getItem(BOTTOM_TAB_KEY) || 'decisions';
     switchBottomTab(tab);
+
+    window.addEventListener('resize', () => {
+        const currentSnap = localStorage.getItem(BOTTOM_SNAP_KEY) || '28';
+        setBottomPanelSnap(currentSnap);
+    });
 }
 
 function setBottomPanelSnap(level) {
@@ -1514,6 +1529,21 @@ function setBottomPanelSnap(level) {
     panel.classList.remove('snap-28', 'snap-45', 'snap-hidden');
     const safe = ['28', '45', 'hidden'].includes(String(level)) ? String(level) : '28';
     panel.classList.add(`snap-${safe}`);
+
+    // Percent heights can be unreliable in nested flex containers; enforce
+    // explicit pixel height from the current center-panel viewport.
+    const panelCenter = document.querySelector('.panel-center');
+    const centerHeight = panelCenter ? panelCenter.clientHeight : 0;
+    if (safe === 'hidden') {
+        panel.style.height = '38px';
+        panel.style.minHeight = '38px';
+    } else if (centerHeight > 0) {
+        const ratio = safe === '45' ? 0.45 : 0.28;
+        const target = Math.max(220, Math.round(centerHeight * ratio));
+        panel.style.height = `${target}px`;
+        panel.style.minHeight = `${target}px`;
+    }
+
     localStorage.setItem(BOTTOM_SNAP_KEY, safe);
 }
 
@@ -1539,10 +1569,128 @@ function switchBottomTab(tabId) {
         refreshPositions();
         refreshOrderBook();
         refreshTrades();
+        refreshOrderExplain();
     } else if (safe === 'decisions') {
         refreshDecisionTimeline();
     } else if (safe === 'system') {
         refreshSystemTimeline();
+    }
+}
+
+function persistOrderExplainExpanded() {
+    localStorage.setItem(ORDER_EXPLAIN_EXPANDED_KEY, JSON.stringify(Array.from(orderExplainExpanded).slice(-200)));
+}
+
+function buildSeverityByTradeStatus(statusText) {
+    const s = String(statusText || '').toLowerCase();
+    if (s.includes('rejected') || s.includes('cancelled') || s.includes('failed')) return 'sev-danger';
+    if (s.includes('pending')) return 'sev-warning';
+    return 'sev-success';
+}
+
+async function refreshOrderExplain() {
+    const body = document.getElementById('order-explain-body');
+    if (!body) return;
+    if (!isDocumentVisible()) return;
+    if (!isBottomTabActive('execution')) return;
+
+    try {
+        const res = await api.getPaperTrades(80);
+        const rows = (res?.data || []).slice().sort((a, b) => {
+            const ta = new Date(a.timestamp || 0).getTime();
+            const tb = new Date(b.timestamp || 0).getTime();
+            return (isNaN(tb) ? 0 : tb) - (isNaN(ta) ? 0 : ta);
+        });
+
+        body.innerHTML = '';
+        if (!rows.length) {
+            body.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">No explainable order records yet</td></tr>`;
+            return;
+        }
+
+        rows.forEach((r, idx) => {
+            const meta = r.metadata || {};
+            const rowKey = `${r.id || idx}-${r.timestamp || ''}-${r.instrument_key || ''}`;
+            const statusText = String(r.status || 'unknown');
+            const sev = buildSeverityByTradeStatus(statusText);
+            const outcome = sev === 'sev-danger' ? 'Blocked/Failed' : (sev === 'sev-warning' ? 'Pending' : 'Placed');
+            const model = meta.execution_price_model || (meta.option_side ? 'option_premium' : 'direct');
+            const brokerRef = meta.gtt_order_id || (Array.isArray(meta._gtt_order_ids) ? meta._gtt_order_ids.join(',') : '-') || '-';
+            const time = r.timestamp ? new Date(r.timestamp).toLocaleTimeString('en-IN', { hour12: false }) : '-';
+
+            const tr = document.createElement('tr');
+            tr.className = `order-explain-row ${sev}`;
+            tr.innerHTML = `
+                <td class="text-muted">${time}</td>
+                <td>${r.strategy_name || '-'}</td>
+                <td class="mono">${r.instrument_key || '-'}</td>
+                <td>${outcome}</td>
+                <td>${model}</td>
+                <td class="mono">${brokerRef}</td>
+            `;
+
+            tr.addEventListener('click', () => {
+                if (orderExplainExpanded.has(rowKey)) orderExplainExpanded.delete(rowKey);
+                else orderExplainExpanded.add(rowKey);
+                persistOrderExplainExpanded();
+                refreshOrderExplain();
+            });
+
+            body.appendChild(tr);
+
+            if (orderExplainExpanded.has(rowKey)) {
+                const sourceSignal = {
+                    underlying: meta.underlying || meta.underlying_key || '-',
+                    underlying_price: meta.underlying_price ?? '-',
+                    underlying_sl: meta.underlying_sl ?? '-',
+                    underlying_tp: meta.underlying_tp ?? '-',
+                    strategy_action: r.action || '-',
+                };
+                const executionValues = {
+                    instrument: r.instrument_key || '-',
+                    option_side: meta.option_side || '-',
+                    strike_price: meta.strike_price ?? '-',
+                    expiry_date: meta.expiry_date || '-',
+                    entry_price: r.price ?? '-',
+                    stop_loss: r.stop_loss ?? '-',
+                    take_profit: r.take_profit ?? '-',
+                    quantity: r.quantity ?? '-',
+                    lot_size: meta.lot_size ?? '-',
+                    trailing_gap: meta.execution_trailing_gap ?? '-',
+                    premium_risk_distance: meta.premium_risk_distance ?? '-',
+                };
+                const brokerPayload = {
+                    gtt_order_id: meta.gtt_order_id || '-',
+                    gtt_payload: meta.gtt_payload || '-',
+                    gtt_execution_settings: meta.gtt_execution_settings || '-',
+                };
+                const guards = {
+                    option_quality_regime: meta.option_quality_regime || '-',
+                    option_quality_thresholds: meta.option_quality_thresholds || '-',
+                    execution_error: meta._last_execution_error || '-',
+                    execution_error_code: meta._last_execution_error_code || '-',
+                    oc_analysis: meta.oc_analysis || '-',
+                };
+
+                const detail = document.createElement('tr');
+                detail.className = 'order-explain-detail';
+                detail.innerHTML = `
+                    <td colspan="6">
+                        <div><strong>Source Signal</strong></div>
+                        <pre style="white-space: pre-wrap; margin:4px 0 8px; font-size:0.72rem;">${JSON.stringify(sourceSignal, null, 2)}</pre>
+                        <div><strong>Execution Values</strong></div>
+                        <pre style="white-space: pre-wrap; margin:4px 0 8px; font-size:0.72rem;">${JSON.stringify(executionValues, null, 2)}</pre>
+                        <div><strong>Broker Payload</strong></div>
+                        <pre style="white-space: pre-wrap; margin:4px 0 8px; font-size:0.72rem;">${JSON.stringify(brokerPayload, null, 2)}</pre>
+                        <div><strong>Guards & Checks</strong></div>
+                        <pre style="white-space: pre-wrap; margin:4px 0 0; font-size:0.72rem;">${JSON.stringify(guards, null, 2)}</pre>
+                    </td>
+                `;
+                body.appendChild(detail);
+            }
+        });
+    } catch (e) {
+        console.error('Failed to refresh order explain', e);
     }
 }
 
@@ -1750,6 +1898,7 @@ window.switchBottomTab = switchBottomTab;
 window.setBottomPanelSnap = setBottomPanelSnap;
 window.refreshDecisionTimeline = refreshDecisionTimeline;
 window.refreshSystemTimeline = refreshSystemTimeline;
+window.refreshOrderExplain = refreshOrderExplain;
 window.setChartTimeframe = (interval) => {
     state.set('currentInterval', interval);
 
