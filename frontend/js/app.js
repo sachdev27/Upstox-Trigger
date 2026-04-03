@@ -6,6 +6,7 @@ import { api } from './api.js';
 import * as ui from './ui.js';
 import { EngineWS } from './ws.js';
 import { ChartManager } from './chart.js';
+import { state } from './state.js';
 
 const showToast = ui.showToast;
 const updateElementText = ui.updateElementText;
@@ -14,13 +15,25 @@ const renderStrategyHUDEmpty = ui.renderStrategyHUDEmpty;
 const renderStrategyHUD = ui.renderStrategyHUD;
 const renderOcInsight = ui.renderOcInsight || (() => {});
 
-// Application State
-let currentInstrumentKey = localStorage.getItem("currentInstrumentKey") || "NSE_INDEX|Nifty 50";
-let currentInstrumentName = localStorage.getItem("currentInstrumentName") || "Nifty 50";
-let currentInterval = localStorage.getItem("currentInterval") || "15minute";
+// Application State — backed by state.js store for pub/sub.
+// Legacy getters/setters keep existing code working while routing through the store.
+Object.defineProperties(window, {
+    _currentInstrumentKey: { get() { return state.get('currentInstrumentKey'); }, set(v) { state.set('currentInstrumentKey', v); } },
+    _currentInstrumentName: { get() { return state.get('currentInstrumentName'); }, set(v) { state.set('currentInstrumentName', v); } },
+    _currentInterval: { get() { return state.get('currentInterval'); }, set(v) { state.set('currentInterval', v); } },
+});
+// Module-level aliases (re-assignable `let` backed by the store getters)
+let currentInstrumentKey = state.get('currentInstrumentKey');
+let currentInstrumentName = state.get('currentInstrumentName');
+let currentInterval = state.get('currentInterval');
 let engineActive = false;
 let dynamicSchemas = {};
 const IST_OFFSET = 0; // Standardize to UTC seconds
+
+// Keep module-level vars in sync with store
+state.on('currentInstrumentKey', (v) => { currentInstrumentKey = v; });
+state.on('currentInstrumentName', (v) => { currentInstrumentName = v; });
+state.on('currentInterval', (v) => { currentInterval = v; });
 
 let globalSearchResults = [];
 let selectedSearchIndex = -1;
@@ -31,7 +44,8 @@ let isFlushing = false;
 let overlayRefreshInFlight = false;
 let lastOverlayRefreshAt = 0;
 const OVERLAY_REFRESH_MS = 30000;
-let currentMainView = 'chart';
+let currentMainView = state.get('currentMainView');
+state.on('currentMainView', (v) => { currentMainView = v; });
 
 // Bottom-panel row caches for delta rendering (key -> serialized row state)
 const tradeRowCache = new Map();
@@ -450,11 +464,8 @@ async function fetchHistoricalCandles() {
 async function selectInstrument(key, name) {
     const oldKey = currentInstrumentKey;
 
-    // 1. Update state
-    currentInstrumentKey = key;
-    currentInstrumentName = name;
-    localStorage.setItem("currentInstrumentKey", key);
-    localStorage.setItem("currentInstrumentName", name);
+    // 1. Update state (store persists to localStorage automatically)
+    state.batch({ currentInstrumentKey: key, currentInstrumentName: name });
 
     updateElementText('current-instrument', name);
     updateElementText('oc-instrument-name', name);
@@ -1376,8 +1387,7 @@ window.deleteActiveSignal = async (id) => {
 window.selectInstrument = selectInstrument;
 window.switchBottomTab = (tabId) => switchTab('bottom-panel', `tab-${tabId}`);
 window.setChartTimeframe = (interval) => {
-    currentInterval = interval;
-    localStorage.setItem("currentInterval", interval);
+    state.set('currentInterval', interval);
 
     // Update timeframe buttons exactly by ID
     const allIntervals = ['1minute', '5minute', '15minute', '30minute', '1hour', 'day'];
@@ -2051,7 +2061,7 @@ async function refreshOcInsight() {
 }
 
 window.switchMainView = (view) => {
-    currentMainView = view;
+    state.set('currentMainView', view);
 
     // Hide all
     const views = ['tvchart', 'option-chain-container', 'watchlist-view-container', 'settings-view-container'];

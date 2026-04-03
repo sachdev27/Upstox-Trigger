@@ -6,13 +6,98 @@ The .env file is used ONLY for initial seeding on first run.
 """
 
 import logging
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
-from pydantic import Field
 from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
+
+
+# ── Nested sub-models (read-only views) ─────────────────────────
+
+
+class APISettings(BaseModel, frozen=True):
+    """Upstox API credentials and version info."""
+    API_VERSION: str
+    API_KEY: str
+    API_SECRET: str
+    REDIRECT_URI: str
+    AUTH_CODE: str
+    ACCESS_TOKEN: str
+    ALGO_NAME: str
+    ALGO_ID: str
+    ORDER_API_VERSION: str
+    REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS: bool
+    AUTO_SLICE_ORDERS: bool
+    DEFAULT_MARKET_PROTECTION: int
+
+
+class GTTSettings(BaseModel, frozen=True):
+    """GTT (Good Till Triggered) order settings."""
+    GTT_PRODUCT_TYPE: str
+    GTT_TRAILING_SL: bool
+    GTT_TRAILING_GAP_MODE: str
+    GTT_TRAILING_GAP_VALUE: float
+    GTT_MARKET_PROTECTION: int
+    GTT_ENTRY_TRIGGER_TYPE: str
+
+
+class SandboxSettings(BaseModel, frozen=True):
+    """Sandbox / paper-test environment credentials."""
+    USE_SANDBOX: bool
+    SANDBOX_API_KEY: str
+    SANDBOX_API_SECRET: str
+    SANDBOX_ACCESS_TOKEN: str
+
+
+class NetworkSettings(BaseModel, frozen=True):
+    """Proxy and network configuration."""
+    UPSTOX_PROXY_URL: str
+    APPLY_UPSTOX_SDK_PROXY: bool
+    REQUIRE_UPSTOX_PROXY: bool
+    APPLY_PROCESS_PROXY_ENV: bool
+    REQUESTS_HTTP_PROXY: str
+    REQUESTS_HTTPS_PROXY: str
+
+
+class RiskSettings(BaseModel, frozen=True):
+    """Risk management guardrails."""
+    MAX_RISK_PER_TRADE_PCT: float
+    MAX_DAILY_LOSS_PCT: float
+    MAX_CONCURRENT_POSITIONS: int
+    SQUARE_OFF_TIME: str
+
+
+class EngineSettings(BaseModel, frozen=True):
+    """Trading engine runtime defaults."""
+    TRADING_CAPITAL: float
+    PAPER_TRADING: bool
+    TRADING_SIDE: str
+    MAX_OPEN_TRADES: int
+
+
+class StrategySettings(BaseModel, frozen=True):
+    """Active strategy persistence."""
+    ACTIVE_STRATEGY_CLASS: str
+    ACTIVE_STRATEGY_NAME: str
+    ACTIVE_STRATEGY_PARAMS: str
+    ACTIVE_STRATEGY_INSTRUMENTS: str
+    ACTIVE_STRATEGY_TIMEFRAME: str
+    ACTIVE_STRATEGY_PAPER: str
+
+
+class NotificationSettings(BaseModel, frozen=True):
+    """Notification channel configuration."""
+    TELEGRAM_BOT_TOKEN: str
+    TELEGRAM_CHAT_ID: str
+    SMTP_SERVER: str
+    SMTP_PORT: int
+    SMTP_USER: str
+    SMTP_PASSWORD: str
+    EMAIL_RECIPIENT: str
+    NOTIFICATION_CHANNELS: str
 
 
 class Settings(BaseSettings):
@@ -112,6 +197,96 @@ class Settings(BaseSettings):
         "env_file_encoding": "utf-8",
         "extra": "ignore",
     }
+
+    # ── Namespace properties (new organized access) ─────────────
+    # These construct read-only sub-model views while keeping the flat
+    # fields as the source of truth for env loading and DB persistence.
+
+    @property
+    def api(self) -> APISettings:
+        return APISettings(
+            API_VERSION=self.API_VERSION, API_KEY=self.API_KEY,
+            API_SECRET=self.API_SECRET, REDIRECT_URI=self.REDIRECT_URI,
+            AUTH_CODE=self.AUTH_CODE, ACCESS_TOKEN=self.ACCESS_TOKEN,
+            ALGO_NAME=self.ALGO_NAME, ALGO_ID=self.ALGO_ID,
+            ORDER_API_VERSION=self.ORDER_API_VERSION,
+            REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS=self.REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS,
+            AUTO_SLICE_ORDERS=self.AUTO_SLICE_ORDERS,
+            DEFAULT_MARKET_PROTECTION=self.DEFAULT_MARKET_PROTECTION,
+        )
+
+    @property
+    def gtt(self) -> GTTSettings:
+        return GTTSettings(
+            GTT_PRODUCT_TYPE=self.GTT_PRODUCT_TYPE,
+            GTT_TRAILING_SL=self.GTT_TRAILING_SL,
+            GTT_TRAILING_GAP_MODE=self.GTT_TRAILING_GAP_MODE,
+            GTT_TRAILING_GAP_VALUE=self.GTT_TRAILING_GAP_VALUE,
+            GTT_MARKET_PROTECTION=self.GTT_MARKET_PROTECTION,
+            GTT_ENTRY_TRIGGER_TYPE=self.GTT_ENTRY_TRIGGER_TYPE,
+        )
+
+    @property
+    def sandbox(self) -> SandboxSettings:
+        return SandboxSettings(
+            USE_SANDBOX=self.USE_SANDBOX,
+            SANDBOX_API_KEY=self.SANDBOX_API_KEY,
+            SANDBOX_API_SECRET=self.SANDBOX_API_SECRET,
+            SANDBOX_ACCESS_TOKEN=self.SANDBOX_ACCESS_TOKEN,
+        )
+
+    @property
+    def network(self) -> NetworkSettings:
+        return NetworkSettings(
+            UPSTOX_PROXY_URL=self.UPSTOX_PROXY_URL,
+            APPLY_UPSTOX_SDK_PROXY=self.APPLY_UPSTOX_SDK_PROXY,
+            REQUIRE_UPSTOX_PROXY=self.REQUIRE_UPSTOX_PROXY,
+            APPLY_PROCESS_PROXY_ENV=self.APPLY_PROCESS_PROXY_ENV,
+            REQUESTS_HTTP_PROXY=self.REQUESTS_HTTP_PROXY,
+            REQUESTS_HTTPS_PROXY=self.REQUESTS_HTTPS_PROXY,
+        )
+
+    @property
+    def risk(self) -> RiskSettings:
+        return RiskSettings(
+            MAX_RISK_PER_TRADE_PCT=self.MAX_RISK_PER_TRADE_PCT,
+            MAX_DAILY_LOSS_PCT=self.MAX_DAILY_LOSS_PCT,
+            MAX_CONCURRENT_POSITIONS=self.MAX_CONCURRENT_POSITIONS,
+            SQUARE_OFF_TIME=self.SQUARE_OFF_TIME,
+        )
+
+    @property
+    def engine(self) -> EngineSettings:
+        return EngineSettings(
+            TRADING_CAPITAL=self.TRADING_CAPITAL,
+            PAPER_TRADING=self.PAPER_TRADING,
+            TRADING_SIDE=self.TRADING_SIDE,
+            MAX_OPEN_TRADES=self.MAX_OPEN_TRADES,
+        )
+
+    @property
+    def strategy(self) -> StrategySettings:
+        return StrategySettings(
+            ACTIVE_STRATEGY_CLASS=self.ACTIVE_STRATEGY_CLASS,
+            ACTIVE_STRATEGY_NAME=self.ACTIVE_STRATEGY_NAME,
+            ACTIVE_STRATEGY_PARAMS=self.ACTIVE_STRATEGY_PARAMS,
+            ACTIVE_STRATEGY_INSTRUMENTS=self.ACTIVE_STRATEGY_INSTRUMENTS,
+            ACTIVE_STRATEGY_TIMEFRAME=self.ACTIVE_STRATEGY_TIMEFRAME,
+            ACTIVE_STRATEGY_PAPER=self.ACTIVE_STRATEGY_PAPER,
+        )
+
+    @property
+    def notifications(self) -> NotificationSettings:
+        return NotificationSettings(
+            TELEGRAM_BOT_TOKEN=self.TELEGRAM_BOT_TOKEN,
+            TELEGRAM_CHAT_ID=self.TELEGRAM_CHAT_ID,
+            SMTP_SERVER=self.SMTP_SERVER,
+            SMTP_PORT=self.SMTP_PORT,
+            SMTP_USER=self.SMTP_USER,
+            SMTP_PASSWORD=self.SMTP_PASSWORD,
+            EMAIL_RECIPIENT=self.EMAIL_RECIPIENT,
+            NOTIFICATION_CHANNELS=self.NOTIFICATION_CHANNELS,
+        )
 
     def load_from_db(self):
         """

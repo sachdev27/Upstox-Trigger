@@ -4,12 +4,14 @@ Market Data API routes — quotes, candles, instruments, option chain.
 NOTE: Positions, holdings, and funds routes live in orders/routes.py.
 """
 
+import asyncio
 import time
 
 from fastapi import APIRouter, Query, Request
 
 from app.auth.service import get_auth_service
 from app.market_data.service import MarketDataService
+from app.rate_limiter import get_rate_limiter
 
 router = APIRouter(prefix="/market", tags=["Market Data"])
 
@@ -37,16 +39,18 @@ def _get_market_service() -> MarketDataService:
 @router.get("/ltp")
 async def get_ltp(instrument_key: str = Query(...)):
     """Get last traded price."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    ltp = svc.get_ltp(instrument_key)
+    ltp = await asyncio.to_thread(svc.get_ltp, instrument_key)
     return {"instrument_key": instrument_key, "ltp": ltp}
 
 
 @router.get("/quote")
 async def get_quote(instrument_key: str = Query(...)):
     """Get full market quote."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    quote = svc.get_full_quote(instrument_key)
+    quote = await asyncio.to_thread(svc.get_full_quote, instrument_key)
     return {"instrument_key": instrument_key, "data": quote}
 
 
@@ -58,9 +62,10 @@ async def get_candles(
     to_date: str | None = Query(None),
 ):
     """Get historical candle data."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    candles = svc.get_historical_candles(
-        instrument_key, interval, from_date, to_date
+    candles = await asyncio.to_thread(
+        svc.get_historical_candles, instrument_key, interval, from_date, to_date
     )
     return {"instrument_key": instrument_key, "count": len(candles), "candles": candles}
 
@@ -72,8 +77,10 @@ async def get_candles(
 @router.get("/profile")
 async def get_profile():
     """Get user profile."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    return {"data": svc.get_profile()}
+    data = await asyncio.to_thread(svc.get_profile)
+    return {"data": data}
 
 
 @router.get("/instruments/featured")
@@ -110,30 +117,37 @@ async def search_instruments(
     page_size: int = Query(20),
 ):
     """Search instruments using the SDK (no CSV download needed)."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    results = svc.search_instrument_sdk(query, page_size)
+    results = await asyncio.to_thread(svc.search_instrument_sdk, query, page_size)
     return {"query": query, "count": len(results), "instruments": results}
 
 
 @router.get("/status")
 async def get_market_status(exchange: str = Query("NSE")):
     """Get real-time market status (open/closed)."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    return {"data": svc.get_market_status(exchange)}
+    data = await asyncio.to_thread(svc.get_market_status, exchange)
+    return {"data": data}
 
 
 @router.get("/holidays")
 async def get_holidays():
     """Get list of market holidays."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    return {"data": svc.get_holidays()}
+    data = await asyncio.to_thread(svc.get_holidays)
+    return {"data": data}
 
 
 @router.get("/exchange-timings")
 async def get_exchange_timings(date: str = Query(..., description="YYYY-MM-DD")):
     """Get exchange timings for a specific date."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    return {"data": svc.get_exchange_timings(date)}
+    data = await asyncio.to_thread(svc.get_exchange_timings, date)
+    return {"data": data}
 
 
 @router.get("/options/chain")
@@ -142,8 +156,10 @@ async def get_option_chain_simple(
     expiry_date: str = Query(..., description="YYYY-MM-DD"),
 ):
     """Get put/call option chain (simple view)."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    return {"data": svc.get_option_chain(instrument_key, expiry_date)}
+    data = await asyncio.to_thread(svc.get_option_chain, instrument_key, expiry_date)
+    return {"data": data}
 
 
 @router.get("/options/contracts")
@@ -152,8 +168,10 @@ async def get_option_contracts(
     expiry_date: str | None = Query(None),
 ):
     """Get available option contracts."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    return {"data": svc.get_option_contracts(instrument_key, expiry_date)}
+    data = await asyncio.to_thread(svc.get_option_contracts, instrument_key, expiry_date)
+    return {"data": data}
 
 
 @router.get("/brokerage")
@@ -165,10 +183,12 @@ async def get_brokerage(
     price: float = Query(...),
 ):
     """Calculate brokerage charges before placing a trade."""
+    await get_rate_limiter().wait_for_token()
     svc = _get_market_service()
-    return {"data": svc.get_brokerage(
-        instrument_token, quantity, product, transaction_type, price
-    )}
+    data = await asyncio.to_thread(
+        svc.get_brokerage, instrument_token, quantity, product, transaction_type, price
+    )
+    return {"data": data}
 
 
 @router.get("/strategy-overlay")
@@ -195,7 +215,10 @@ async def get_strategy_overlay(
             return payload
 
     svc = _get_market_service()
-    candles = svc.get_historical_candles(instrument_key, timeframe, from_date, to_date)
+    await get_rate_limiter().wait_for_token()
+    candles = await asyncio.to_thread(
+        svc.get_historical_candles, instrument_key, timeframe, from_date, to_date
+    )
 
     if not candles:
         return {"status": "error", "message": "No candle data available.", "overlay": []}
@@ -233,7 +256,10 @@ async def get_strategy_overlay(
                 "1m": "1minute", "1minute": "1minute",
             }
             htf_interval = tf_map.get(str(htf_tf), "day")
-            htf_candles = svc.get_historical_candles(instrument_key, htf_interval, from_date, to_date)
+            await get_rate_limiter().wait_for_token()
+            htf_candles = await asyncio.to_thread(
+                svc.get_historical_candles, instrument_key, htf_interval, from_date, to_date
+            )
             if htf_candles:
                 htf_df = pd.DataFrame(htf_candles)
                 for col in ["open", "high", "low", "close", "volume"]:
@@ -354,6 +380,7 @@ async def get_detailed_option_chain(
         svc = _get_market_service()
         # Greeks cache is optional fallback; REST API provides LTP/OI/Volume
         greeks_cache = getattr(request.app.state, "greeks_cache", {})
+        await get_rate_limiter().wait_for_token()
         result = await svc.get_detailed_option_chain(instrument_key, expiry_date, greeks_cache)
         return result
 
@@ -385,6 +412,7 @@ async def get_option_chain_analysis(
 
         svc = _get_market_service()
         greeks_cache = getattr(request.app.state, "greeks_cache", {})
+        await get_rate_limiter().wait_for_token()
         chain_data = await svc.get_detailed_option_chain(instrument_key, expiry_date, greeks_cache)
 
         if chain_data.get("status") != "success" or not chain_data.get("chain"):
