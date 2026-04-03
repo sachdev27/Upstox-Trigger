@@ -1,0 +1,5 @@
+# GitHub Pages configuration
+# Serves the /docs folder as a static site (no Jekyll processing needed)
+
+# Disable Jekyll processing — we're using plain HTML/CSS
+plugins: []

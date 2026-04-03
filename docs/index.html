@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Upstox Trigger — Automated Trading Platform</title>
+  <meta name="description" content="Automated trading platform for Upstox API v2 — real-time WebSocket streaming, pluggable strategies, risk-managed order execution, and a live web dashboard." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- NAV -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <span class="nav-brand">⚡ Upstox Trigger</span>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#pipeline">Pipeline</a>
+        <a href="#strategies">Strategies</a>
+        <a href="#api">API</a>
+        <a href="https://github.com/diviine/Upstox-Trigger" class="btn btn-outline" target="_blank" rel="noopener">GitHub ↗</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <header class="hero">
+    <div class="container">
+      <div class="badge">Upstox API v2 · FastAPI · IST-Aligned</div>
+      <h1>Automated Trading<br /><span class="accent">Without the Noise</span></h1>
+      <p class="hero-sub">
+        Real-time WebSocket market data streaming, pluggable strategy engines,
+        risk-managed order execution, and a live web dashboard — all in one platform.
+      </p>
+      <div class="hero-actions">
+        <a href="https://github.com/diviine/Upstox-Trigger" class="btn btn-primary" target="_blank" rel="noopener">View on GitHub</a>
+        <a href="#features" class="btn btn-ghost">Explore Features ↓</a>
+      </div>
+      <div class="hero-code">
+        <pre><code><span class="c"># Start the server</span>
+bash start_terminal.sh
+<span class="c"># → http://localhost:8210/dashboard</span></code></pre>
+      </div>
+    </div>
+  </header>
+
+  <!-- STACK STRIP -->
+  <section class="stack-strip">
+    <div class="container">
+      <div class="stack-items">
+        <span>FastAPI</span>
+        <span class="dot">·</span>
+        <span>SQLAlchemy 2.0</span>
+        <span class="dot">·</span>
+        <span>APScheduler</span>
+        <span class="dot">·</span>
+        <span>Upstox SDK v2.21</span>
+        <span class="dot">·</span>
+        <span>Protobuf WebSocket</span>
+        <span class="dot">·</span>
+        <span>TradingView Charts</span>
+        <span class="dot">·</span>
+        <span>SQLite / PostgreSQL</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="section" id="features">
+    <div class="container">
+      <div class="section-header">
+        <h2>Key Capabilities</h2>
+        <p>Everything you need to build, test, and run a live trading system on Upstox.</p>
+      </div>
+      <div class="grid grid-3">
+        <div class="card">
+          <div class="card-icon">📡</div>
+          <h3>Real-Time Streaming</h3>
+          <p>Protobuf-decoded WebSocket ticks via MarketDataStreamerV3. Supports <code>ltpc</code>, <code>full</code>, and <code>option_greeks</code> modes with smart per-instrument routing.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🧠</div>
+          <h3>Pluggable Strategies</h3>
+          <p>Extend <code>BaseStrategy</code> with three methods. SuperTrend Pro v6.3 and ScalpPro v1.0 are built-in. Register your own in one line.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🛡️</div>
+          <h3>Risk Management</h3>
+          <p>Daily loss caps, per-trade risk limits, concurrent position guards, trading side restrictions (LONG_ONLY / SHORT_ONLY / BOTH), and forced square-off.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">📊</div>
+          <h3>Option Chain Analytics</h3>
+          <p>PCR, Max Pain, OI concentration, IV skew, and live Greeks overlay — computed in pure Python with no API side effects.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">📄</div>
+          <h3>Paper Trading Default</h3>
+          <p>Ships with <code>PAPER_TRADING=True</code>. Simulate every strategy safely before switching to live with a single config toggle.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">⏱️</div>
+          <h3>IST-Aligned Scheduler</h3>
+          <p>APScheduler with <code>Asia/Kolkata</code> timezone. Candle checks every minute during market hours (9:15–15:30), auto square-off at 15:15.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🎛️</div>
+          <h3>Web Dashboard</h3>
+          <p>Interactive TradingView Lightweight Charts, live trade log, strategy parameter editor, and real-time WebSocket tick updates.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🌐</div>
+          <h3>Proxy Support</h3>
+          <p>Full proxy layer for static IP whitelisting compliance. Supports both SDK-level and process-level proxy injection with <code>REQUIRE_UPSTOX_PROXY</code> strict mode.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🔔</div>
+          <h3>Multi-Channel Alerts</h3>
+          <p>Email (SMTP) notifications out of the box. Telegram and other providers are supported via the pluggable <code>NotificationProvider</code> interface.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PIPELINE -->
+  <section class="section section-dark" id="pipeline">
+    <div class="container">
+      <div class="section-header">
+        <h2>6-Stage Signal Pipeline</h2>
+        <p>Every trade signal flows through a chain of processors before executing.</p>
+      </div>
+      <div class="pipeline">
+        <div class="pipeline-step">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <h4>Risk Guard</h4>
+            <p>Trading side, daily loss limit, concurrent position checks</p>
+          </div>
+        </div>
+        <div class="pipeline-arrow">→</div>
+        <div class="pipeline-step">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <h4>OC Insight</h4>
+            <p>OI / PCR / IV / Max-Pain enrichment (30s cache, indices only)</p>
+          </div>
+        </div>
+        <div class="pipeline-arrow">→</div>
+        <div class="pipeline-step">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <h4>ATM Resolver</h4>
+            <p>Maps index signals to ATM option contracts with liquidity scoring</p>
+          </div>
+        </div>
+        <div class="pipeline-arrow">→</div>
+        <div class="pipeline-step">
+          <div class="step-num">4</div>
+          <div class="step-body">
+            <h4>Execution</h4>
+            <p>Places order via Upstox API or simulates in paper mode</p>
+          </div>
+        </div>
+        <div class="pipeline-arrow">→</div>
+        <div class="pipeline-step">
+          <div class="step-num">5</div>
+          <div class="step-body">
+            <h4>Alerter</h4>
+            <p>Formats &amp; sends email / Telegram notification</p>
+          </div>
+        </div>
+        <div class="pipeline-arrow">→</div>
+        <div class="pipeline-step">
+          <div class="step-num">6</div>
+          <div class="step-body">
+            <h4>Broadcast</h4>
+            <p>Pushes real-time update to all WebSocket clients</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STRATEGIES -->
+  <section class="section" id="strategies">
+    <div class="container">
+      <div class="section-header">
+        <h2>Built-in Strategies</h2>
+        <p>Two production-ready strategies included. Plug in your own with three methods.</p>
+      </div>
+      <div class="grid grid-2">
+        <div class="strategy-card">
+          <div class="strategy-header">
+            <span class="strategy-badge">Primary</span>
+            <h3>SuperTrend Pro v6.3</h3>
+            <p class="strategy-sub">Faithful 1:1 Pine Script port (590 lines)</p>
+          </div>
+          <ul class="strategy-features">
+            <li><strong>H1:</strong> Dual SuperTrend agreement gate</li>
+            <li><strong>H2:</strong> Consecutive bar confirmation gate</li>
+            <li><strong>H3:</strong> Higher-timeframe trend filter</li>
+            <li><strong>Soft Score:</strong> ADX + volume + ATR + ROC + BB squeeze</li>
+            <li><strong>Exit A/B/C:</strong> ATR SL+TP, ATR SL + Profit%, or Trailing</li>
+            <li><strong>Auto TF:</strong> Thresholds adapt to selected timeframe</li>
+          </ul>
+        </div>
+        <div class="strategy-card">
+          <div class="strategy-header">
+            <span class="strategy-badge strategy-badge-alt">Scalping</span>
+            <h3>ScalpPro v1.0</h3>
+            <p class="strategy-sub">High-speed 1-minute EMA + VWAP + RSI</p>
+          </div>
+          <ul class="strategy-features">
+            <li><strong>Entry:</strong> EMA(9)/EMA(21) crossover signal</li>
+            <li><strong>Filter:</strong> Anchored VWAP trend + RSI confirmation</li>
+            <li><strong>Gate:</strong> ADX strength threshold</li>
+            <li><strong>Exits:</strong> 3-tier partial booking (40% / 40% / 20%) + breakeven SL</li>
+            <li><strong>Swarm:</strong> 1–5 parallel lots per signal</li>
+            <li><strong>Options:</strong> Liquidity filter, spread limits, adaptive relaxation</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="code-block">
+        <div class="code-block-header">
+          <span>Custom Strategy — 3 methods to implement</span>
+          <span class="lang-tag">Python</span>
+        </div>
+        <pre><code><span class="kw">from</span> app.strategies.base <span class="kw">import</span> BaseStrategy
+<span class="kw">from</span> app.orders.models <span class="kw">import</span> TradeSignal
+
+<span class="kw">class</span> <span class="fn">MyStrategy</span>(BaseStrategy):
+
+    <span class="kw">@staticmethod</span>
+    <span class="kw">def</span> <span class="fn">default_params</span>():
+        <span class="kw">return</span> {<span class="str">"period"</span>: 14, <span class="str">"threshold"</span>: 30, <span class="str">"enabled"</span>: <span class="kw">False</span>}
+
+    <span class="kw">def</span> <span class="fn">on_candle</span>(self, df):
+        <span class="c"># df = 100+ rows of OHLCV — return BUY, SELL, or NONE</span>
+        ...
+
+    <span class="kw">def</span> <span class="fn">compute_exit</span>(self, entry_price, side, current_price, df):
+        <span class="kw">return</span> {<span class="str">"stop_loss"</span>: ..., <span class="str">"take_profit"</span>: ..., <span class="str">"trailing_stop"</span>: <span class="kw">None</span>}</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- API -->
+  <section class="section section-dark" id="api">
+    <div class="container">
+      <div class="section-header">
+        <h2>API Reference</h2>
+        <p>Full Swagger UI available at <code>/docs</code> when the server is running.</p>
+      </div>
+      <div class="grid grid-3">
+        <div class="api-group">
+          <h4>Auth</h4>
+          <div class="api-item"><span class="method get">GET</span> <code>/auth/login</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/auth/callback</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/auth/status</code></div>
+        </div>
+        <div class="api-group">
+          <h4>Market Data</h4>
+          <div class="api-item"><span class="method get">GET</span> <code>/market/ltp</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/market/candles</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/market/option-chain</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/market/option-chain/analysis</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/market/strategy-overlay</code></div>
+          <div class="api-item"><span class="method ws">WS</span> <code>/ws</code></div>
+        </div>
+        <div class="api-group">
+          <h4>Orders</h4>
+          <div class="api-item"><span class="method post">POST</span> <code>/orders/place</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/orders/book</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/orders/positions</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/orders/holdings</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/orders/funds</code></div>
+          <div class="api-item"><span class="method del">DEL</span> <code>/orders/{order_id}</code></div>
+        </div>
+        <div class="api-group">
+          <h4>Engine Control</h4>
+          <div class="api-item"><span class="method get">GET</span> <code>/engine/status</code></div>
+          <div class="api-item"><span class="method post">POST</span> <code>/engine/run-cycle</code></div>
+          <div class="api-item"><span class="method post">POST</span> <code>/engine/load-strategy</code></div>
+          <div class="api-item"><span class="method post">POST</span> <code>/engine/auto-mode</code></div>
+          <div class="api-item"><span class="method post">POST</span> <code>/engine/square-off</code></div>
+          <div class="api-item"><span class="method post">POST</span> <code>/engine/test-signal</code></div>
+        </div>
+        <div class="api-group">
+          <h4>Strategies</h4>
+          <div class="api-item"><span class="method get">GET</span> <code>/strategies/</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/strategies/schema</code></div>
+          <div class="api-item"><span class="method put">PUT</span> <code>/strategies/{id}/params</code></div>
+          <div class="api-item"><span class="method post">POST</span> <code>/strategies/{id}/toggle</code></div>
+          <div class="api-item"><span class="method put">PUT</span> <code>/strategies/{id}/instruments</code></div>
+        </div>
+        <div class="api-group">
+          <h4>Settings &amp; Monitoring</h4>
+          <div class="api-item"><span class="method get">GET</span> <code>/settings/</code></div>
+          <div class="api-item"><span class="method post">POST</span> <code>/settings/</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/monitoring/watchlist</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/monitoring/streamer/status</code></div>
+          <div class="api-item"><span class="method get">GET</span> <code>/monitoring/active-signals</code></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- QUICKSTART -->
+  <section class="section" id="quickstart">
+    <div class="container">
+      <div class="section-header">
+        <h2>Quick Start</h2>
+        <p>Up and running in under 5 minutes.</p>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h4>Clone &amp; install</h4>
+            <pre><code>git clone https://github.com/diviine/Upstox-Trigger.git
+cd Upstox-Trigger
+python -m venv venv &amp;&amp; source venv/bin/activate
+pip install -r requirements.txt</code></pre>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h4>Configure</h4>
+            <pre><code>cp .env.example .env
+# Add your Upstox API_KEY, API_SECRET, REDIRECT_URI</code></pre>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h4>Run</h4>
+            <pre><code>bash start_terminal.sh
+# Server on http://localhost:8210</code></pre>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">4</div>
+          <div class="step-content">
+            <h4>Authenticate &amp; trade</h4>
+            <pre><code># Login via OAuth
+open http://localhost:8210/auth/login
+
+# Open dashboard
+open http://localhost:8210/dashboard</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-inner">
+        <span class="footer-brand">⚡ Upstox Trigger</span>
+        <span class="footer-note">For educational purposes only. Trading involves risk.</span>
+        <a href="https://github.com/diviine/Upstox-Trigger" target="_blank" rel="noopener">GitHub ↗</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
