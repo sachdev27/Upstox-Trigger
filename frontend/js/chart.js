@@ -20,6 +20,75 @@ export class ChartManager {
             "1hour": 3600,
             "day": 86400
         };
+
+        this.istTimeFormatter = new Intl.DateTimeFormat('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+        });
+
+        this.istDateFormatter = new Intl.DateTimeFormat('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+        });
+
+        this.istDateTimeFormatter = new Intl.DateTimeFormat('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+        });
+    }
+
+    formatIstTimeParts(date) {
+        const parts = this.istTimeFormatter.formatToParts(date);
+        const hour = parts.find(part => part.type === 'hour')?.value || '';
+        const minute = parts.find(part => part.type === 'minute')?.value || '00';
+        const dayPeriod = (parts.find(part => part.type === 'dayPeriod')?.value || '').toUpperCase();
+        return `${hour}:${minute} ${dayPeriod}`.trim();
+    }
+
+    formatIstDateParts(date) {
+        const parts = this.istDateFormatter.formatToParts(date);
+        const day = parts.find(part => part.type === 'day')?.value || '01';
+        const month = parts.find(part => part.type === 'month')?.value || '01';
+        const year = parts.find(part => part.type === 'year')?.value || '1970';
+        return `${year}-${month}-${day}`;
+    }
+
+    toDate(time) {
+        if (time && typeof time === 'object' && 'year' in time) {
+            return new Date(Date.UTC(time.year, time.month - 1, time.day));
+        }
+        return new Date(Number(time) * 1000);
+    }
+
+    formatCrosshairTime(time) {
+        const date = this.toDate(time);
+        return `${this.formatIstDateParts(date)}  ${this.formatIstTimeParts(date)} IST`;
+    }
+
+    formatTickMark(time, tickMarkType) {
+        const date = this.toDate(time);
+
+        if (tickMarkType === LightweightCharts.TickMarkType.Year) {
+            return String(date.getUTCFullYear());
+        }
+
+        if (
+            tickMarkType === LightweightCharts.TickMarkType.Month ||
+            tickMarkType === LightweightCharts.TickMarkType.DayOfMonth
+        ) {
+            return this.formatIstDateParts(date);
+        }
+
+        return this.formatIstTimeParts(date);
     }
 
     init() {
@@ -45,15 +114,10 @@ export class ChartManager {
                 borderColor: 'rgba(255, 255, 255, 0.1)',
                 timeVisible: true,
                 secondsVisible: false,
+                tickMarkFormatter: (time, tickMarkType) => this.formatTickMark(time, tickMarkType),
             },
             localization: {
-                timeFormatter: time => {
-                    if (time.year) return `${time.year}-${String(time.month).padStart(2, '0')}-${String(time.day).padStart(2, '0')}`;
-                    const d = new Date(time * 1000);
-                    const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                    const timeStr = d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute:'2-digit', hour12: false });
-                    return `${dateStr}  ${timeStr} IST`;
-                }
+                timeFormatter: time => this.formatCrosshairTime(time),
             }
         });
 
