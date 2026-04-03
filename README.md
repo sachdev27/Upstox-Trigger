@@ -4,6 +4,12 @@ Automated trading platform powered by the **Upstox API v2** — real-time market
 
 Built with **FastAPI**, **SQLAlchemy**, **APScheduler**, and **vanilla JavaScript**.
 
+
+
+<img width="2554" height="1034" alt="image" src="https://github.com/user-attachments/assets/b2573336-f2c7-452c-9c8d-04fd7379e0e5" />
+
+
+
 ## Key Capabilities
 
 - **Real-time WebSocket streaming** — Protobuf-decoded market ticks (ltpc, full, option_greeks modes)
