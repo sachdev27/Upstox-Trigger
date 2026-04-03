@@ -242,9 +242,24 @@ class SuperTrendPro(BaseStrategy):
         ind = self._get_indicators(df, htf_df)
         trend = ind["st_primary"]["trend"]
 
-        # Buy/Sell signal: trend flip
-        buy_signal = trend.iloc[-1] == 1 and trend.iloc[-2] == -1
-        sell_signal = trend.iloc[-1] == -1 and trend.iloc[-2] == 1
+        # Buy/Sell signal: either immediate flip (consec=1) or delayed confirmation
+        # when consecutive-bar gating requires multiple bars.
+        consec_bars_req = auto.get("consec_bars", p["manual_consec_bars"]) if (is_auto and p["use_consecutive"]) else p["manual_consec_bars"]
+        flip_up = trend.iloc[-1] == 1 and trend.iloc[-2] == -1
+        flip_down = trend.iloc[-1] == -1 and trend.iloc[-2] == 1
+
+        if p["use_consecutive"]:
+            consec_now = int(ind["consec_bars"].iloc[-1])
+            consec_prev = int(ind["consec_bars"].iloc[-2]) if len(ind["consec_bars"]) > 1 else 0
+            buy_signal = (flip_up and consec_bars_req <= 1) or (
+                trend.iloc[-1] == 1 and consec_now >= consec_bars_req and consec_prev < consec_bars_req
+            )
+            sell_signal = (flip_down and consec_bars_req <= 1) or (
+                trend.iloc[-1] == -1 and consec_now >= consec_bars_req and consec_prev < consec_bars_req
+            )
+        else:
+            buy_signal = flip_up
+            sell_signal = flip_down
 
         if not buy_signal and not sell_signal:
             return self.reject("No primary SuperTrend flip on current bar")
@@ -256,7 +271,6 @@ class SuperTrendPro(BaseStrategy):
 
         # ── Section 3: H2 — Consecutive Bar Confirmation ───────
         if p["use_consecutive"]:
-            consec_bars_req = auto.get("consec_bars", p["manual_consec_bars"]) if is_auto else p["manual_consec_bars"]
             if ind["consec_bars"].iloc[-1] < consec_bars_req:
                 return self.reject("Rejected by H2 consecutive-bar confirmation")
 

@@ -32,6 +32,8 @@ class ScalpPro(BaseStrategy):
             # ── Risk (single-exit mode) ──────────────────────────
             "sl_atr_multiplier": 1.0,   # stop-loss distance = sl_atr_mult × ATR
             "tp_atr_multiplier": 2.0,   # take-profit distance = tp_atr_mult × ATR
+            "target_mode": "adaptive", # fixed | adaptive | none
+            "target_confidence_min": 72, # adaptive mode: TP only above this confidence
 
             # ── Partial Booking (3-tier scaled exit) ─────────────
             # Enable to book profits progressively instead of all-or-nothing.
@@ -399,6 +401,16 @@ class ScalpPro(BaseStrategy):
                 adx_val=adx_now,
             )
 
+            target_mode = str(p.get("target_mode", "adaptive") or "adaptive").lower()
+            adaptive_min = int(p.get("target_confidence_min", 72) or 72)
+            target_enabled = True
+            if target_mode == "none":
+                target_enabled = False
+            elif target_mode == "adaptive":
+                target_enabled = score >= adaptive_min
+
+            take_profit = (close + tp_dist) if target_enabled else 0.0
+
             self.set_reject_reason(None)
             return TradeSignal(
                 strategy_name=self.config.name,
@@ -407,16 +419,18 @@ class ScalpPro(BaseStrategy):
                 price=close,
                 quantity=int(p.get("quantity", 1)),
                 stop_loss=close - sl_dist,
-                take_profit=close + tp_dist,
+                take_profit=take_profit,
                 confidence_score=score,
                 metadata={
                     "atr":                atr_val,
-                    "tp1":                close + atr_val * tp1_mult,
-                    "tp2":                close + atr_val * tp2_mult,
-                    "tp3":                close + tp_dist,
+                    "tp1":                (close + atr_val * tp1_mult) if target_enabled else 0.0,
+                    "tp2":                (close + atr_val * tp2_mult) if target_enabled else 0.0,
+                    "tp3":                take_profit,
                     "tp1_book_pct":       p.get("tp1_book_pct", 40),
                     "tp2_book_pct":       p.get("tp2_book_pct", 40),
-                    "partial_tp_enabled": p.get("partial_tp_enabled", True),
+                    "partial_tp_enabled": bool(p.get("partial_tp_enabled", True)) and target_enabled,
+                    "target_mode":        target_mode,
+                    "target_enabled":     target_enabled,
                     "trailing_atr_mult":  p.get("trailing_atr_mult", 1.0),
                     "swarm_count":        int(p.get("swarm_count", 1)),
                     "score_breakdown":    score_parts,
@@ -455,6 +469,16 @@ class ScalpPro(BaseStrategy):
                 adx_val=adx_now,
             )
 
+            target_mode = str(p.get("target_mode", "adaptive") or "adaptive").lower()
+            adaptive_min = int(p.get("target_confidence_min", 72) or 72)
+            target_enabled = True
+            if target_mode == "none":
+                target_enabled = False
+            elif target_mode == "adaptive":
+                target_enabled = score >= adaptive_min
+
+            take_profit = (close - tp_dist) if target_enabled else 0.0
+
             self.set_reject_reason(None)
             return TradeSignal(
                 strategy_name=self.config.name,
@@ -463,16 +487,18 @@ class ScalpPro(BaseStrategy):
                 price=close,
                 quantity=int(p.get("quantity", 1)),
                 stop_loss=close + sl_dist,
-                take_profit=close - tp_dist,
+                take_profit=take_profit,
                 confidence_score=score,
                 metadata={
                     "atr":                atr_val,
-                    "tp1":                close - atr_val * tp1_mult,
-                    "tp2":                close - atr_val * tp2_mult,
-                    "tp3":                close - tp_dist,
+                    "tp1":                (close - atr_val * tp1_mult) if target_enabled else 0.0,
+                    "tp2":                (close - atr_val * tp2_mult) if target_enabled else 0.0,
+                    "tp3":                take_profit,
                     "tp1_book_pct":       p.get("tp1_book_pct", 40),
                     "tp2_book_pct":       p.get("tp2_book_pct", 40),
-                    "partial_tp_enabled": p.get("partial_tp_enabled", True),
+                    "partial_tp_enabled": bool(p.get("partial_tp_enabled", True)) and target_enabled,
+                    "target_mode":        target_mode,
+                    "target_enabled":     target_enabled,
                     "trailing_atr_mult":  p.get("trailing_atr_mult", 1.0),
                     "swarm_count":        int(p.get("swarm_count", 1)),
                     "score_breakdown":    score_parts,

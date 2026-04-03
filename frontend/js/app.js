@@ -85,6 +85,21 @@ function isBottomTabActive(tabId) {
     return !!document.getElementById(`tab-${tabId}`)?.classList.contains('active');
 }
 
+function parseEventTimeMs(value) {
+    if (!value) return 0;
+    const direct = new Date(value).getTime();
+    if (Number.isFinite(direct)) return direct;
+
+    // Support backend time-only stamps like HH:MM:SS by anchoring to today.
+    if (typeof value === 'string' && /^\d{2}:\d{2}:\d{2}$/.test(value)) {
+        const now = new Date();
+        const [h, m, s] = value.split(':').map((v) => Number(v));
+        const anchored = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s, 0).getTime();
+        return Number.isFinite(anchored) ? anchored : 0;
+    }
+    return 0;
+}
+
 // --- IndexedDB Cache System ---
 const DB_NAME = 'TradingTerminalDB';
 const DB_VERSION = 1;
@@ -630,6 +645,7 @@ async function refreshTrades() {
         // Normalize both sources to explicit UI fields that match table headers exactly:
         // Time | Action | Instrument | Price | SL | TP | Mode
         const normPaper = paperTrades.map(t => ({
+            _meta: t.metadata || {},
             time: t.timestamp,
             action: (t.action || '-').toUpperCase(),
             instrument: t.instrument_key?.split('|')[1] || t.instrument_key || '-',
@@ -637,7 +653,15 @@ async function refreshTrades() {
             price: t.price,
             stop_loss: t.stop_loss,
             take_profit: t.take_profit,
-            mode: t.status === 'live' ? '🔴 Live' : '📋 Paper',
+            mode: (() => {
+                const status = String(t.status || '').toLowerCase();
+                const meta = t.metadata || {};
+                const placementModes = Array.isArray(meta._placement_modes) ? meta._placement_modes : [];
+                const hasLivePlacement = placementModes.includes('live');
+                const hasGttRef = !!meta.gtt_order_id || (Array.isArray(meta._gtt_order_ids) && meta._gtt_order_ids.length > 0);
+                if (hasLivePlacement || hasGttRef || status.includes('gtt') || status.includes('live')) return '🔴 Live';
+                return '📋 Paper';
+            })(),
             option_side: t.metadata?.option_side || null,
             strike_price: t.metadata?.strike_price ?? null,
             expiry_date: t.metadata?.expiry_date || null,
@@ -1089,6 +1113,12 @@ window.runExecutionProbe = async (action = 'BUY') => {
         const entryOrderIds = Array.isArray(triggerResult?.result?.gtt_order_ids) ? triggerResult.result.gtt_order_ids : [];
         const executionError = triggerResult?.result?.execution_error || null;
         const executionErrorCode = triggerResult?.result?.execution_error_code || null;
+        const appliedTargetMode = String(triggerResult?.result?.target_mode_applied || '').toLowerCase();
+        const appliedTargetEnabled = !!triggerResult?.result?.target_enabled;
+        const appliedTp = Number(triggerResult?.result?.take_profit_applied || 0);
+        const appliedProbeScore = Number(triggerResult?.result?.probe_confidence_score || 0);
+        const appliedTargetThreshold = Number(triggerResult?.result?.target_confidence_min || 0);
+        const expectedTargetMode = String(document.getElementById('exec-target-mode')?.value || '').toLowerCase();
         const liveModeNeedsBrokerProof = !after.paperTrading;
 
         if (legCheckPass !== null) {
@@ -1109,12 +1139,28 @@ window.runExecutionProbe = async (action = 'BUY') => {
             });
         }
 
+        if (expectedTargetMode) {
+            checks.splice(3, 0, {
+                label: 'Target mode applied',
+                pass: !appliedTargetMode || appliedTargetMode === expectedTargetMode,
+                detail: `Expected ${expectedTargetMode}, got ${appliedTargetMode || 'n/a'}`,
+            });
+            checks.splice(4, 0, {
+                label: 'TP behavior matches target mode',
+                pass: expectedTargetMode !== 'none' ? true : (appliedTp <= 0),
+                detail: expectedTargetMode === 'none'
+                    ? `take_profit=${appliedTp.toFixed(2)} (must be 0.00)`
+                    : `take_profit=${appliedTp.toFixed(2)} | enabled=${appliedTargetEnabled}`,
+            });
+        }
+
         const failed = checks.filter(c => !c.pass);
         const isPass = failed.length === 0;
 
         const lines = [
             `<div class="probe-title">${isPass ? 'PASS' : 'ATTENTION'} - ${modeText}</div>`,
             `<div class="probe-subtitle">Instrument: ${currentInstrumentName} | Trigger: ${signalStatus} | Action: ${probeAction}</div>`,
+            `<div class="probe-subtitle">Target: ${appliedTargetMode || 'n/a'} | Enabled: ${appliedTargetEnabled ? 'Yes' : 'No'} | TP: ${appliedTp.toFixed(2)} | Probe score: ${appliedProbeScore} | Adaptive threshold: ${appliedTargetThreshold}</div>`,
             '<ul class="probe-list">',
             ...checks.map(c => `<li class="${c.pass ? 'pass' : 'fail'}">${c.pass ? 'OK' : 'FAIL'} - ${c.label} (${c.detail})</li>`),
             '</ul>',
@@ -1734,9 +1780,10 @@ async function refreshDecisionTimeline() {
         const events = [];
 
         signals.forEach((s, idx) => {
+            const tsMs = parseEventTimeMs(s.timestamp) || (Date.now() - idx);
             events.push({
                 id: `sig-${idx}-${s.timestamp || ''}-${s.instrument || s.instrument_key || ''}`,
-                ts: new Date(s.timestamp || Date.now()).getTime(),
+                ts: tsMs,
                 time: s.timestamp || '-',
                 stage: 'Signal Evaluated',
                 instrument: s.instrument || s.instrument_key || '-',
@@ -1748,9 +1795,10 @@ async function refreshDecisionTimeline() {
         });
 
         rejections.forEach((r, idx) => {
+            const tsMs = parseEventTimeMs(r.timestamp) || (Date.now() - idx);
             events.push({
                 id: `rej-${idx}-${r.timestamp || ''}-${r.instrument_key || ''}`,
-                ts: Date.now() - idx,
+                ts: tsMs,
                 time: r.timestamp || '-',
                 stage: 'Signal Evaluated',
                 instrument: r.instrument || r.instrument_key || '-',
@@ -1762,7 +1810,7 @@ async function refreshDecisionTimeline() {
         });
 
         trades.forEach((t, idx) => {
-            const tsMs = new Date(t.timestamp || Date.now()).getTime();
+            const tsMs = parseEventTimeMs(t.timestamp) || (Date.now() - idx);
             const statusText = String(t.status || '').toLowerCase();
             const isPending = statusText.includes('pending');
             const isErr = statusText.includes('rejected') || statusText.includes('cancelled') || statusText.includes('failed');
@@ -1771,7 +1819,7 @@ async function refreshDecisionTimeline() {
             const meta = t.metadata || {};
             events.push({
                 id: `tr-${idx}-${t.id || ''}`,
-                ts: Number.isFinite(tsMs) ? tsMs : (Date.now() - idx),
+                ts: tsMs,
                 time: t.timestamp ? new Date(t.timestamp).toLocaleTimeString('en-IN', { hour12: false }) : '-',
                 stage: 'Execution',
                 instrument: t.instrument_key || '-',
@@ -2379,8 +2427,13 @@ window.saveExecutionSettings = async () => {
         const slMult = parseFloat(document.getElementById('exec-sl-mult')?.value);
         const tpMult = parseFloat(document.getElementById('exec-tp-mult')?.value);
         const trailMult = parseFloat(document.getElementById('exec-trail-mult')?.value);
+        const targetMode = String(document.getElementById('exec-target-mode')?.value || 'adaptive');
+        const targetConfidence = parseInt(document.getElementById('exec-target-confidence')?.value || '72', 10);
         if (slMult > 0 || tpMult > 0 || trailMult > 0) {
-            await saveRiskMultipliersToStrategy(slMult, tpMult, trailMult);
+            await saveRiskMultipliersToStrategy(slMult, tpMult, trailMult, {
+                target_mode: targetMode,
+                target_confidence_min: Number.isFinite(targetConfidence) ? targetConfidence : 72,
+            });
         }
 
         showToast("Execution settings saved", "success");
@@ -2393,8 +2446,15 @@ window.saveExecutionSettings = async () => {
 
 // Strategy-specific key names for SL/TP/trailing multipliers
 const RISK_KEY_MAP = {
-    SuperTrendPro: { sl: 'sl_multiplier', tp: 'tp_multiplier', trail: 'trail_multiplier' },
-    ScalpPro:      { sl: 'sl_atr_multiplier', tp: 'tp_atr_multiplier', trail: 'trailing_atr_mult' },
+    SuperTrendPro: { sl: 'sl_multiplier', tp: 'tp_multiplier', trail: 'trail_multiplier', targetMode: null, targetThreshold: null },
+    ScalpPro:      { sl: 'sl_atr_multiplier', tp: 'tp_atr_multiplier', trail: 'trailing_atr_mult', targetMode: 'target_mode', targetThreshold: 'target_confidence_min' },
+};
+
+window.toggleExecutionTargetInputs = () => {
+    const mode = String(document.getElementById('exec-target-mode')?.value || 'adaptive').toLowerCase();
+    const group = document.getElementById('exec-target-confidence-group');
+    if (!group) return;
+    group.style.display = mode === 'adaptive' ? 'block' : 'none';
 };
 
 window.populateRiskLevels = () => {
@@ -2420,6 +2480,28 @@ window.populateRiskLevels = () => {
     const slVal = getParamLiveValue(keys.sl) ?? slParam?.default ?? 1.0;
     const tpVal = getParamLiveValue(keys.tp) ?? tpParam?.default ?? 2.0;
     const trailVal = getParamLiveValue(keys.trail) ?? trailParam?.default ?? 1.0;
+
+    // Target behavior controls are strategy-specific (currently ScalpPro).
+    const targetCard = document.getElementById('exec-target-card');
+    const targetModeEl = document.getElementById('exec-target-mode');
+    const targetConfEl = document.getElementById('exec-target-confidence');
+
+    if (targetCard && targetModeEl && targetConfEl) {
+        if (keys.targetMode && keys.targetThreshold) {
+            const targetModeParam = schema.params.find(p => p.name === keys.targetMode);
+            const targetThresholdParam = schema.params.find(p => p.name === keys.targetThreshold);
+
+            const modeVal = String(getParamLiveValue(keys.targetMode) ?? targetModeParam?.default ?? 'adaptive');
+            const thresholdVal = Number(getParamLiveValue(keys.targetThreshold) ?? targetThresholdParam?.default ?? 72);
+
+            targetCard.style.display = 'block';
+            targetModeEl.value = modeVal;
+            targetConfEl.value = Number.isFinite(thresholdVal) ? thresholdVal : 72;
+            window.toggleExecutionTargetInputs();
+        } else {
+            targetCard.style.display = 'none';
+        }
+    }
 
     document.getElementById('exec-sl-mult').value = slVal;
     document.getElementById('exec-tp-mult').value = tpVal;
@@ -2464,7 +2546,7 @@ function updateRiskExample(sl, tp, trail) {
     });
 });
 
-async function saveRiskMultipliersToStrategy(sl, tp, trail) {
+async function saveRiskMultipliersToStrategy(sl, tp, trail, extras = {}) {
     const selector = document.getElementById('strategy-selector');
     if (!selector || selector.options.length === 0) return;
     const cls = selector.options[selector.selectedIndex]?.dataset?.class;
@@ -2479,6 +2561,13 @@ async function saveRiskMultipliersToStrategy(sl, tp, trail) {
     if (sl > 0) setDynParam(keys.sl, sl);
     if (tp > 0) setDynParam(keys.tp, tp);
     if (trail > 0) setDynParam(keys.trail, trail);
+
+    if (keys.targetMode && typeof extras.target_mode === 'string') {
+        setDynParam(keys.targetMode, extras.target_mode);
+    }
+    if (keys.targetThreshold && Number.isFinite(Number(extras.target_confidence_min))) {
+        setDynParam(keys.targetThreshold, Number(extras.target_confidence_min));
+    }
 
     // Re-apply strategy with updated params (same as clicking "Load Strategy")
     const strategyClass = selector.options[selector.selectedIndex].dataset.class;

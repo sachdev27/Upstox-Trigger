@@ -504,6 +504,25 @@
                                     Select a strategy and load it to see computed levels.
                                 </div>
                             </div>
+                            <div class="settings-card" id="exec-target-card" style="background: rgba(255,152,0,0.05); border-color: #ff9800; margin-top: 12px; padding: 14px;">
+                                <h4 style="color: #ff9800; font-size: 0.8rem; margin-bottom: 8px;">Target Behavior</h4>
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: end;">
+                                    <div class="form-group" style="margin: 0;">
+                                        <label class="form-label">Target Mode</label>
+                                        <select id="exec-target-mode" class="form-input" onchange="toggleExecutionTargetInputs()">
+                                            <option value="adaptive">Adaptive (pattern strength)</option>
+                                            <option value="none">No Target (trailing SL only)</option>
+                                            <option value="fixed">Fixed Target</option>
+                                        </select>
+                                        <small class="text-muted">Adaptive enables TP only when confidence is strong.</small>
+                                    </div>
+                                    <div class="form-group" id="exec-target-confidence-group" style="margin: 0;">
+                                        <label class="form-label">Adaptive Confidence Threshold</label>
+                                        <input type="number" id="exec-target-confidence" class="form-input" min="1" max="100" step="1" value="72">
+                                        <small class="text-muted">TP appears only if score >= this threshold.</small>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                     <div style="padding: 0 20px 20px;">

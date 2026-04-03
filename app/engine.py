@@ -894,7 +894,23 @@ class AutomationEngine:
         has_htf = strategy.params.get("use_htf_filter")
         if has_htf:
             htf_tf = strategy.params.get("htf_timeframe", "1D")
-            htf_interval = "day" if htf_tf in ["1D", "D", "W", "1W"] else "60minute" if htf_tf in ["1H", "60m"] else "day"
+            htf_tf_map = {
+                "1m": "1minute",
+                "5m": "5minute",
+                "15m": "15minute",
+                "30m": "30minute",
+                "1H": "60minute",
+                "60m": "60minute",
+                "1hour": "60minute",
+                # Upstox does not provide native 4h bars; use day as conservative HTF fallback.
+                "4H": "day",
+                "1D": "day",
+                "D": "day",
+                "day": "day",
+                "1W": "day",
+                "W": "day",
+            }
+            htf_interval = htf_tf_map.get(str(htf_tf), "day")
             tasks.append(asyncio.to_thread(self._market_service.get_historical_candles, instrument_key, htf_interval))
 
         # 2. Wait for Rate Limit (consume tokens for all tasks in this evaluation)
@@ -1394,6 +1410,10 @@ class AutomationEngine:
         if spot_price <= 0:
             spot_price = 25000.0  # fallback
 
+        active_params = {}
+        if self._active_strategies:
+            active_params = (self._active_strategies[0][0].params or {})
+
         # Use the active strategy's SL/TP multipliers if available
         sl_price = round(spot_price * 0.996, 2)   # default 0.4% SL
         tp_price = round(spot_price * 1.012, 2)    # default 1.2% TP
@@ -1415,6 +1435,19 @@ class AutomationEngine:
                     sl_price = round(spot_price + sl_dist, 2)
                     tp_price = round(spot_price - tp_dist, 2)
 
+        # Respect strategy target behavior during probe.
+        probe_confidence = int(active_params.get("probe_confidence_score", 75) or 75)
+        target_mode = str(active_params.get("target_mode", "fixed") or "fixed").lower()
+        target_confidence_min = int(active_params.get("target_confidence_min", 72) or 72)
+        target_enabled = True
+        if target_mode == "none":
+            target_enabled = False
+        elif target_mode == "adaptive":
+            target_enabled = probe_confidence >= target_confidence_min
+
+        if not target_enabled:
+            tp_price = 0.0
+
         signal = TradeSignal(
             strategy_name="Manual Test",
             instrument_key=instrument_key,
@@ -1422,10 +1455,13 @@ class AutomationEngine:
             price=spot_price,
             stop_loss=sl_price,
             take_profit=tp_price,
-            confidence_score=5,
+            confidence_score=probe_confidence,
         )
         signal.metadata["requested_action"] = normalized_action
         signal.metadata["force_live"] = bool(force_live)
+        signal.metadata["target_mode"] = target_mode
+        signal.metadata["target_confidence_min"] = target_confidence_min
+        signal.metadata["target_enabled"] = bool(target_enabled)
 
         # Keep status counters consistent with regular strategy-originated signals.
         self._signals_log.append({
@@ -1478,6 +1514,11 @@ class AutomationEngine:
             "force_live": bool(force_live),
             "execution_mode": execution_mode,
             "gtt_order_ids": entry_order_ids,
+            "probe_confidence_score": probe_confidence,
+            "target_mode_applied": target_mode,
+            "target_confidence_min": target_confidence_min,
+            "target_enabled": bool(target_enabled),
+            "take_profit_applied": float(signal.take_profit or 0.0),
             "execution_error": (signal.metadata or {}).get("_last_execution_error"),
             "execution_error_code": (signal.metadata or {}).get("_last_execution_error_code"),
         }
