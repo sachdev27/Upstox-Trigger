@@ -164,6 +164,9 @@ export const api = {
     async runCycle() {
         return fetch(`${API_BASE}/engine/run-cycle`, { method: 'POST' }).then(r => r.json());
     },
+    async squareOffAll() {
+        return fetch(`${API_BASE}/engine/square-off`, { method: 'POST' }).then(r => r.json());
+    },
     async updateConfig(config) {
         return fetch(`${API_BASE}/engine/config`, {
             method: 'POST',

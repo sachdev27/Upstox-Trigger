@@ -555,188 +555,252 @@
                 </div>
             </div>
 
-            <!-- Bottom Tabs/Tables -->
-            <div id="bottom-panel" class="bottom-panel">
-                <div class="bottom-tabs">
-                    <button class="bottom-tab active" onclick="switchBottomTab('positions')">Positions</button>
-                    <button class="bottom-tab" onclick="switchBottomTab('orderbook')">Order Book</button>
-                    <button class="bottom-tab" onclick="switchBottomTab('trades')">Trade History</button>
-                    <button class="bottom-tab" onclick="clearTradeHistory()" title="Clear trade history" style="margin-left:auto; font-size:0.8rem; padding:4px 8px; min-width:auto;">🗑️</button>
-                    <button class="bottom-tab" onclick="switchBottomTab('signals')">Signals</button>
-                    <button class="bottom-tab" onclick="switchBottomTab('active-signals')">🟢 Active Signals</button>
-                    <button class="bottom-tab" onclick="switchBottomTab('activity')">Activity Log</button>
-                </div>
-
-                <!-- Positions Tab -->
-                <div id="tab-positions" class="bottom-content active">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Instrument</th>
-                                <th>Qty</th>
-                                <th>Side</th>
-                                <th>Avg Price</th>
-                                <th>LTP</th>
-                                <th>P&L</th>
-                            </tr>
-                        </thead>
-                        <tbody id="positions-body">
-                            <tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">No open positions</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Order Book Tab -->
-                <div id="tab-orderbook" class="bottom-content">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Instrument</th>
-                                <th>Side</th>
-                                <th>Qty</th>
-                                <th>Price</th>
-                                <th>Status</th>
-                                <th>Message</th>
-                            </tr>
-                        </thead>
-                        <tbody id="order-book-body">
-                            <tr><td colspan="7" style="text-align:center; padding: 20px;" class="text-muted">No orders today</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Trades Tab -->
-                <div id="tab-trades" class="bottom-content">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Action</th>
-                                <th>Instrument</th>
-                                <th>Price</th>
-                                <th>SL</th>
-                                <th>TP</th>
-                                <th>Mode</th>
-                            </tr>
-                        </thead>
-                        <tbody id="trades-body">
-                            <tr><td colspan="7" style="text-align:center; padding: 20px;" class="text-muted">No trades today</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Signals Tab -->
-                <div id="tab-signals" class="bottom-content">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Action</th>
-                                <th>Instrument</th>
-                                <th>Price</th>
-                                <th>Score</th>
-                            </tr>
-                        </thead>
-                        <tbody id="signals-body">
-                            <tr><td colspan="5" style="text-align:center; padding: 20px;" class="text-muted">No signals generated</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Activity Log -->
-                <div id="tab-activity" class="bottom-content" style="background: var(--bg-dark); overflow-y: auto;">
-                    <div id="activity-log" style="padding: 8px 0;">
-                        <div class="log-line"><span class="log-time">[System]</span> Terminal initialized.</div>
+            <!-- Bottom Intent Panel -->
+            <div id="bottom-panel" class="bottom-panel snap-28">
+                <div class="bottom-toolbar">
+                    <div class="bottom-tabs">
+                        <button class="bottom-tab active" onclick="switchBottomTab('decisions')">Decisions</button>
+                        <button class="bottom-tab" onclick="switchBottomTab('execution')">Execution</button>
+                        <button class="bottom-tab" onclick="switchBottomTab('system')">System</button>
+                    </div>
+                    <div class="bottom-actions">
+                        <button class="btn btn-outline panel-snap-btn" onclick="setBottomPanelSnap('28')">28%</button>
+                        <button class="btn btn-outline panel-snap-btn" onclick="setBottomPanelSnap('45')">45%</button>
+                        <button class="btn btn-outline panel-snap-btn" onclick="setBottomPanelSnap('hidden')">Hide</button>
                     </div>
                 </div>
 
-                <!-- Active Signals Tab -->
-                <div id="tab-active-signals" class="bottom-content">
+                <!-- Decisions Tab -->
+                <div id="tab-decisions" class="bottom-content active">
+                    <div class="decision-filter-row">
+                        <label class="form-label" style="margin:0;">Filter</label>
+                        <select id="decision-filter" class="form-input" style="max-width: 220px;" onchange="refreshDecisionTimeline()">
+                            <option value="all">All events</option>
+                            <option value="blocked">Blocked only</option>
+                            <option value="executed">Executed only</option>
+                            <option value="pending">Pending only</option>
+                            <option value="error">Errors only</option>
+                        </select>
+                    </div>
                     <table>
                         <thead>
                             <tr>
                                 <th>Time</th>
-                                <th>Strategy</th>
-                                <th>Symbol</th>
-                                <th>Name</th>
-                                <th>TF</th>
-                                <th>Action</th>
-                                <th>Price</th>
-                                <th>SL</th>
-                                <th>TP</th>
-                                <th>Score</th>
-                                <th>Status</th>
-                                <th>Actions</th>
+                                <th>Stage</th>
+                                <th>Instrument</th>
+                                <th>Outcome</th>
+                                <th>Reason / Detail</th>
                             </tr>
                         </thead>
-                        <tbody id="active-signals-body">
-                            <tr><td colspan="12" style="text-align:center; padding: 20px;" class="text-muted">No active signals</td></tr>
+                        <tbody id="decision-timeline-body">
+                            <tr><td colspan="5" style="text-align:center; padding: 20px;" class="text-muted">No timeline events yet</td></tr>
                         </tbody>
                     </table>
+                </div>
+
+                <!-- Execution Tab -->
+                <div id="tab-execution" class="bottom-content">
+                    <div class="execution-split-grid">
+                        <div>
+                            <h4 class="panel-mini-title">Active Positions</h4>
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Instrument</th>
+                                        <th>Qty</th>
+                                        <th>Side</th>
+                                        <th>Avg Price</th>
+                                        <th>LTP</th>
+                                        <th>P&L</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="positions-body">
+                                    <tr><td colspan="6" style="text-align:center; padding: 20px;" class="text-muted">No open positions</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div>
+                            <h4 class="panel-mini-title">Pending / Broker Orders</h4>
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Instrument</th>
+                                        <th>Side</th>
+                                        <th>Qty</th>
+                                        <th>Price</th>
+                                        <th>Status</th>
+                                        <th>Message</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="order-book-body">
+                                    <tr><td colspan="7" style="text-align:center; padding: 20px;" class="text-muted">No orders today</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div style="padding: 8px 16px 0; display:flex; justify-content:flex-end;">
+                        <button class="btn btn-outline" onclick="clearTradeHistory()" style="width:auto;">🗑️ Clear Trade History</button>
+                    </div>
+                    <div>
+                        <h4 class="panel-mini-title" style="padding: 8px 16px 0;">Fills</h4>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Action</th>
+                                    <th>Instrument</th>
+                                    <th>Price</th>
+                                    <th>SL</th>
+                                    <th>TP</th>
+                                    <th>Mode</th>
+                                </tr>
+                            </thead>
+                            <tbody id="trades-body">
+                                <tr><td colspan="7" style="text-align:center; padding: 20px;" class="text-muted">No trades today</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- System Tab -->
+                <div id="tab-system" class="bottom-content">
+                    <div class="system-grid">
+                        <div class="system-card">
+                            <h4>Connectivity</h4>
+                            <div id="system-connectivity-timeline" class="system-timeline">
+                                <div class="system-event">Waiting for system data...</div>
+                            </div>
+                        </div>
+                        <div class="system-card">
+                            <h4>Auth / Proxy / API</h4>
+                            <div id="system-health-timeline" class="system-timeline">
+                                <div class="system-event">Waiting for system data...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="activity-log" style="padding: 8px 0; background: var(--bg-dark); margin-top: 10px; border-top: 1px solid var(--border-color);">
+                        <div class="log-line"><span class="log-time">[System]</span> Terminal initialized.</div>
+                    </div>
                 </div>
             </div>
         </main>
 
-        <!-- ── Right Panel (Controls) ── -->
+        <!-- ── Right Panel (Compact Rail) ── -->
         <aside class="panel-right">
 
-            <div class="panel-header">Engine Control</div>
-            <div class="control-section">
+            <div class="panel-header">Action Bar</div>
+            <div class="control-section rail-action-bar">
+                <button class="btn btn-outline" onclick="pauseEngineNow()">Pause Engine</button>
+                <button class="btn btn-outline" onclick="flattenAllNow()">Flatten All</button>
+                <button class="btn btn-outline" onclick="reloadDataNow()">Reload Data</button>
+                <button class="btn btn-outline" onclick="reconnectWSNow()">Reconnect WS</button>
+            </div>
 
-                <div class="auto-mode-card" id="auto-mode-card">
-                    <div>
-                        <div style="font-weight: 600; font-size: 0.95rem;">Auto Mode</div>
-                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">Trades autonomously</div>
-                    </div>
+            <div class="panel-header">Engine Control</div>
+            <div class="control-section rail-block" id="rail-engine-control">
+                <div class="rail-row">
+                    <span>Auto Mode</span>
                     <label class="toggle">
                         <input type="checkbox" id="toggle-automode" onchange="toggleAutoMode(this.checked)">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
-
-                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                    <button class="btn btn-primary" onclick="initializeEngine()">🚀 Initialize</button>
-                    <button class="btn btn-outline" onclick="runCycle()">🔄 Run 1x</button>
+                <div class="rail-row">
+                    <span>Strategy Enabled</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="toggle-strategy-enabled" onchange="toggleStrategyRuntime(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
                 </div>
-                <div style="font-size: 0.75rem; text-align: center; color: var(--text-muted);">
-                    Status: <span id="engine-status-text" class="text-warning">Not Initialized</span>
+                <div class="rail-row">
+                    <span>Paper Mode</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="toggle-papermode-rail" onchange="togglePaperMode(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
                 </div>
+                <div class="rail-row">
+                    <span>Emergency Halt</span>
+                    <button class="btn btn-outline emergency-btn" onclick="emergencyHaltNow()" style="width:auto;">HALT</button>
+                </div>
+                <div class="rail-status">Status: <span id="engine-status-text" class="text-warning">Not Initialized</span></div>
+            </div>
 
-                <div class="execution-probe-card" id="execution-probe-card">
-                    <button class="execution-probe-header execution-probe-toggle" type="button" onclick="toggleExecutionProbe()" aria-expanded="true" aria-controls="execution-probe-body">
-                        <span>Execution Probe</span>
-                        <span id="execution-probe-chevron" class="execution-probe-chevron">▾</span>
-                    </button>
-                    <div id="execution-probe-body" class="execution-probe-body">
-                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                            <button class="btn btn-outline" onclick="triggerTestSignalWithAction('BUY')">Test BUY→CE</button>
-                            <button class="btn btn-outline" onclick="triggerTestSignalWithAction('SELL')">Test SELL→PE</button>
+            <div class="panel-header">Risk Guardrails</div>
+            <div class="control-section rail-block" id="rail-risk-guardrails">
+                <div class="risk-rail-wrap">
+                    <div class="risk-thermometer">
+                        <div id="risk-thermometer-fill" class="risk-thermometer-fill"></div>
+                    </div>
+                    <div class="risk-metrics">
+                        <div class="rail-kv"><span>Daily Loss Used</span><strong id="rail-daily-loss-used">0%</strong></div>
+                        <div class="rail-kv"><span>Open Risk</span><strong id="rail-open-risk">0</strong></div>
+                        <div class="rail-kv"><span>Max Positions</span><strong id="rail-max-positions">0 / 0</strong></div>
+                    </div>
+                </div>
+                <div id="rail-risk-warning" class="risk-warning-chip">Risk Normal</div>
+                <button class="btn btn-outline emergency-btn" onclick="emergencyHaltNow()">Kill Switch</button>
+            </div>
+
+            <div class="panel-header">Execution Health</div>
+            <div class="control-section rail-block" id="rail-execution-health">
+                <div class="rail-kv"><span>Broker Auth</span><strong id="rail-auth-health">Unknown</strong></div>
+                <div class="rail-kv"><span>Proxy Route</span><strong id="rail-proxy-route">Unknown</strong></div>
+                <div class="rail-kv"><span>Rejection Rate</span><strong id="rail-rejection-rate">0%</strong></div>
+                <div class="rail-kv"><span>Pending Entries</span><strong id="rail-pending-entries">0</strong></div>
+            </div>
+
+            <div class="panel-header">Instrument Context</div>
+            <div class="control-section rail-block" id="rail-instrument-context">
+                <div class="rail-kv"><span>Symbol</span><strong id="rail-symbol">-</strong></div>
+                <div class="rail-kv"><span>LTP</span><strong id="rail-ltp">-</strong></div>
+                <div class="rail-kv"><span>Spread</span><strong id="rail-spread">N/A</strong></div>
+                <div class="rail-kv"><span>Liquidity Score</span><strong id="rail-liquidity-score">N/A</strong></div>
+            </div>
+
+            <details class="rail-advanced" id="rail-advanced">
+                <summary>Advanced</summary>
+                <div class="control-section" style="padding-top: 10px;">
+                    <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                        <button class="btn btn-primary" onclick="initializeEngine()">🚀 Initialize</button>
+                        <button class="btn btn-outline" onclick="runCycle()">🔄 Run 1x</button>
+                    </div>
+                    <div class="execution-probe-card" id="execution-probe-card">
+                        <button class="execution-probe-header execution-probe-toggle" type="button" onclick="toggleExecutionProbe()" aria-expanded="true" aria-controls="execution-probe-body">
+                            <span>Execution Probe</span>
+                            <span id="execution-probe-chevron" class="execution-probe-chevron">▾</span>
+                        </button>
+                        <div id="execution-probe-body" class="execution-probe-body">
+                            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                                <button class="btn btn-outline" onclick="triggerTestSignalWithAction('BUY')">Test BUY→CE</button>
+                                <button class="btn btn-outline" onclick="triggerTestSignalWithAction('SELL')">Test SELL→PE</button>
+                            </div>
+                            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                                <button class="btn btn-primary" onclick="runExecutionProbe('BUY')">Verify BUY Flow</button>
+                                <button class="btn btn-primary" onclick="runExecutionProbe('SELL')">Verify SELL Flow</button>
+                            </div>
+                            <div id="execution-probe-result" class="execution-probe-result probe-neutral">
+                                Run Verify Flow to test signal -> cycle -> order path.
+                            </div>
                         </div>
-                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                            <button class="btn btn-primary" onclick="runExecutionProbe('BUY')">Verify BUY Flow</button>
-                            <button class="btn btn-primary" onclick="runExecutionProbe('SELL')">Verify SELL Flow</button>
+                    </div>
+
+                    <div class="panel-header" style="margin: 12px -16px 0;">Strategy Feedback</div>
+                    <div class="control-section" id="strategy-hud-container" style="padding: 0; background: var(--bg-color);">
+                        <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
+                            Waiting for active strategy...
                         </div>
-                        <div id="execution-probe-result" class="execution-probe-result probe-neutral">
-                            Run Verify Flow to test signal -> cycle -> order path.
+                    </div>
+
+                    <div class="panel-header" style="margin: 12px -16px 0;">OC Insight</div>
+                    <div class="control-section" id="oc-insight-container" style="padding: 0; background: var(--bg-color);">
+                        <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
+                            Select an INDEX instrument to view OC analysis
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <div class="panel-header">Strategy Feedback</div>
-            <div class="control-section" id="strategy-hud-container" style="padding: 0; background: var(--bg-color);">
-                <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
-                    Waiting for active strategy...
-                </div>
-            </div>
-
-            <div class="panel-header">OC Insight</div>
-            <div class="control-section" id="oc-insight-container" style="padding: 0; background: var(--bg-color);">
-                <div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
-                    Select an INDEX instrument to view OC analysis
-                </div>
-            </div>
+            </details>
 
         </aside>
     </div>
@@ -763,6 +827,6 @@
 
     <!-- Modularized JS -->
 
-    <script type="module" src="/static/js/app.js?v=12"></script>
+    <script type="module" src="/static/js/app.js?v=13"></script>
 </body>
 </html>

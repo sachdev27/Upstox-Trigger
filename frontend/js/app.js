@@ -46,6 +46,11 @@ let lastOverlayRefreshAt = 0;
 const OVERLAY_REFRESH_MS = 30000;
 let currentMainView = state.get('currentMainView');
 state.on('currentMainView', (v) => { currentMainView = v; });
+const BOTTOM_TAB_KEY = 'bottomIntentTab';
+const BOTTOM_SNAP_KEY = 'bottomPanelSnap';
+const DECISION_FILTER_KEY = 'decisionFilter';
+const DECISION_EXPANDED_KEY = 'decisionExpandedKeys';
+let decisionExpanded = new Set();
 
 // Bottom-panel row caches for delta rendering (key -> serialized row state)
 const tradeRowCache = new Map();
@@ -169,6 +174,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupEventListeners();
     setupGlobalSearch();
     applyExecutionProbeState();
+    initBottomPanelState();
 
     // Interval updates
     setInterval(updateClock, 1000);
@@ -178,6 +184,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     setInterval(refreshOrderBook, 45000);
     setInterval(refreshActiveSignals, 20000); // Every 20 seconds
     setInterval(refreshSignalRejections, 20000);
+    setInterval(refreshDecisionTimeline, 20000);
+    setInterval(refreshSystemTimeline, 20000);
+    setInterval(refreshRailInstrumentContext, 30000);
     setInterval(() => scheduleOverlayRefresh(false), OVERLAY_REFRESH_MS); // Throttled strategy HUD/overlay
     setInterval(refreshOcInsight, 20000); // OC insight every 20s
 
@@ -298,9 +307,9 @@ function handleWsMessage(msg) {
                 break;
             case 'new_signal':
                 addLog(`🎯 Signal: ${msg.data.action} on ${msg.data.instrument}`, 'info');
-                showToast(`New Signal: ${msg.data.action} on ${msg.data.instrument}`);
                 refreshSignals();
                 refreshActiveSignals();
+                refreshDecisionTimeline();
                 if (msg.data.latest_metrics) {
                     renderStrategyHUD({ latest_metrics: msg.data.latest_metrics });
                 }
@@ -320,8 +329,9 @@ function handleWsMessage(msg) {
                 refreshPositions();
                 refreshOrderBook();
                 refreshActiveSignals();
+                refreshDecisionTimeline();
                 // Auto-switch bottom panel to Trade History so user sees the new trade
-                switchBottomTab('trades');
+                switchBottomTab('execution');
                 break;
             }
         }
@@ -810,7 +820,7 @@ async function refreshSignals() {
 
 async function refreshOrderBook() {
     if (!isDocumentVisible()) return;
-    if (!isBottomTabActive('orderbook')) return;
+    if (!isBottomTabActive('execution')) return;
 
     try {
         const { data } = await api.getOrderBook();
@@ -861,6 +871,8 @@ async function refreshStatus() {
     try {
         const data = await api.getStatus();
         updateEngineStatus(data);
+        refreshSystemTimeline();
+        refreshRailInstrumentContext();
     } catch (e) {
         console.error("Failed to refresh status", e);
     }
@@ -889,12 +901,63 @@ function updateEngineStatus(status) {
     const autoToggle = document.getElementById("toggle-automode");
     if (autoToggle) autoToggle.checked = status.auto_mode;
 
+    const paperRail = document.getElementById('toggle-papermode-rail');
+    if (paperRail) paperRail.checked = !!status.paper_trading;
+
+    const strategyToggle = document.getElementById('toggle-strategy-enabled');
+    const activeParams = status?.active_strategies?.[0]?.params || {};
+    if (strategyToggle) strategyToggle.checked = activeParams.enabled !== false;
+
     document.getElementById("auto-mode-card")?.classList.toggle("active", status.auto_mode);
+
+    updateRailStatus(status);
 
     // Render OC insight from engine cache if available
     if (status.oc_insight) {
         renderOcInsight(status.oc_insight);
     }
+}
+
+function updateRailStatus(status) {
+    const riskCap = Number(status?.risk_controls?.trading_capital || 0);
+    const maxDailyLossPct = Number(status?.risk_controls?.max_daily_loss_pct || 0);
+    const dailyPnl = Number(status?.daily_pnl || 0);
+    const maxLossAbs = riskCap > 0 && maxDailyLossPct > 0 ? (riskCap * maxDailyLossPct / 100) : 0;
+    const lossUsedPct = maxLossAbs > 0 && dailyPnl < 0 ? Math.min(100, (Math.abs(dailyPnl) / maxLossAbs) * 100) : 0;
+    const pendingEntries = Number(status?.pending_entries_count || 0);
+    const managedCount = Number(status?.managed_positions_count || 0);
+    const maxOpenTrades = Number(status?.risk_controls?.max_open_trades || 0);
+    const rejections = Number(status?.rejections_today || 0);
+    const signals = Number(status?.signals_today || 0);
+    const rejRate = (signals + rejections) > 0 ? (rejections / (signals + rejections)) * 100 : 0;
+
+    updateElementText('rail-daily-loss-used', `${lossUsedPct.toFixed(1)}%`);
+    updateElementText('rail-open-risk', `${managedCount + pendingEntries}`);
+    updateElementText('rail-max-positions', `${managedCount} / ${maxOpenTrades || '-'}`);
+    updateElementText('rail-pending-entries', `${pendingEntries}`);
+    updateElementText('rail-rejection-rate', `${rejRate.toFixed(1)}%`);
+
+    const fill = document.getElementById('risk-thermometer-fill');
+    if (fill) fill.style.height = `${lossUsedPct.toFixed(1)}%`;
+
+    const warn = document.getElementById('rail-risk-warning');
+    if (warn) {
+        warn.classList.remove('danger', 'safe');
+        if (lossUsedPct >= 80) {
+            warn.classList.add('danger');
+            warn.textContent = 'Risk Critical: Reduce exposure now';
+        } else if (lossUsedPct < 35) {
+            warn.classList.add('safe');
+            warn.textContent = 'Risk Normal';
+        } else {
+            warn.textContent = 'Risk Elevated';
+        }
+    }
+
+    const symbolTxt = currentInstrumentName || currentInstrumentKey || '-';
+    updateElementText('rail-symbol', symbolTxt);
+    const ltpElement = document.getElementById('inst-ltp');
+    updateElementText('rail-ltp', ltpElement ? ltpElement.textContent : '-');
 }
 
 function setExecutionProbeResult(html, state = 'neutral') {
@@ -1426,12 +1489,267 @@ window.deleteActiveSignal = async (id) => {
 };
 
 window.refreshSignalRejections = refreshSignalRejections;
+function initBottomPanelState() {
+    const savedFilter = localStorage.getItem(DECISION_FILTER_KEY) || 'all';
+    const filterEl = document.getElementById('decision-filter');
+    if (filterEl) filterEl.value = savedFilter;
 
+    const snap = localStorage.getItem(BOTTOM_SNAP_KEY) || '28';
+    setBottomPanelSnap(snap);
+
+    try {
+        const parsed = JSON.parse(localStorage.getItem(DECISION_EXPANDED_KEY) || '[]');
+        decisionExpanded = new Set(Array.isArray(parsed) ? parsed : []);
+    } catch {
+        decisionExpanded = new Set();
+    }
+
+    const tab = localStorage.getItem(BOTTOM_TAB_KEY) || 'decisions';
+    switchBottomTab(tab);
+}
+
+function setBottomPanelSnap(level) {
+    const panel = document.getElementById('bottom-panel');
+    if (!panel) return;
+    panel.classList.remove('snap-28', 'snap-45', 'snap-hidden');
+    const safe = ['28', '45', 'hidden'].includes(String(level)) ? String(level) : '28';
+    panel.classList.add(`snap-${safe}`);
+    localStorage.setItem(BOTTOM_SNAP_KEY, safe);
+}
+
+function switchBottomTab(tabId) {
+    const safe = ['decisions', 'execution', 'system'].includes(tabId) ? tabId : 'decisions';
+    const panel = document.getElementById('bottom-panel');
+    if (!panel) return;
+
+    panel.querySelectorAll('.bottom-tab').forEach(btn => btn.classList.remove('active'));
+    panel.querySelectorAll('.bottom-content').forEach(el => el.classList.remove('active'));
+
+    panel.querySelectorAll('.bottom-tab').forEach(btn => {
+        const onclick = btn.getAttribute('onclick') || '';
+        if (onclick.includes(`'${safe}'`) || onclick.includes(`\"${safe}\"`)) btn.classList.add('active');
+    });
+
+    const content = document.getElementById(`tab-${safe}`);
+    if (content) content.classList.add('active');
+
+    localStorage.setItem(BOTTOM_TAB_KEY, safe);
+
+    if (safe === 'execution') {
+        refreshPositions();
+        refreshOrderBook();
+        refreshTrades();
+    } else if (safe === 'decisions') {
+        refreshDecisionTimeline();
+    } else if (safe === 'system') {
+        refreshSystemTimeline();
+    }
+}
+
+function persistDecisionExpanded() {
+    localStorage.setItem(DECISION_EXPANDED_KEY, JSON.stringify(Array.from(decisionExpanded).slice(-200)));
+}
+
+function buildDecisionClass(event) {
+    if (event.severity === 'danger') return 'decision-danger';
+    if (event.severity === 'warning') return 'decision-warning';
+    return 'decision-success';
+}
+
+function buildDecisionChip(outcome, severity) {
+    const cls = severity === 'danger' ? 'danger' : (severity === 'warning' ? 'warning' : 'success');
+    return `<span class="decision-outcome-chip ${cls}">${outcome}</span>`;
+}
+
+async function refreshDecisionTimeline() {
+    const body = document.getElementById('decision-timeline-body');
+    if (!body) return;
+    if (!isDocumentVisible()) return;
+    if (!isBottomTabActive('decisions')) return;
+
+    const filter = document.getElementById('decision-filter')?.value || 'all';
+    localStorage.setItem(DECISION_FILTER_KEY, filter);
+
+    try {
+        const [signalsRes, rejectionsRes, tradesRes, statusRes] = await Promise.allSettled([
+            api.getSignals(),
+            api.getRejections(60),
+            api.getPaperTrades(80),
+            api.getStatus(),
+        ]);
+
+        const signals = signalsRes.status === 'fulfilled' ? (signalsRes.value?.data || signalsRes.value?.signals || []) : [];
+        const rejections = rejectionsRes.status === 'fulfilled' ? (rejectionsRes.value?.rejections || []) : [];
+        const trades = tradesRes.status === 'fulfilled' ? (tradesRes.value?.data || []) : [];
+        const status = statusRes.status === 'fulfilled' ? statusRes.value : {};
+
+        const events = [];
+
+        signals.forEach((s, idx) => {
+            events.push({
+                id: `sig-${idx}-${s.timestamp || ''}-${s.instrument || s.instrument_key || ''}`,
+                ts: new Date(s.timestamp || Date.now()).getTime(),
+                time: s.timestamp || '-',
+                stage: 'Signal Evaluated',
+                instrument: s.instrument || s.instrument_key || '-',
+                outcome: 'Passed',
+                reason: `Action ${s.action || '-'} @ ${s.price != null ? `₹${formatPrice(Number(s.price))}` : '-'}`,
+                severity: 'success',
+                detail: s,
+            });
+        });
+
+        rejections.forEach((r, idx) => {
+            events.push({
+                id: `rej-${idx}-${r.timestamp || ''}-${r.instrument_key || ''}`,
+                ts: Date.now() - idx,
+                time: r.timestamp || '-',
+                stage: 'Signal Evaluated',
+                instrument: r.instrument || r.instrument_key || '-',
+                outcome: 'Blocked',
+                reason: r.reason || 'Rejected',
+                severity: 'danger',
+                detail: r,
+            });
+        });
+
+        trades.forEach((t, idx) => {
+            const tsMs = new Date(t.timestamp || Date.now()).getTime();
+            const statusText = String(t.status || '').toLowerCase();
+            const isPending = statusText.includes('pending');
+            const isErr = statusText.includes('rejected') || statusText.includes('cancelled') || statusText.includes('failed');
+            const outcome = isErr ? 'Skipped' : (isPending ? 'Pending' : 'Executed');
+            const severity = isErr ? 'danger' : (isPending ? 'warning' : 'success');
+            const meta = t.metadata || {};
+            events.push({
+                id: `tr-${idx}-${t.id || ''}`,
+                ts: Number.isFinite(tsMs) ? tsMs : (Date.now() - idx),
+                time: t.timestamp ? new Date(t.timestamp).toLocaleTimeString('en-IN', { hour12: false }) : '-',
+                stage: 'Execution',
+                instrument: t.instrument_key || '-',
+                outcome,
+                reason: meta._last_execution_error || statusText || 'Order lifecycle update',
+                severity,
+                detail: {
+                    ...t,
+                    option_snapshot: meta.option_snapshot,
+                    oc_analysis: meta.oc_analysis,
+                    atr: meta.atr,
+                    option_quality_regime: meta.option_quality_regime,
+                    option_quality_thresholds: meta.option_quality_thresholds,
+                },
+            });
+        });
+
+        const pendingManaged = Array.isArray(status?.managed_positions) ? status.managed_positions.filter(p => p.execution_state === 'entry_pending') : [];
+        pendingManaged.forEach((p, idx) => {
+            events.push({
+                id: `pd-${idx}-${p.instrument || ''}`,
+                ts: Date.now() - idx,
+                time: '-',
+                stage: 'Execution',
+                instrument: p.instrument || '-',
+                outcome: 'Pending',
+                reason: `Awaiting broker fill confirmation (${p.entry_pending_age_sec || 0}s/${p.entry_timeout_sec || '-'}s)`,
+                severity: 'warning',
+                detail: p,
+            });
+        });
+
+        let filtered = events.sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 120);
+        if (filter === 'blocked') filtered = filtered.filter(e => e.outcome === 'Blocked');
+        if (filter === 'executed') filtered = filtered.filter(e => e.outcome === 'Executed');
+        if (filter === 'pending') filtered = filtered.filter(e => e.outcome === 'Pending');
+        if (filter === 'error') filtered = filtered.filter(e => e.severity === 'danger');
+
+        body.innerHTML = '';
+        if (!filtered.length) {
+            body.innerHTML = `<tr><td colspan="5" style="text-align:center; padding: 20px;" class="text-muted">No timeline events for selected filter</td></tr>`;
+            return;
+        }
+
+        filtered.forEach((event) => {
+            const row = document.createElement('tr');
+            row.className = `decision-event-row ${buildDecisionClass(event)}`;
+            row.innerHTML = `
+                <td class="text-muted">${event.time}</td>
+                <td>${event.stage}</td>
+                <td class="mono">${event.instrument}</td>
+                <td>${buildDecisionChip(event.outcome, event.severity)}</td>
+                <td>${event.reason || '-'}</td>
+            `;
+            row.addEventListener('click', () => {
+                if (decisionExpanded.has(event.id)) decisionExpanded.delete(event.id);
+                else decisionExpanded.add(event.id);
+                persistDecisionExpanded();
+                refreshDecisionTimeline();
+            });
+            body.appendChild(row);
+
+            if (decisionExpanded.has(event.id)) {
+                const detail = document.createElement('tr');
+                detail.className = 'decision-detail-row';
+                detail.innerHTML = `
+                    <td colspan="5">
+                        <strong>Metadata</strong><br>
+                        <pre style="white-space: pre-wrap; margin-top:6px; font-size:0.72rem;">${JSON.stringify(event.detail || {}, null, 2)}</pre>
+                    </td>
+                `;
+                body.appendChild(detail);
+            }
+        });
+    } catch (e) {
+        console.error('Failed to render decision timeline', e);
+    }
+}
+
+async function refreshSystemTimeline() {
+    const connEl = document.getElementById('system-connectivity-timeline');
+    const healthEl = document.getElementById('system-health-timeline');
+    if (!connEl || !healthEl) return;
+    if (!isDocumentVisible()) return;
+
+    try {
+        const [status, proxy, market] = await Promise.all([
+            api.getStatus(),
+            api.getProxyStatus(true),
+            api.getMarketStatus(),
+        ]);
+
+        const wsLive = ws.isConnected();
+        const authText = document.getElementById('auth-status-text')?.innerText || 'Unknown';
+        const tokenValid = !!proxy?.data?.token_valid;
+        const egress = proxy?.data?.egress_ip || proxy?.data?.egress_ip_error || 'Unavailable';
+        const pending = Number(status?.pending_entries_count || 0);
+        const rej = Number(status?.rejections_today || 0);
+
+        connEl.innerHTML = [
+            `<div class="system-event ${wsLive ? 'ok' : 'bad'}">WebSocket: ${wsLive ? 'Connected' : 'Disconnected'}</div>`,
+            `<div class="system-event ${market?.market_open ? 'ok' : 'warn'}">Market: ${market?.market_open ? 'Open' : 'Closed'}</div>`,
+            `<div class="system-event ${pending > 0 ? 'warn' : 'ok'}">Pending entries: ${pending}</div>`,
+        ].join('');
+
+        healthEl.innerHTML = [
+            `<div class="system-event ${authText.toLowerCase().includes('valid') ? 'ok' : 'bad'}">Auth: ${authText}</div>`,
+            `<div class="system-event ${tokenValid ? 'ok' : 'bad'}">Proxy token: ${tokenValid ? 'Valid' : 'Invalid'}</div>`,
+            `<div class="system-event ${rej > 0 ? 'warn' : 'ok'}">Rejections today: ${rej}</div>`,
+            `<div class="system-event ${egress === 'Unavailable' ? 'warn' : 'ok'}">Egress: ${egress}</div>`,
+        ].join('');
+
+        updateElementText('rail-auth-health', authText);
+        updateElementText('rail-proxy-route', proxy?.data?.requests_proxy_active ? 'Proxy Active' : 'Direct');
+    } catch (e) {
+        console.error('Failed to refresh system timeline', e);
+    }
+}
 
 
 // Window globals for legacy onclick handlers
 window.selectInstrument = selectInstrument;
-window.switchBottomTab = (tabId) => switchTab('bottom-panel', `tab-${tabId}`);
+window.switchBottomTab = switchBottomTab;
+window.setBottomPanelSnap = setBottomPanelSnap;
+window.refreshDecisionTimeline = refreshDecisionTimeline;
+window.refreshSystemTimeline = refreshSystemTimeline;
 window.setChartTimeframe = (interval) => {
     state.set('currentInterval', interval);
 
@@ -1465,6 +1783,125 @@ window.initializeEngine = async () => {
     }
 };
 
+window.pauseEngineNow = async () => {
+    try {
+        await api.setAutoMode(false);
+        showToast('Engine paused', 'warning');
+        refreshStatus();
+    } catch (e) {
+        showToast('Failed to pause engine', 'error');
+    }
+};
+
+window.flattenAllNow = async () => {
+    try {
+        await api.squareOffAll();
+        showToast('Flatten all initiated', 'warning');
+        await Promise.all([refreshStatus(), refreshPositions(), refreshTrades(), refreshOrderBook()]);
+    } catch (e) {
+        showToast('Flatten all failed', 'error');
+    }
+};
+
+window.reloadDataNow = async () => {
+    try {
+        await Promise.all([
+            fetchHistoricalCandles(),
+            refreshStatus(),
+            refreshPositions(),
+            refreshTrades(),
+            refreshOrderBook(),
+            refreshDecisionTimeline(),
+            refreshSystemTimeline(),
+        ]);
+        showToast('Data reloaded', 'success');
+    } catch (e) {
+        showToast('Reload failed', 'error');
+    }
+};
+
+window.reconnectWSNow = async () => {
+    try {
+        ws.reconnect();
+        showToast('Reconnecting WebSocket...', 'info');
+    } catch (e) {
+        showToast('Reconnect failed', 'error');
+    }
+};
+
+window.emergencyHaltNow = async () => {
+    try {
+        await api.setAutoMode(false);
+        await api.squareOffAll();
+        showToast('Emergency halt executed', 'warning');
+        await Promise.all([refreshStatus(), refreshPositions(), refreshOrderBook(), refreshTrades()]);
+    } catch (e) {
+        showToast('Emergency halt failed', 'error');
+    }
+};
+
+window.toggleStrategyRuntime = async (enabled) => {
+    try {
+        const selector = document.getElementById('strategy-selector');
+        if (!selector || selector.options.length === 0) {
+            showToast('No strategy selected', 'warning');
+            return;
+        }
+
+        const strategyClass = selector.options[selector.selectedIndex].dataset.class;
+        const name = selector.options[selector.selectedIndex].text;
+        const params = getDynamicParams();
+        params.enabled = !!enabled;
+
+        await api.loadStrategy({
+            strategy_class: strategyClass,
+            name,
+            instruments: currentInstrumentKey,
+            timeframe: currentInterval,
+            paper_trading: document.getElementById('toggle-papermode-rail')?.checked ?? true,
+            params: JSON.stringify(params),
+            replace_existing: true,
+        });
+        showToast(`Strategy ${enabled ? 'enabled' : 'disabled'}`, enabled ? 'success' : 'warning');
+        refreshStatus();
+    } catch (e) {
+        showToast('Failed to change strategy runtime state', 'error');
+    }
+};
+
+async function refreshRailInstrumentContext() {
+    updateElementText('rail-symbol', currentInstrumentName || currentInstrumentKey || '-');
+    const liveLtp = document.getElementById('inst-ltp')?.textContent || '-';
+    updateElementText('rail-ltp', liveLtp);
+
+    try {
+        const res = await api.getPaperTrades(40);
+        const rows = res?.data || [];
+        const row = rows.find(r => (r.instrument_key || '') === currentInstrumentKey) || rows[0];
+        const meta = row?.metadata || {};
+        const snapshot = meta.option_snapshot || {};
+        const bid = Number(snapshot.bid || 0);
+        const ask = Number(snapshot.ask || 0);
+        let spreadText = 'N/A';
+        if (bid > 0 && ask > 0 && ask >= bid) {
+            const mid = (bid + ask) / 2;
+            const pct = mid > 0 ? ((ask - bid) / mid) * 100 : 0;
+            spreadText = `${pct.toFixed(2)}%`;
+        }
+        updateElementText('rail-spread', spreadText);
+
+        const oi = Number(snapshot.oi || 0);
+        const vol = Number(snapshot.volume || 0);
+        const ltp = Number(snapshot.ltp || 0);
+        const spreadPenalty = spreadText !== 'N/A' ? Number(spreadText.replace('%', '')) * 8 : 10;
+        const liqScore = Math.max(0, Math.min(100, (Math.min(35, vol / 70) + Math.min(35, oi / 1000) + Math.min(30, ltp / 8)) - spreadPenalty));
+        updateElementText('rail-liquidity-score', Number.isFinite(liqScore) ? `${liqScore.toFixed(1)}/100` : 'N/A');
+    } catch {
+        updateElementText('rail-spread', 'N/A');
+        updateElementText('rail-liquidity-score', 'N/A');
+    }
+}
+
 window.runCycle = async () => {
     try {
         showToast("Running engine cycle...", "info");
@@ -1482,6 +1919,7 @@ window.clearTradeHistory = async () => {
         await api.clearPaperTrades();
         tradeRowCache.clear();
         await refreshTrades();
+        await refreshDecisionTimeline();
         showToast('Trade history cleared', 'success');
     } catch (e) {
         showToast('Failed to clear trade history', 'error');
@@ -1722,6 +2160,10 @@ window.toggleSandboxMode = async (enabled) => {
 window.togglePaperMode = async (enabled) => {
     try {
         await api.updateConfig({ paper_trading: enabled });
+        const railToggle = document.getElementById('toggle-papermode-rail');
+        if (railToggle) railToggle.checked = enabled;
+        const settingsToggle = document.getElementById('toggle-papermode');
+        if (settingsToggle) settingsToggle.checked = enabled;
         showToast(`Paper Trading ${enabled ? 'Enabled' : 'Disabled'}`, 'info');
         refreshStatus();
     } catch (e) {
@@ -1944,6 +2386,7 @@ async function loadSettingsIntoUI() {
         if (document.getElementById('setting-sandbox-key')) document.getElementById('setting-sandbox-key').value = settings.SANDBOX_API_KEY || '';
         if (document.getElementById('toggle-sandboxmode')) document.getElementById('toggle-sandboxmode').checked = settings.USE_SANDBOX || false;
         if (document.getElementById('toggle-papermode')) document.getElementById('toggle-papermode').checked = settings.PAPER_TRADING ?? true;
+        if (document.getElementById('toggle-papermode-rail')) document.getElementById('toggle-papermode-rail').checked = settings.PAPER_TRADING ?? true;
 
         // Network / Proxy
         if (document.getElementById('setting-upstox-proxy-url')) document.getElementById('setting-upstox-proxy-url').value = settings.UPSTOX_PROXY_URL || '';

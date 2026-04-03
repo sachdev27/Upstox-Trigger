@@ -81,6 +81,14 @@ async def run_cycle():
     }
 
 
+@router.post("/square-off")
+async def square_off_all():
+    """Force-exit all managed positions immediately."""
+    engine = get_engine()
+    await engine.square_off_all()
+    return {"status": "success"}
+
+
 @router.post("/auto-mode")
 async def toggle_auto_mode(enabled: bool):
     """Enable or disable autonomous trading loop."""
