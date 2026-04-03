@@ -389,7 +389,19 @@ class ExecutionProcessor(SignalProcessor):
         else:
             try:
                 # ── GTT Order: single call places ENTRY + TARGET + STOPLOSS ──
-                trailing_gap = float((config.params or {}).get("trailing_gap", 0.0))
+                # Compute trailing_gap from signal metadata: trailing_atr_mult × ATR.
+                # ScalpPro (and other strategies) store these in metadata at signal time.
+                # Fallback: explicit "trailing_gap" param in config, then 0.0 (which
+                # causes place_gtt_signal to use the full SL distance as the gap).
+                _meta_atr = float(meta.get("atr") or 0.0)
+                _meta_trail_mult = float(
+                    meta.get("trailing_atr_mult")
+                    or (config.params or {}).get("trailing_atr_mult", 0.0)
+                )
+                if _meta_atr > 0 and _meta_trail_mult > 0:
+                    trailing_gap = round(_meta_atr * _meta_trail_mult, 2)
+                else:
+                    trailing_gap = float((config.params or {}).get("trailing_gap", 0.0))
                 result = await asyncio.to_thread(
                     engine._order_service.place_gtt_signal, signal, trailing_gap
                 )
