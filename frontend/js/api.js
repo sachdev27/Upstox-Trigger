@@ -229,6 +229,9 @@ export const api = {
             method: 'POST'
         }).then(r => r.json());
     },
+    async getProxyStatus(checkIp = true) {
+        return fetch(`${API_BASE}/monitoring/network/proxy-status?check_ip=${checkIp ? 'true' : 'false'}`).then(r => r.json());
+    },
 
     // Watchlist
     async getWatchlist() {

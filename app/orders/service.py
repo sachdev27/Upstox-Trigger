@@ -49,9 +49,9 @@ class OrderService:
         self._check_risk_limits()
 
         if (not getattr(self.config, "sandbox", False)) and self.require_algo_name and not self.algo_name:
-            raise RuntimeError(
-                "Live order blocked: ALGO_NAME is required for X-Algo-Name header. "
-                "Set ALGO_NAME in settings."
+            logger.warning(
+                "REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS=True but ALGO_NAME is empty. "
+                "Proceeding without X-Algo-Name header."
             )
 
         self._apply_order_defaults(order)
@@ -489,17 +489,28 @@ class OrderService:
         """
         import json as _json
         import requests as http_requests
+        from app.network_proxy import get_requests_proxies
 
         self._check_risk_limits()
 
         if (not getattr(self.config, "sandbox", False)) and self.require_algo_name and not self.algo_name:
-            raise RuntimeError(
-                "Live GTT order blocked: ALGO_NAME is required. Set ALGO_NAME in settings."
+            logger.warning(
+                "REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS=True but ALGO_NAME is empty. "
+                "Proceeding with GTT placement without X-Algo-Name header."
             )
 
         url = "https://api.upstox.com/v3/order/gtt/place"
         logger.info(f"GTT request payload:\n{_json.dumps(gtt_params, indent=2)}")
-        resp = http_requests.post(url, json=gtt_params, headers=self._gtt_headers(), timeout=15)
+        proxies = get_requests_proxies(self.settings)
+        if proxies:
+            logger.info("Routing GTT request via configured proxy.")
+        resp = http_requests.post(
+            url,
+            json=gtt_params,
+            headers=self._gtt_headers(),
+            proxies=proxies or None,
+            timeout=15,
+        )
 
         if resp.status_code >= 400:
             logger.error(f"GTT placement failed ({resp.status_code}): {resp.text}")

@@ -1488,13 +1488,25 @@ window.triggerTestSignalWithAction = async (action = 'BUY') => {
 };
 
 window.saveSettings = async () => {
+    const apiVersion = document.getElementById('setting-api-version')?.value;
     const key = document.getElementById('setting-api-key').value;
     const secret = document.getElementById('setting-api-secret').value;
+    const authCode = document.getElementById('setting-auth-code')?.value;
+    const accessToken = document.getElementById('setting-access-token')?.value;
+    const algoName = document.getElementById('setting-algo-name')?.value;
+    const algoId = document.getElementById('setting-algo-id')?.value;
+    const orderApiVersion = document.getElementById('setting-order-api-version')?.value;
     const uri = document.getElementById('setting-redirect-uri').value;
 
     const payload = {};
+    if (apiVersion) payload.API_VERSION = apiVersion;
     if (key && !key.includes('...')) payload.API_KEY = key;
     if (secret && !secret.includes('***')) payload.API_SECRET = secret;
+    if (authCode && !authCode.includes('***')) payload.AUTH_CODE = authCode;
+    if (accessToken && !accessToken.includes('***')) payload.ACCESS_TOKEN = accessToken;
+    if (algoName !== undefined) payload.ALGO_NAME = algoName;
+    if (algoId !== undefined) payload.ALGO_ID = algoId;
+    if (orderApiVersion) payload.ORDER_API_VERSION = orderApiVersion;
     if (uri) payload.REDIRECT_URI = uri;
 
     try {
@@ -1502,6 +1514,44 @@ window.saveSettings = async () => {
         showToast("API Configuration Saved", "success");
     } catch (e) {
         showToast("Failed to save settings", "error");
+    }
+};
+
+window.clearApiCredentials = async () => {
+    const payload = {
+        API_KEY: "",
+        API_SECRET: "",
+        AUTH_CODE: "",
+        ACCESS_TOKEN: "",
+        ALGO_NAME: "",
+        ALGO_ID: "",
+    };
+
+    try {
+        await api.saveSettings(payload);
+        showToast("API credentials cleared", "success");
+        await loadSettingsIntoUI();
+    } catch (e) {
+        showToast("Failed to clear API credentials", "error");
+    }
+};
+
+window.saveAdvancedSettings = async () => {
+    const raw = document.getElementById('setting-advanced-json')?.value || '{}';
+    let payload;
+    try {
+        payload = JSON.parse(raw);
+    } catch (e) {
+        showToast('Advanced settings JSON is invalid', 'error');
+        return;
+    }
+
+    try {
+        await api.saveSettings(payload);
+        showToast('Advanced settings saved', 'success');
+        await loadSettingsIntoUI();
+    } catch (e) {
+        showToast('Failed to save advanced settings', 'error');
     }
 };
 
@@ -1543,8 +1593,49 @@ window.saveNetworkSettings = async () => {
     try {
         await api.saveSettings(payload);
         showToast("Network/Proxy settings saved", "success");
+        await refreshNetworkDiagnostics();
     } catch (e) {
         showToast("Failed to save Network/Proxy settings", "error");
+    }
+};
+
+window.refreshNetworkDiagnostics = async () => {
+    const summary = document.getElementById('network-diag-summary');
+    const grid = document.getElementById('network-diag-grid');
+    if (!summary || !grid) return;
+
+    summary.textContent = 'Refreshing diagnostics...';
+    grid.innerHTML = '';
+
+    try {
+        const res = await api.getProxyStatus(true);
+        const data = res?.data || {};
+
+        const tokenState = data.token_valid ? 'Valid' : `Invalid (${data.token_reason || 'unknown'})`;
+        const egress = data.egress_ip || data.egress_ip_error || 'Unavailable';
+
+        summary.innerHTML = `Egress IP: <strong>${egress}</strong><br>Token: <strong>${tokenState}</strong>`;
+
+        const rows = [
+            ['SDK proxy enabled', data.apply_upstox_sdk_proxy ? 'Yes' : 'No'],
+            ['SDK proxy configured', data.upstox_proxy_configured ? 'Yes' : 'No'],
+            ['Requests proxy active', data.requests_proxy_active ? 'Yes' : 'No'],
+            ['HTTP proxy configured', data.requests_http_proxy_configured ? 'Yes' : 'No'],
+            ['HTTPS proxy configured', data.requests_https_proxy_configured ? 'Yes' : 'No'],
+            ['Process proxy env', data.all_proxy_env_configured ? 'Yes' : 'No'],
+            ['Require proxy', data.require_upstox_proxy ? 'Yes' : 'No'],
+            ['Algo name configured', data.algo_name_configured ? `Yes (${data.algo_name || ''})` : 'No'],
+        ];
+
+        grid.innerHTML = rows.map(([label, value]) => (
+            `<div style="padding:8px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary);">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">${label}</div>
+                <div style="font-weight:600; color: var(--text-primary);">${value}</div>
+            </div>`
+        )).join('');
+    } catch (e) {
+        summary.textContent = 'Failed to load diagnostics';
+        grid.innerHTML = `<div style="color: var(--accent-danger);">${e.message || 'Unknown error'}</div>`;
     }
 };
 
@@ -1789,8 +1880,18 @@ async function loadSettingsIntoUI() {
     try {
         const settings = await api.getSettings();
 
+        const adv = document.getElementById('setting-advanced-json');
+        if (adv) adv.value = JSON.stringify(settings, null, 2);
+
         // General
+        if (document.getElementById('setting-api-version')) document.getElementById('setting-api-version').value = settings.API_VERSION || '2.0';
         if (document.getElementById('setting-api-key')) document.getElementById('setting-api-key').value = settings.API_KEY || '';
+        if (document.getElementById('setting-api-secret')) document.getElementById('setting-api-secret').value = settings.API_SECRET || '';
+        if (document.getElementById('setting-auth-code')) document.getElementById('setting-auth-code').value = settings.AUTH_CODE || '';
+        if (document.getElementById('setting-access-token')) document.getElementById('setting-access-token').value = settings.ACCESS_TOKEN || '';
+        if (document.getElementById('setting-algo-name')) document.getElementById('setting-algo-name').value = settings.ALGO_NAME || '';
+        if (document.getElementById('setting-algo-id')) document.getElementById('setting-algo-id').value = settings.ALGO_ID || '';
+        if (document.getElementById('setting-order-api-version')) document.getElementById('setting-order-api-version').value = settings.ORDER_API_VERSION || '3.0';
         if (document.getElementById('setting-redirect-uri')) document.getElementById('setting-redirect-uri').value = settings.REDIRECT_URI || '';
 
         // Sandbox & Modes
@@ -1805,6 +1906,7 @@ async function loadSettingsIntoUI() {
         if (document.getElementById('setting-apply-upstox-sdk-proxy')) document.getElementById('setting-apply-upstox-sdk-proxy').checked = settings.APPLY_UPSTOX_SDK_PROXY || false;
         if (document.getElementById('setting-require-upstox-proxy')) document.getElementById('setting-require-upstox-proxy').checked = settings.REQUIRE_UPSTOX_PROXY || false;
         if (document.getElementById('setting-apply-process-proxy-env')) document.getElementById('setting-apply-process-proxy-env').checked = settings.APPLY_PROCESS_PROXY_ENV || false;
+        await refreshNetworkDiagnostics();
 
         // Risk
         if (document.getElementById('risk-capital')) document.getElementById('risk-capital').value = settings.TRADING_CAPITAL || 100000;

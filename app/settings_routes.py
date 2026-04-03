@@ -89,8 +89,11 @@ async def get_current_settings():
     settings.load_from_db()
 
     return {
+        "API_VERSION": settings.API_VERSION,
         "API_KEY": _mask(settings.API_KEY) if settings.API_KEY else "",
         "API_SECRET": "********" if settings.API_SECRET else "",
+        "AUTH_CODE": "********" if settings.AUTH_CODE else "",
+        "ACCESS_TOKEN": "********" if settings.ACCESS_TOKEN else "",
         "REDIRECT_URI": settings.REDIRECT_URI,
         "ALGO_NAME": settings.ALGO_NAME,
         "ALGO_ID": settings.ALGO_ID,
@@ -124,6 +127,7 @@ async def get_current_settings():
         "SMTP_PASSWORD": "********" if settings.SMTP_PASSWORD else "",
         "EMAIL_RECIPIENT": settings.EMAIL_RECIPIENT,
         "NOTIFICATION_CHANNELS": settings.NOTIFICATION_CHANNELS,
+        "ENV_OVERRIDE_DB": settings.ENV_OVERRIDE_DB,
         "GTT_PRODUCT_TYPE": settings.GTT_PRODUCT_TYPE,
         "GTT_TRAILING_SL": settings.GTT_TRAILING_SL,
         "GTT_TRAILING_GAP_MODE": settings.GTT_TRAILING_GAP_MODE,
@@ -134,13 +138,17 @@ async def get_current_settings():
 
 
 @router.post("/")
-async def update_settings(updates: SettingsUpdate = Body(...)):
+async def update_settings(updates: dict = Body(...)):
     """Update settings — persisted to the database."""
     settings = get_settings()
     updated_keys = []
 
-    # Map the Pydantic model to a dict, excluding None values
-    update_data = updates.model_dump(exclude_none=True)
+    # Accept dynamic payloads from frontend and keep only valid setting keys.
+    allowed_keys = {k for k in vars(settings).keys() if k.isupper()}
+    update_data = {
+        str(k): v for k, v in (updates or {}).items()
+        if str(k).isupper() and str(k) in allowed_keys and v is not None
+    }
 
     for key, value in update_data.items():
         # Skip masked placeholder values (user didn't change them)

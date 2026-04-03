@@ -390,6 +390,7 @@ class MarketDataService:
         # Fallback: Upstox REST Instrument Search API
         try:
             import requests as _requests
+            from app.network_proxy import get_requests_proxies
             token = self.config.access_token
             if not token:
                 logger.warning("No access token for instrument search API")
@@ -410,6 +411,8 @@ class MarketDataService:
             parts = instrument_key.split("|")
             exchange = parts[0].split("_")[0] if "_" in parts[0] else "NSE"
 
+            proxies = get_requests_proxies(self.settings)
+
             resp = _requests.get(
                 "https://api.upstox.com/v2/instruments/search",
                 params={
@@ -422,6 +425,7 @@ class MarketDataService:
                     "Accept": "application/json",
                     "Authorization": f"Bearer {token}",
                 },
+                proxies=proxies or None,
                 timeout=5,
             )
             if resp.status_code == 200:

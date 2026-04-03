@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     ALGO_NAME: str = ""
     ALGO_ID: str = ""
     ORDER_API_VERSION: str = "3.0"
-    REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS: bool = True
+    REQUIRE_ALGO_NAME_FOR_LIVE_ORDERS: bool = False
     AUTO_SLICE_ORDERS: bool = True
     DEFAULT_MARKET_PROTECTION: int = -1
 

@@ -178,6 +178,10 @@
                         <div class="settings-card">
                             <h4>API Credentials</h4>
                             <div class="form-group">
+                                <label class="form-label">API Version</label>
+                                <input type="text" id="setting-api-version" class="form-input" placeholder="2.0">
+                            </div>
+                            <div class="form-group">
                                 <label class="form-label">Upstox API Key</label>
                                 <input type="text" id="setting-api-key" class="form-input" placeholder="Loading...">
                             </div>
@@ -186,10 +190,33 @@
                                 <input type="password" id="setting-api-secret" class="form-input" placeholder="********">
                             </div>
                             <div class="form-group">
+                                <label class="form-label">Auth Code</label>
+                                <input type="password" id="setting-auth-code" class="form-input" placeholder="********">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Access Token</label>
+                                <input type="password" id="setting-access-token" class="form-input" placeholder="********">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Algo Name</label>
+                                <input type="text" id="setting-algo-name" class="form-input" placeholder="scalpro">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Algo ID</label>
+                                <input type="text" id="setting-algo-id" class="form-input" placeholder="optional">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Order API Version</label>
+                                <input type="text" id="setting-order-api-version" class="form-input" placeholder="3.0">
+                            </div>
+                            <div class="form-group">
                                 <label class="form-label">Redirect URI</label>
                                 <input type="text" id="setting-redirect-uri" class="form-input" placeholder="Loading...">
                             </div>
-                            <button class="btn btn-primary" onclick="saveSettings()">Save API Configuration</button>
+                            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                                <button class="btn btn-primary" onclick="saveSettings()">Save API Configuration</button>
+                                <button class="btn btn-outline" onclick="clearApiCredentials()">Clear API Credentials</button>
+                            </div>
                         </div>
                         <div class="settings-card">
                             <h4>Sandbox Credentials</h4>
@@ -284,6 +311,25 @@
                                 <input type="text" id="setting-requests-https-proxy" class="form-input" placeholder="http://user:pass@host:3128">
                             </div>
                             <button class="btn btn-outline" onclick="window.saveNetworkSettings && window.saveNetworkSettings()">Save Network / Proxy Settings</button>
+                            <div class="settings-card" style="background: rgba(33,150,243,0.05); border-color: var(--accent-primary); margin-top: 16px; padding: 16px;">
+                                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px;">
+                                    <h4 style="margin:0; color: var(--accent-primary); font-size: 0.8rem;">Proxy Diagnostics</h4>
+                                    <button class="btn btn-outline" onclick="refreshNetworkDiagnostics()">Refresh Diagnostics</button>
+                                </div>
+                                <div id="network-diag-summary" style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 10px;">Loading diagnostics...</div>
+                                <div id="network-diag-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size:0.75rem;"></div>
+                            </div>
+                        </div>
+                        <div class="settings-card" style="grid-column: span 2;">
+                            <h4>Advanced Settings (JSON)</h4>
+                            <p class="text-muted" style="font-size:0.75rem; margin-bottom:10px;">
+                                Edit any uppercase settings key here (for example: API_VERSION, HOST, PORT, DEBUG, LOG_LEVEL, ENV_OVERRIDE_DB).
+                            </p>
+                            <textarea id="setting-advanced-json" class="form-input" style="min-height: 180px; font-family: monospace;" placeholder='{"API_VERSION":"2.0","LOG_LEVEL":"INFO"}'></textarea>
+                            <div style="display:flex; gap:8px; margin-top:10px;">
+                                <button class="btn btn-outline" onclick="saveAdvancedSettings()">Save Advanced Settings</button>
+                                <button class="btn btn-outline" onclick="loadSettingsIntoUI()">Reload Settings Snapshot</button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -696,6 +742,6 @@
 
     <!-- Modularized JS -->
 
-    <script type="module" src="/static/js/app.js?v=10"></script>
+    <script type="module" src="/static/js/app.js?v=12"></script>
 </body>
 </html>
